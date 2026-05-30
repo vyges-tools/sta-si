@@ -64,6 +64,7 @@ the slot where OpenSTA runs inside LibreLane.
 ## Use it
 
 ```sh
+# prebuilt binaries: dist/<triple>/vyges-sta-si  (or build it yourself:)
 cargo build --release            # std-only, no external deps
 
 vyges-sta-si run  top.sta -o top.rpt           # analyze -> timing report
