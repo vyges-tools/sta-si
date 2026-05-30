@@ -53,8 +53,8 @@ A late OCV derate is applied to cell delays.
 ```
 
 You run it **after synthesis and place-and-route** (you need a gate-level
-netlist), with the **`.lib`** from your PDK or [`vyges-char`](#) and — for
-accuracy — the **`.spef`** from [`vyges-extract`](#). You run it **before
+netlist), with the **`.lib`** from your PDK or `vyges-char` and — for
+accuracy — the **`.spef`** from `vyges-extract`. You run it **before
 tape-out**, every time you change RTL, floorplan, or constraints. What it gives
 you is the **answer to "does it meet timing, and if not, where?"** — the worst
 path tells you the exact gates and arrival times, so you decide whether to sign
