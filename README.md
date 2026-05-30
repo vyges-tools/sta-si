@@ -66,9 +66,12 @@ the slot where OpenSTA runs inside LibreLane.
 ```sh
 cargo build --release            # std-only, no external deps
 
-vyges-sta-si run  top.sta -o top.rpt   # analyze -> timing report
-vyges-sta-si check top.sta             # validate the job + inputs
-vyges-sta-si demo                      # analyze a built-in 2-gate design
+vyges-sta-si run  top.sta -o top.rpt           # analyze -> timing report
+vyges-sta-si run  top.sta --json               # machine-readable WNS/TNS/path
+vyges-sta-si run  top.sta --fail-on-violation  # exit 3 if WNS < 0 (CI gate)
+vyges-sta-si check top.sta                     # validate the job + inputs
+vyges-sta-si demo                              # analyze a built-in 2-gate design
+# common flags: -o FILE · --json · -q/--quiet · -v/--verbose · -h/--help · -V/--version
 ```
 
 A job (`*.sta`) is a few `key: value` lines:
