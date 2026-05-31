@@ -342,6 +342,15 @@ fn parse_pin(name: String, body: &str) -> Pin {
         match simple_attr(&tbody, "timing_type").as_deref() {
             Some(tt) if tt.starts_with("setup") => setup.push(parse_constraint(&tbody)),
             Some(tt) if tt.starts_with("hold") => hold.push(parse_constraint(&tbody)),
+            // async set/reset (clear/preset) and check arcs (recovery/removal/
+            // pulse_width) are NOT max-delay data arcs — don't propagate data through
+            // them (e.g. dfrtp RESET_B->Q is an async clear, not a launch path).
+            Some(tt)
+                if tt.starts_with("clear")
+                    || tt.starts_with("preset")
+                    || tt.starts_with("recovery")
+                    || tt.starts_with("removal")
+                    || tt.contains("pulse_width") => {}
             _ => arcs.push(parse_arc(&tbody)), // delay arc (incl. rising_edge CK->Q)
         }
         at = after;

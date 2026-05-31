@@ -198,7 +198,7 @@ propagated downstream (a resistive net hands the next stage a slower edge, raisi
 its delay). With `pba: true` it adds **path-based analysis** — re-timing the
 critical path and its fan-in alternatives with strictly path-local slews, catching
 a non-greedy worst path that the graph-based max can miss. Fully offline, no external
-deps, 48 tests green.
+deps, 50 tests green.
 It **closes the loop with the other engines**: it reads the
 Liberty `vyges-char` emits and the SPEF (incl. coupling + RC tree) `vyges-extract`
 emits — the SI margin OpenSTA lacks.
@@ -216,7 +216,7 @@ edges rather than taking `max(rise,fall)` per stage, matching how real paths beh
 **Correlated against OpenSTA 2.7.0** on a sky130 design: single-arc paths match to
 4 decimals (global WNS 9.3760 ns, DFF CK→Q 0.6240 ns), and a multi-stage reg→reg
 path agrees within **~3%** (down from ~7% before unate-split), staying slightly
-conservative — the residual is second-order slew propagation.
+conservative — the residual is second-order slew propagation. On a real routed sky130 block (post-route netlist + OpenRCX SPEF) the reg→reg setup slack matches OpenSTA within ~0.6% of the clock period.
 
 The road to sign-off grade builds on the same graph: CCS receiver models and
 widening PBA from 1-exchange to k-worst enumeration. See

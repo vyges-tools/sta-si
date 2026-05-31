@@ -304,6 +304,21 @@ impl NetRc {
 
 impl Spef {
     pub fn parse(text: &str) -> Spef {
+        // unit scaling -> our internal fF / Ω (default 1.0 = already fF/Ω)
+        let mut c_scale = 1.0f64;
+        let mut r_scale = 1.0f64;
+        let cap_unit = |u: Option<&&str>| match u.map(|s| s.to_ascii_uppercase()).as_deref() {
+            Some("FF") => 1.0,
+            Some("PF") => 1000.0,
+            Some("NF") => 1.0e6,
+            _ => 1.0,
+        };
+        let res_unit = |u: Option<&&str>| match u.map(|s| s.to_ascii_uppercase()).as_deref() {
+            Some("OHM") => 1.0,
+            Some("KOHM") => 1000.0,
+            Some("MOHM") => 1.0e6,
+            _ => 1.0,
+        };
         let mut names: BTreeMap<usize, String> = BTreeMap::new();
         let mut nets: BTreeMap<String, NetRc> = BTreeMap::new();
         let mut coupling: BTreeMap<String, f64> = BTreeMap::new();
@@ -336,6 +351,16 @@ impl Spef {
 
         for raw in text.lines() {
             let t = raw.trim();
+            if t.starts_with("*C_UNIT") {
+                let p: Vec<&str> = t.split_whitespace().collect();
+                c_scale = p.get(1).and_then(|s| s.parse::<f64>().ok()).unwrap_or(1.0) * cap_unit(p.get(2));
+                continue;
+            }
+            if t.starts_with("*R_UNIT") {
+                let p: Vec<&str> = t.split_whitespace().collect();
+                r_scale = p.get(1).and_then(|s| s.parse::<f64>().ok()).unwrap_or(1.0) * res_unit(p.get(2));
+                continue;
+            }
             if t == "*NAME_MAP" {
                 sect = "namemap";
                 continue;
@@ -346,7 +371,7 @@ impl Spef {
                 let toks: Vec<&str> = t.split_whitespace().collect();
                 let idtok = toks.get(1).copied().unwrap_or("");
                 let id = idtok.trim_start_matches('*').parse::<usize>().ok();
-                let cap = toks.get(2).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
+                let cap = toks.get(2).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0) * c_scale;
                 let name = id.and_then(|i| names.get(&i).cloned()).unwrap_or_default();
                 let net_node = node_tok(idtok);
                 cur = Some((
@@ -398,6 +423,7 @@ impl Spef {
                     // `<idx> *a *b <ohm>`
                     if toks.len() >= 4 {
                         if let Ok(r) = toks[3].parse::<f64>() {
+                            let r = r * r_scale;
                             if let Some((_, _, rc)) = cur.as_mut() {
                                 rc.res_ohm += r;
                                 rc.res.push((node_tok(toks[1]), node_tok(toks[2]), r));
@@ -411,6 +437,7 @@ impl Spef {
                         if let (Some(a), Some(b), Ok(v)) =
                             (netname(toks[1], &names), netname(toks[2], &names), toks[3].parse::<f64>())
                         {
+                            let v = v * c_scale;
                             *coupling.entry(a.clone()).or_default() += v;
                             *coupling.entry(b.clone()).or_default() += v;
                             coupling_list.entry(a.clone()).or_default().push((b.clone(), v));
@@ -420,7 +447,7 @@ impl Spef {
                         // grounded cap `<idx> *node <ff>`
                         if let Ok(v) = toks[2].parse::<f64>() {
                             if let Some((_, _, rc)) = cur.as_mut() {
-                                rc.ground.push((node_tok(toks[1]), v));
+                                rc.ground.push((node_tok(toks[1]), v * c_scale));
                             }
                         }
                     }

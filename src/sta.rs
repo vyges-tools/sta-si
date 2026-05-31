@@ -181,7 +181,13 @@ pub fn analyze(
     let mut flop_hold: Vec<(usize, Vec<Constraint>, Option<String>)> = Vec::new();
     let mut ck_node_list: Vec<usize> = Vec::new(); // nodes that are clock (CK) pins
     for inst in &nl.insts {
-        let cell = lib.cell(&inst.cell).ok_or_else(|| StaError::UnknownCell(inst.cell.clone()))?;
+        // physical-only cells (fill/decap/tap/antenna) have no connections and no
+        // timing view — skip them rather than erroring on a missing lib cell.
+        let cell = match lib.cell(&inst.cell) {
+            Some(c) => c,
+            None if inst.conns.is_empty() => continue,
+            None => return Err(StaError::UnknownCell(inst.cell.clone())),
+        };
         let ck_key = cell.clock_pin.as_ref().map(|cp| pin_key(&inst.name, cp));
         for (pin, net) in &inst.conns {
             let idx = node(
@@ -239,7 +245,9 @@ pub fn analyze(
 
     // cell arcs: related input pin -> output pin (within an instance)
     for inst in &nl.insts {
-        let cell = lib.cell(&inst.cell).unwrap();
+        let Some(cell) = lib.cell(&inst.cell) else {
+            continue; // physical-only cell skipped in pass 1
+        };
         let conn: HashMap<&str, &str> =
             inst.conns.iter().map(|(p, net)| (p.as_str(), net.as_str())).collect();
         for (opin, pininfo) in &cell.pins {
