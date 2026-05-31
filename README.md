@@ -79,12 +79,56 @@ else flat.
 
 You run it **after synthesis and place-and-route** (you need a gate-level
 netlist), with the **`.lib`** from your PDK or `vyges-char` and — for
-accuracy — the **`.spef`** from `vyges-extract`. You run it **before
-tape-out**, every time you change RTL, floorplan, or constraints. What it gives
-you is the **answer to "does it meet timing, and if not, where?"** — the worst
-path tells you the exact gates and arrival times, so you decide whether to sign
-off, fix the critical path, or change the clock. In the open flow it occupies
-the slot where OpenSTA runs inside LibreLane.
+accuracy — the **`.spef`** from `vyges-extract`. What it gives you is the
+**answer to "does it meet timing, and if not, where?"** — the worst path tells
+you the exact gates and arrival times.
+
+### Where it sits vs OpenSTA / PrimeTime — run it *first*, not *instead*
+
+`vyges-sta-si` is an **early-flow and complementary** engine, **not a tapeout
+sign-off replacement** for OpenSTA or PrimeTime. It is *correlated to* OpenSTA
+(within ~0.6 % of WNS on a routed sky130 block), i.e. one tier below it in
+maturity — so it runs **upstream of**, and **alongside**, the signoff tool, never
+in lieu of it for tape-out:
+
+| Stage | Run | Why |
+| --- | --- | --- |
+| RTL / synth / P&R **iteration** | **`vyges-sta-si`** as the fast inner-loop + CI gate | std-only binary, no Tcl, `--fail-on-violation` exit 3 — catch timing breaks in seconds before spinning a full signoff run |
+| **Pre-signoff** (open flow) | `vyges-sta-si` **then OpenSTA** | OpenSTA is the open signoff authority; sta-si adds the **SI / CRPR / AOCV-POCV(LVF) / multi-clock / exceptions** margins that base OpenSTA-in-LibreLane doesn't, as a second opinion |
+| **Tape-out signoff** (if licensed) | `vyges-sta-si` early, **PrimeTime** for signoff | PrimeTime is the authority; sta-si stays the fast iteration loop + SI/crosstalk cross-check. Don't replace PT with it for the mask set |
+
+So the rule of thumb: **run `vyges-sta-si` first and often** (iteration + regression
+gate + SI/CRPR insight), then hand off to **OpenSTA** (open signoff) or **PrimeTime**
+(licensed signoff) for the authoritative final numbers. Its unique value even when
+you have PT is the fast, license-free loop and the bundled SI+CRPR+OCV view. (See
+[`docs/primetime-comparison.md`](docs/primetime-comparison.md) for the honest gap.)
+
+### What to capture, and how to use it downstream
+
+Run with `--json` for machine-readable output. Capture:
+
+- **`wns_ns` / `tns_ns`** (setup) and **`whs_ns` / `ths_ns`** (hold) + the **`met`**
+  verdict — the slack numbers and pass/fail.
+- **`worst_endpoint` + `worst_path`** (and the hold path) — the launch/capture pins
+  and per-node arrival/slew: **where** the problem is.
+- **`pba_wns_ns`** (if `pba: true`) — flags a non-greedy worst path the graph-based
+  number can miss.
+- For **MCMM**, the worst setup/hold **and the binding corner** per check.
+
+How those feed the next step:
+
+1. **Gate the loop** — `--fail-on-violation` (exit 3) in CI stops a broken design
+   before it ever reaches OpenSTA/PT, saving the slow run.
+2. **Fix, then re-run** — the worst path's gates are the ECO target: resize/buffer,
+   re-place, retime, or reconstrain the clock; iterate on sta-si until it meets.
+3. **Cross-check at signoff** — compare `wns_ns` to OpenSTA/PT. Agreement within the
+   correlation band ⇒ confidence; a **gap ⇒ the SI/CRPR/OCV delta sta-si adds** —
+   crosstalk or reconvergence risk to inspect in the signoff tool.
+4. **Hand off the same inputs** — netlist + `.lib` + `.spef` + SDC are unchanged, so
+   the signoff tool runs on identical data; sta-si's worst-path report tells the
+   signoff engineer which paths to scrutinise first.
+
+In the open flow it occupies the slot where OpenSTA runs inside LibreLane.
 
 ## Use it
 
