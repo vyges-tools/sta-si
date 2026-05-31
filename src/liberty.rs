@@ -57,15 +57,80 @@ impl Constraint {
     }
 }
 
+/// CCS receiver capacitance on an input pin: the two-segment input load a driver
+/// sees. C1 = effective cap over the first half of the input transition (static
+/// gate cap); C2 = over the second half (Miller-inflated by the switching output).
+/// Tables indexed by (input_net_transition, total_output_net_capacitance).
+#[derive(Debug, Clone, Default)]
+pub struct RecvCap {
+    pub c1_rise: Table,
+    pub c2_rise: Table,
+    pub c1_fall: Table,
+    pub c2_fall: Table,
+}
+
+impl RecvCap {
+    /// Representative full-swing input load (pF): the mean of (C1+C2)/2 over the
+    /// grid, averaged across rise/fall. The full-swing equivalent cap **including
+    /// Miller** — larger than a NLDM-only static `capacitance`. v1 is a scalar
+    /// (slew/load-resolved receiver load is future, once the fanin driver's output
+    /// slew is known at load-accumulation time).
+    pub fn effective_load(&self) -> f64 {
+        let mean = |t: &Table| {
+            let mut sum = 0.0;
+            let mut n = 0usize;
+            for row in &t.values {
+                for &v in row {
+                    sum += v;
+                    n += 1;
+                }
+            }
+            if n == 0 { None } else { Some(sum / n as f64) }
+        };
+        // average the two segments per edge, then the two edges; skip empty tables.
+        let edge = |c1: &Table, c2: &Table| match (mean(c1), mean(c2)) {
+            (Some(a), Some(b)) => Some((a + b) / 2.0),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => None,
+        };
+        let r = edge(&self.c1_rise, &self.c2_rise);
+        let f = edge(&self.c1_fall, &self.c2_fall);
+        match (r, f) {
+            (Some(a), Some(b)) => (a + b) / 2.0,
+            (Some(a), None) | (None, Some(a)) => a,
+            (None, None) => 0.0,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.c1_rise.values.is_empty()
+            && self.c2_rise.values.is_empty()
+            && self.c1_fall.values.is_empty()
+            && self.c2_fall.values.is_empty()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Pin {
     pub name: String,
     pub direction: Dir,
     pub capacitance: f64,
+    pub recv: Option<RecvCap>,   // CCS receiver model (input pins); None -> use `capacitance`
     pub clock: bool,             // `clock : true` — the cell's clock pin
     pub setup: Vec<Constraint>,  // setup constraint group(s) vs the clock
     pub hold: Vec<Constraint>,   // hold constraint group(s) vs the clock
     pub arcs: Vec<Arc>,          // delay arcs (e.g. CK->Q on a flop output)
+}
+
+impl Pin {
+    /// The capacitive load this input pin presents to its driver (pF): the
+    /// Miller-aware receiver load when characterized, else the static `capacitance`.
+    pub fn load_cap(&self) -> f64 {
+        match &self.recv {
+            Some(r) if !r.is_empty() => r.effective_load(),
+            _ => self.capacitance,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -333,6 +398,18 @@ fn parse_pin(name: String, body: &str) -> Pin {
     };
     let capacitance =
         simple_attr(body, "capacitance").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    // CCS receiver capacitance group (input pins): the Miller-aware two-segment load.
+    let recv = next_block(body, 0, "receiver_capacitance").map(|(_, rbody, _)| {
+        let tbl = |name: &str| {
+            next_block(&rbody, 0, name).map(|(_, b, _)| parse_table(&b)).unwrap_or_default()
+        };
+        RecvCap {
+            c1_rise: tbl("receiver_capacitance1_rise"),
+            c2_rise: tbl("receiver_capacitance2_rise"),
+            c1_fall: tbl("receiver_capacitance1_fall"),
+            c2_fall: tbl("receiver_capacitance2_fall"),
+        }
+    });
     let clock = simple_attr(body, "clock").as_deref() == Some("true");
     let mut arcs = Vec::new();
     let mut setup: Vec<Constraint> = Vec::new();
@@ -355,7 +432,7 @@ fn parse_pin(name: String, body: &str) -> Pin {
         }
         at = after;
     }
-    Pin { name, direction, capacitance, clock, setup, hold, arcs }
+    Pin { name, direction, capacitance, recv, clock, setup, hold, arcs }
 }
 
 fn parse_cell(name: String, body: &str) -> Cell {

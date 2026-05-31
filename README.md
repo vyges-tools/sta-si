@@ -262,8 +262,14 @@ edges rather than taking `max(rise,fall)` per stage, matching how real paths beh
 path agrees within **~3%** (down from ~7% before unate-split), staying slightly
 conservative — the residual is second-order slew propagation. On a real routed sky130 block (post-route netlist + OpenRCX SPEF) the reg→reg setup slack matches OpenSTA within ~0.6% of the clock period.
 
-The road to sign-off grade builds on the same graph: CCS receiver models and
-widening PBA from 1-exchange to k-worst enumeration. See
+When a pin carries a CCS **receiver_capacitance** model (emitted by `vyges-char`),
+the driver is loaded with the Miller-aware effective input cap (the C1/C2 segments)
+rather than the static `capacitance` — a small, correct-direction increase in net
+load and delay. v1 uses a representative scalar; full slew/load-resolved receiver
+load is future.
+
+The road to sign-off grade builds on the same graph: slew/load-resolved receiver
+load and widening PBA from 1-exchange to k-worst enumeration. See
 [`docs/primetime-comparison.md`](docs/primetime-comparison.md) for an honest
 feature-by-feature comparison to Synopsys PrimeTime and where this engine can and
 can't reach it. The SI margin it adds over OpenSTA stays.

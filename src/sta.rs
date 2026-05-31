@@ -203,7 +203,9 @@ pub fn analyze(
                     nets.get_mut(net).unwrap().driver.get_or_insert(idx);
                 }
                 Some(Dir::In) => {
-                    let cap = cell.pins[pin].capacitance;
+                    // Miller-aware receiver load when the pin carries a CCS receiver
+                    // model, else the static `capacitance`.
+                    let cap = cell.pins[pin].load_cap();
                     let nref = nets.get_mut(net).unwrap();
                     nref.sinks.push(idx);
                     nref.load += cap;
