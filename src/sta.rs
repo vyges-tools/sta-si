@@ -271,18 +271,22 @@ pub fn analyze(
         (arrival, slew, from, order)
     };
 
-    // Pass A: nominal interconnect (Cc grounded once) -> per-net switching time.
+    // Pass A: nominal interconnect (Cc grounded once) -> per-net switching time
+    // and slew (the width of the net's switching window).
     let nominal: Vec<f64> = (0..nn).map(|i| net_res[i] * net_cap[i] * 1e-6).collect();
-    let (arr_a, _sa, _fa, order_a) = relax(&nominal);
+    let (arr_a, slew_a, _fa, order_a) = relax(&nominal);
     if order_a.len() != n {
         return Err(StaError::CombinationalLoop);
     }
-    let sw: Vec<f64> =
-        (0..nn).map(|i| net_drv[i].map(|d| arr_a[d]).unwrap_or(f64::NEG_INFINITY)).collect();
+    let drv_at = |i: usize, v: &[f64]| net_drv[i].map(|d| v[d]).unwrap_or(f64::NEG_INFINITY);
+    let sw: Vec<f64> = (0..nn).map(|i| drv_at(i, &arr_a)).collect();
+    let net_slew: Vec<f64> = (0..nn).map(|i| net_drv[i].map(|d| slew_a[d]).unwrap_or(0.0)).collect();
 
-    // Window-aware crosstalk: a victim gains the Miller delta only from
-    // aggressors whose switching time falls within `xtalk_window` of its own.
-    let window = job.xtalk_window;
+    // Window-aware crosstalk with **slew-derived windows**: model each net's
+    // transition as an interval of width = its slew, centred on its switching
+    // time. A victim gains the Miller delta only from aggressors whose interval
+    // overlaps — |Δsw| ≤ (slew_v + slew_a)/2 — plus an optional guard band.
+    let guard = job.xtalk_window;
     let net_delay: Vec<f64> = (0..nn)
         .map(|i| {
             let mut d = nominal[i];
@@ -290,6 +294,7 @@ pub fn analyze(
             if svi.is_finite() {
                 for &(ai, cc) in &net_cpl[i] {
                     let sva = sw[ai];
+                    let window = (net_slew[i] + net_slew[ai]) / 2.0 + guard;
                     if sva.is_finite() && (sva - svi).abs() <= window {
                         d += crate::si::xtalk_delta_ns(net_res[i], cc, job.miller);
                     }
