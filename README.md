@@ -52,10 +52,13 @@ reported as **WHS** / **THS** alongside WNS / TNS.
 On-chip variation has three modes. **Flat** (default) applies the scalar late/early
 derates to every stage. **AOCV** takes a *depth-dependent* derate table — shallow
 paths derate hard, deep paths relax toward 1.0 as variation averages out.
-**POCV** is statistical: each cell stage carries a 1-sigma `pocv_sigma · delay`, the
-variances sum along the path, and the reported delay carries an N-sigma band — so
-pessimism grows as **√depth** (RSS), not linearly. POCV wins when `pocv_sigma > 0`,
-else AOCV when a table is present, else flat.
+**POCV** is statistical: each cell stage carries a 1-sigma delay, the variances sum
+along the path, and the reported delay carries an N-sigma band — so pessimism grows
+as **√depth** (RSS), not linearly. The per-stage sigma comes from **LVF**
+(`ocv_sigma_cell_rise/fall`, slew·load-dependent) when the library provides it —
+which auto-enables POCV — otherwise from the global `pocv_sigma · delay` fraction.
+POCV wins when LVF is present or `pocv_sigma > 0`, else AOCV when a table is present,
+else flat.
 
 ## When & how to use it in your flow
 
@@ -118,8 +121,9 @@ early_derate: 1.0           # flat OCV early derate on cell delays (hold / min p
 # advanced OCV — pick ONE refinement over the flat derates above:
 aocv_late:  1:1.10, 8:1.02  # AOCV: late derate vs path depth (interpolated)
 aocv_early: 1:0.90, 8:0.98  # AOCV: early derate vs path depth
-pocv_sigma: 0.05            # POCV: per-stage 1-sigma as a fraction of stage delay
+pocv_sigma: 0.05            # POCV: per-stage 1-sigma fraction (LVF lib tables, if any, override this)
 pocv_n:     3.0             # POCV: number of sigmas for the bound (default 3.0)
+#pba: true                  # path-based analysis: re-time critical paths (default false)
 ```
 
 For **MCMM**, a job instead lists scenario files and the engine reports the worst
@@ -194,7 +198,7 @@ propagated downstream (a resistive net hands the next stage a slower edge, raisi
 its delay). With `pba: true` it adds **path-based analysis** — re-timing the
 critical path and its fan-in alternatives with strictly path-local slews, catching
 a non-greedy worst path that the graph-based max can miss. Fully offline, no external
-deps, 47 tests green.
+deps, 48 tests green.
 It **closes the loop with the other engines**: it reads the
 Liberty `vyges-char` emits and the SPEF (incl. coupling + RC tree) `vyges-extract`
 emits — the SI margin OpenSTA lacks.
@@ -214,8 +218,8 @@ edges rather than taking `max(rise,fall)` per stage, matching how real paths beh
 path agrees within **~3%** (down from ~7% before unate-split), staying slightly
 conservative — the residual is second-order slew propagation.
 
-The road to sign-off grade builds on the same graph: LVF-grade statistical variation
-and CCS receiver models (plus widening PBA from 1-exchange to k-worst enumeration). See
+The road to sign-off grade builds on the same graph: CCS receiver models and
+widening PBA from 1-exchange to k-worst enumeration. See
 [`docs/primetime-comparison.md`](docs/primetime-comparison.md) for an honest
 feature-by-feature comparison to Synopsys PrimeTime and where this engine can and
 can't reach it. The SI margin it adds over OpenSTA stays.

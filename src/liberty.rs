@@ -34,6 +34,10 @@ pub struct Arc {
     pub rise_transition: Table,
     pub fall_transition: Table,
     pub ccs: crate::ccs::CcsArc, // CCS current waveforms (empty if NLDM-only)
+    // LVF (Liberty Variation Format): per-(slew,load) delay sigma. Empty -> no LVF;
+    // POCV then falls back to the global pocv_sigma fraction.
+    pub sigma_rise: Table,
+    pub sigma_fall: Table,
 }
 
 /// A setup or hold constraint: rise/fall tables indexed by
@@ -273,6 +277,8 @@ fn parse_arc(timing_body: &str) -> Arc {
         rise_transition: tbl("rise_transition"),
         fall_transition: tbl("fall_transition"),
         ccs: parse_ccs(timing_body),
+        sigma_rise: tbl("ocv_sigma_cell_rise"),
+        sigma_fall: tbl("ocv_sigma_cell_fall"),
     }
 }
 

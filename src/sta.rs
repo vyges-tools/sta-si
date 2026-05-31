@@ -18,7 +18,8 @@
 //! min-delay hold** (a second, min-corner forward pass; earliest data arrival at
 //! each flop D must clear its hold constraint). On-chip variation is flat scalar
 //! derates by default, or **AOCV** (depth-dependent derate table) / **POCV**
-//! (per-stage sigma, N-sigma band growing as sqrt(depth)) when configured. Multiple
+//! (per-stage sigma — from LVF `ocv_sigma_*` tables when present, else a global
+//! fraction — N-sigma band growing as sqrt(depth)) when configured. Multiple
 //! clocks (incl. generated) are supported — cross-domain paths use the tightest
 //! launch→capture edge relation — and false-path / multicycle **exceptions** drop or
 //! shift paths. With `pba` on, a path-based pass re-times the critical path and its
@@ -333,7 +334,14 @@ pub fn analyze(
     // Else flat.
     let late_derate = job.late_derate;
     let early_derate = job.early_derate;
-    let pocv = job.pocv_sigma > 0.0;
+    // LVF present? -> per-arc slew/load-dependent delay sigma is available, which
+    // auto-enables (the more accurate) POCV even without a global pocv_sigma.
+    let has_lvf = lib.cells.values().any(|c| {
+        c.pins.values().any(|p| {
+            p.arcs.iter().any(|a| !a.sigma_rise.values.is_empty() || !a.sigma_fall.values.is_empty())
+        })
+    });
+    let pocv = job.pocv_sigma > 0.0 || has_lvf;
     let aocv = !pocv && (!job.aocv_late.is_empty() || !job.aocv_early.is_empty());
     let pocv_sigma = job.pocv_sigma;
     let n_sigma = job.pocv_n;
@@ -456,7 +464,18 @@ pub fn analyze(
                                 let stage = depth[u][il] + 1;
                                 let derate = cell_derate(late, stage);
                                 let nom = arr_nom[u][il] + d * derate;
-                                let sigma = if pocv { pocv_sigma * d } else { 0.0 };
+                                // per-stage delay sigma: LVF table (slew/load-dependent)
+                                // when present, else the global pocv_sigma fraction.
+                                let sigma = if !pocv {
+                                    0.0
+                                } else {
+                                    let lvf = if ol == 0 { &arc.sigma_rise } else { &arc.sigma_fall };
+                                    if !lvf.values.is_empty() {
+                                        lvf.lookup(sin, leff)
+                                    } else {
+                                        pocv_sigma * d
+                                    }
+                                };
                                 let var_c = var[u][il] + sigma * sigma;
                                 let metric = if pocv {
                                     let band = n_sigma * var_c.sqrt();

@@ -16,7 +16,7 @@ today.** This doc says exactly where we stand and what is — and isn't — reac
 | Unate (rise/fall) propagation | full | ✅ rise/fall lanes | small |
 | SI / crosstalk | coupled-RC **delay + noise/glitch**, multi-aggressor, logical correlation | Miller-cap, slew-windowed **delay only** | medium–large |
 | Parasitics reduction | moment matching / PI / Arnoldi | per-pin **Elmore** tree (+lumped) | medium |
-| OCV | flat / AOCV / **POCV via LVF** (slew·load moments) | flat / AOCV(depth) / POCV(single σ) | medium |
+| OCV | flat / AOCV / **POCV via LVF** (slew·load moments) | flat / AOCV(depth) / **POCV reading LVF** `ocv_sigma_cell_rise/fall` (slew·load sigma, auto-enables POCV), single-σ fraction as fallback | small–medium |
 | CRPR | rigorous, full clock network | nearest-common-node credit | small–medium |
 | MMMC | distributed multi-scenario (DMSA) | serial scenarios, worst-merge | medium (scale) |
 | Multi-clock / generated | waveforms, phase, async/exclusive groups, virtual clocks | periods + simple generated + edge relation | medium |
