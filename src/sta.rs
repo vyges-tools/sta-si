@@ -400,8 +400,15 @@ pub fn analyze(
                                     continue;
                                 }
                                 let sin = slew[u][il];
-                                let d = dt.lookup(sin, load);
-                                let sout = st.lookup(sin, load);
+                                // CCS current-source delay when the arc carries it;
+                                // else the NLDM table lookup. (v1 CCS is lumped-load.)
+                                let (d, sout) = if !arc.ccs.is_empty() {
+                                    arc.ccs
+                                        .delay_slew(ol == 0, sin, load, 0.3, 0.7)
+                                        .unwrap_or((dt.lookup(sin, load), st.lookup(sin, load)))
+                                } else {
+                                    (dt.lookup(sin, load), st.lookup(sin, load))
+                                };
                                 let stage = depth[u][il] + 1;
                                 let derate = cell_derate(late, stage);
                                 let nom = arr_nom[u][il] + d * derate;

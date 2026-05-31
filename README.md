@@ -181,9 +181,12 @@ is credited back, removing reconvergence pessimism; `crpr: false` to disable), a
 **MCMM** (a job can list per-corner scenario `.sta` files; the worst setup and worst
 hold are reported across them), **rise/fall-split unate propagation**, and
 **multi-clock / generated clocks** (cross-domain paths use the tightest launch→capture
-edge relation, not a single period), and **timing exceptions** (false paths and
-multicycle paths, matched on launch/capture instance or port). Fully offline, no
-external deps, 36 tests green.
+edge relation, not a single period), **timing exceptions** (false paths and
+multicycle paths, matched on launch/capture instance or port), and a **CCS
+current-source delay** foundation (parses `output_current` waveforms and integrates
+them into the load; v1 is lumped-load — numerically ≈ NLDM until the RC-convolution /
+effective-capacitance step, which is where CCS accuracy diverges). Fully offline, no
+external deps, 39 tests green.
 It **closes the loop with the other engines**: it reads the
 Liberty `vyges-char` emits and the SPEF (incl. coupling + RC tree) `vyges-extract`
 emits — the SI margin OpenSTA lacks.
@@ -203,8 +206,9 @@ edges rather than taking `max(rise,fall)` per stage, matching how real paths beh
 path agrees within **~3%** (down from ~7% before unate-split), staying slightly
 conservative — the residual is second-order slew propagation.
 
-The road to sign-off grade builds on the same graph: path-based analysis (PBA) and
-CCS/LVF-grade accuracy, plus clock phases/waveforms. See
+The road to sign-off grade builds on the same graph: the **CCS-into-RC** step
+(effective capacitance / waveform convolution — where CCS beats NLDM), then
+path-based analysis (PBA) and LVF-grade variation. See
 [`docs/primetime-comparison.md`](docs/primetime-comparison.md) for an honest
 feature-by-feature comparison to Synopsys PrimeTime and where this engine can and
 can't reach it. The SI margin it adds over OpenSTA stays.

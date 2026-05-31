@@ -23,6 +23,7 @@ pub mod netlist;
 pub mod spef;
 pub mod sta;
 pub mod si;
+pub mod ccs;
 pub mod engine;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

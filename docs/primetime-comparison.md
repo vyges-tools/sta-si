@@ -11,7 +11,7 @@ today.** This doc says exactly where we stand and what is — and isn't — reac
 
 | Capability | PrimeTime / PT-SI | vyges-sta-si | Gap |
 | --- | --- | --- | --- |
-| Delay model | NLDM **+ CCS** (composite current source) | NLDM only | **large** (accuracy) |
+| Delay model | NLDM **+ CCS** (composite current source) | NLDM + **CCS foundation** (current-source kernel + `output_current` parse; lumped-load v1 ≈ NLDM, RC-convolution next) | **large→medium** (accuracy) |
 | Setup / hold / CK→Q | full | ✅ — OpenSTA-exact on single arcs | small |
 | Unate (rise/fall) propagation | full | ✅ rise/fall lanes | small |
 | SI / crosstalk | coupled-RC **delay + noise/glitch**, multi-aggressor, logical correlation | Miller-cap, slew-windowed **delay only** | medium–large |
@@ -42,8 +42,11 @@ Two different questions, two different answers.
 yes, reachable with focused engineering.** The remaining accuracy gaps are *known
 algorithms*, not unknowns:
 - **CCS delay** (current-source model) — the single biggest accuracy lever at advanced
-  nodes. Reading CCS Liberty + a current-source driver/receiver solver is substantial
-  but well-trodden. This is the priority if accuracy is the goal.
+  nodes. The *foundation* is now in (`ccs.rs`: parses `output_current` waveforms,
+  integrates them into the load; the engine uses it per rise/fall lane when present).
+  v1 is **lumped-load**, so it's numerically ≈ NLDM — the accuracy gain lands with the
+  **CCS-into-RC** step (effective capacitance / waveform convolution against the SPEF
+  network), which is the next increment and the real priority.
 - **Path-based analysis (PBA)** — recompute worst paths with path-specific slews to
   shed graph pessimism. Mostly graph plumbing on top of what we have.
 - **LVF/POCV** (statistical moments), **higher-order RC reduction** (PI/Arnoldi),

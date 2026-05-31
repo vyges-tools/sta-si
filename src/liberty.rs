@@ -33,6 +33,7 @@ pub struct Arc {
     pub cell_fall: Table,
     pub rise_transition: Table,
     pub fall_transition: Table,
+    pub ccs: crate::ccs::CcsArc, // CCS current waveforms (empty if NLDM-only)
 }
 
 /// A setup or hold constraint: rise/fall tables indexed by
@@ -271,7 +272,43 @@ fn parse_arc(timing_body: &str) -> Arc {
         cell_fall: tbl("cell_fall"),
         rise_transition: tbl("rise_transition"),
         fall_transition: tbl("fall_transition"),
+        ccs: parse_ccs(timing_body),
     }
+}
+
+/// Parse CCS `output_current_rise`/`output_current_fall` waveforms from an arc.
+fn parse_ccs(timing_body: &str) -> crate::ccs::CcsArc {
+    crate::ccs::CcsArc {
+        rise: parse_ccs_set(timing_body, "output_current_rise"),
+        fall: parse_ccs_set(timing_body, "output_current_fall"),
+    }
+}
+
+/// Collect every `vector (...) { ... }` under an output_current group.
+fn parse_ccs_set(timing_body: &str, group: &str) -> Vec<crate::ccs::CcsWaveform> {
+    let Some((_, gbody, _)) = next_block(timing_body, 0, group) else {
+        return Vec::new();
+    };
+    let first = |kw: &str, b: &str| {
+        next_paren_after(b, kw).map(|s| floats(&s.replace('"', ""))).unwrap_or_default()
+    };
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some((_, vbody, after)) = next_block(&gbody, at, "vector") {
+        let time = first("index_3", &vbody);
+        let current = first("values", &vbody);
+        if time.len() >= 2 && time.len() == current.len() {
+            out.push(crate::ccs::CcsWaveform {
+                in_slew: first("index_1", &vbody).first().copied().unwrap_or(0.0),
+                out_cap: first("index_2", &vbody).first().copied().unwrap_or(0.0),
+                ref_time: simple_attr(&vbody, "reference_time").and_then(|s| s.parse().ok()).unwrap_or(0.0),
+                time,
+                current,
+            });
+        }
+        at = after;
+    }
+    out
 }
 
 /// Parse a setup/hold constraint group's rise/fall tables.
