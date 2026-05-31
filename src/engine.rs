@@ -53,6 +53,10 @@ pub fn demo() -> (StaJob, TimingReport) {
         output_load: 0.005,
         late_derate: 1.0,
         early_derate: 1.0,
+        pocv_sigma: 0.0,
+        pocv_n: 3.0,
+        aocv_late: vec![],
+        aocv_early: vec![],
         miller: 2.0,
         xtalk_window: 0.0,
         base_dir: String::new(),
@@ -95,9 +99,17 @@ pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
     let mut s = String::new();
     s.push_str(&format!("STA report — design {}\n", job.design));
     s.push_str(&format!(
-        "  clock {}  period {:.3} ns   late_derate {:.3}   xtalk_miller {:.2}\n",
-        job.clock_port, job.period_ns, job.late_derate, job.miller
+        "  clock {}  period {:.3} ns   xtalk_miller {:.2}\n",
+        job.clock_port, job.period_ns, job.miller
     ));
+    let ocv = if job.pocv_sigma > 0.0 {
+        format!("POCV — per-stage sigma {:.3}, {:.1}-sigma band", job.pocv_sigma, job.pocv_n)
+    } else if !job.aocv_late.is_empty() || !job.aocv_early.is_empty() {
+        "AOCV — depth-dependent derate table".to_string()
+    } else {
+        format!("flat derate — late {:.3} / early {:.3}", job.late_derate, job.early_derate)
+    };
+    s.push_str(&format!("  OCV: {ocv}\n"));
     s.push_str(&format!("  endpoints: {}\n", rep.endpoints));
     if rep.endpoints == 0 {
         s.push_str("  (no timing endpoints — no primary outputs reached)\n");

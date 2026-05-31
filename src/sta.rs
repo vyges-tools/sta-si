@@ -12,7 +12,10 @@
 //! input → output, and register-to-register: a flop's Q launches via its CK→Q
 //! arc, its D pins are capture endpoints with required = period − setup) **and
 //! min-delay hold** (a second, min-corner forward pass; earliest data arrival at
-//! each flop D must clear its hold constraint). Pure std — unit-tested.
+//! each flop D must clear its hold constraint). On-chip variation is flat scalar
+//! derates by default, or **AOCV** (depth-dependent derate table) / **POCV**
+//! (per-stage sigma, N-sigma band growing as sqrt(depth)) when configured. Pure
+//! std — unit-tested.
 
 use std::collections::HashMap;
 
@@ -45,6 +48,30 @@ impl std::fmt::Display for StaError {
     }
 }
 impl std::error::Error for StaError {}
+
+/// Interpolate an AOCV derate from a `(stages, derate)` table at `depth`, clamping
+/// past the table ends. Empty table -> 1.0 (no derate).
+fn aocv_lookup(tbl: &[(f64, f64)], depth: f64) -> f64 {
+    if tbl.is_empty() {
+        return 1.0;
+    }
+    if depth <= tbl[0].0 {
+        return tbl[0].1;
+    }
+    let last = tbl[tbl.len() - 1];
+    if depth >= last.0 {
+        return last.1;
+    }
+    for w in tbl.windows(2) {
+        let (x0, y0) = w[0];
+        let (x1, y1) = w[1];
+        if depth <= x1 {
+            let t = (depth - x0) / (x1 - x0);
+            return y0 + (y1 - y0) * t;
+        }
+    }
+    last.1
+}
 
 #[derive(Debug, Clone)]
 pub struct PathNode {
@@ -261,32 +288,61 @@ pub fn analyze(
     }
     let n_arcs = arcs.len();
 
-    // ---- forward propagation, reusable over a net-delay table ------------
-    // `late=true` is the max-delay (setup) path: max-corner cell delay + late
-    // derate. `late=false` is the min-delay (hold) path: min-corner cell delay +
-    // early derate, accumulated with a min instead of a max.
+    // ---- on-chip variation model ----------------------------------------
+    // Refines the flat late/early scalar derate. POCV (statistical) wins when a
+    // per-stage sigma is given: each cell stage adds variance sigma^2 and the path
+    // delay carries an N-sigma band that grows as sqrt(depth) (RSS), not linearly.
+    // Else AOCV: a depth-dependent derate table (deeper paths derate toward 1.0).
+    // Else flat.
     let late_derate = job.late_derate;
     let early_derate = job.early_derate;
-    let edge_delay = |kind: &EdgeKind, slew_u: f64, load_v: f64, nd: &[f64], late: bool| -> (f64, f64) {
+    let pocv = job.pocv_sigma > 0.0;
+    let aocv = !pocv && (!job.aocv_late.is_empty() || !job.aocv_early.is_empty());
+    let pocv_sigma = job.pocv_sigma;
+    let n_sigma = job.pocv_n;
+    // per-cell-stage derate on the nominal delay (1.0 for POCV — it uses sigma)
+    let cell_derate = |late: bool, stage: usize| -> f64 {
+        if aocv {
+            aocv_lookup(if late { &job.aocv_late } else { &job.aocv_early }, stage as f64)
+        } else if pocv {
+            1.0
+        } else if late {
+            late_derate
+        } else {
+            early_derate
+        }
+    };
+
+    // ---- forward propagation, reusable over a net-delay table ------------
+    // `late=true` is the max-delay (setup) path: max-corner cell delay. `late=false`
+    // is the min-delay (hold) path: min-corner cell delay, accumulated with a min.
+    // Net arcs carry the SPEF delay and neither derate nor add depth/variance.
+    let edge_raw = |kind: &EdgeKind, slew_u: f64, load_v: f64, nd: &[f64], late: bool| -> (f64, f64, bool) {
         match kind {
-            EdgeKind::Net(i) => (nd[*i], slew_u),
+            EdgeKind::Net(i) => (nd[*i], slew_u, false),
             EdgeKind::Cell(a) => {
                 let r = a.cell_rise.lookup(slew_u, load_v);
                 let f = a.cell_fall.lookup(slew_u, load_v);
                 let sr = a.rise_transition.lookup(slew_u, load_v);
                 let sf = a.fall_transition.lookup(slew_u, load_v);
                 if late {
-                    (r.max(f) * late_derate, sr.max(sf))
+                    (r.max(f), sr.max(sf), true)
                 } else {
-                    (r.min(f) * early_derate, sr.min(sf))
+                    (r.min(f), sr.min(sf), true)
                 }
             }
         }
     };
     let input_slew = job.input_slew;
+    // Returns the reported (derated / N-sigma) arrival metric, slew, predecessor,
+    // and topo order. Internally tracks nominal arrival, accumulated depth, and
+    // variance so AOCV can derate per stage and POCV can band by sqrt(depth).
     let relax = |nd: &[f64], late: bool| -> (Vec<f64>, Vec<f64>, Vec<Option<usize>>, Vec<usize>) {
         let init = if late { f64::NEG_INFINITY } else { f64::INFINITY };
-        let mut arrival = vec![init; n];
+        let mut arrival = vec![init; n]; // the metric: derated (flat/AOCV) or +-N*sigma (POCV)
+        let mut arr_nom = vec![0.0f64; n]; // nominal accumulated delay (for the next stage)
+        let mut var = vec![0.0f64; n]; // accumulated delay variance (POCV)
+        let mut depth = vec![0usize; n]; // cell-stage count on the selected path
         let mut slew = vec![input_slew; n];
         let mut from: Vec<Option<usize>> = vec![None; n];
         let mut indeg_work = indeg.clone();
@@ -302,11 +358,25 @@ pub fn analyze(
             let u = order[head];
             head += 1;
             for e in &out_edges[u] {
-                let (d, sout) = edge_delay(&e.kind, slew[u], node_load[e.to], nd, late);
-                let cand = arrival[u] + d;
-                let better = if late { cand > arrival[e.to] } else { cand < arrival[e.to] };
+                let (d_nom, sout, is_cell) = edge_raw(&e.kind, slew[u], node_load[e.to], nd, late);
+                let stage = if is_cell { depth[u] + 1 } else { depth[u] };
+                let derate = if is_cell { cell_derate(late, stage) } else { 1.0 };
+                let arr_nom_cand = arr_nom[u] + d_nom * derate;
+                let sigma = if pocv && is_cell { pocv_sigma * d_nom } else { 0.0 };
+                let var_cand = var[u] + sigma * sigma;
+                let metric_cand = if pocv {
+                    let band = n_sigma * var_cand.sqrt();
+                    if late { arr_nom_cand + band } else { arr_nom_cand - band }
+                } else {
+                    arr_nom_cand
+                };
+                let better =
+                    if late { metric_cand > arrival[e.to] } else { metric_cand < arrival[e.to] };
                 if better {
-                    arrival[e.to] = cand;
+                    arrival[e.to] = metric_cand;
+                    arr_nom[e.to] = arr_nom_cand;
+                    var[e.to] = var_cand;
+                    depth[e.to] = stage;
                     slew[e.to] = sout;
                     from[e.to] = Some(u);
                 }
@@ -393,26 +463,11 @@ pub fn analyze(
         }
     }
     // final late propagation consistent with the converged per-arc delays
-    let (arrival, slew, from, order) = relax(&arc_delay, true);
+    let (arrival, slew, from, _order) = relax(&arc_delay, true);
 
-    // ---- backward: required time (period at outputs; period - setup at flops) --
-    let mut required = vec![f64::INFINITY; n];
-    for v in 0..n {
-        if is_endpoint[v] {
-            required[v] = endpoint_req[v];
-        }
-    }
-    for &u in order.iter().rev() {
-        for e in &out_edges[u] {
-            let (d, _) = edge_delay(&e.kind, slew[u], node_load[e.to], &arc_delay, true);
-            let req = required[e.to] - d;
-            if req < required[u] {
-                required[u] = req;
-            }
-        }
-    }
-
-    // ---- slack + worst path ---------------------------------------------
+    // ---- setup slack + worst path ---------------------------------------
+    // Each endpoint's required time is fixed (period at outputs, period - setup at
+    // flop D), so slack = required - latest arrival; no backward pass needed.
     let mut wns = f64::INFINITY;
     let mut tns = 0.0;
     let mut worst = None;
@@ -422,7 +477,7 @@ pub fn analyze(
             continue;
         }
         endpoints += 1;
-        let slack = required[v] - arrival[v];
+        let slack = endpoint_req[v] - arrival[v];
         if slack < 0.0 {
             tns += slack;
         }

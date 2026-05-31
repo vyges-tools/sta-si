@@ -49,6 +49,13 @@ It checks **setup** (max-delay) *and* **hold** (min-delay): the hold pass is a
 second forward propagation using min-corner cell delays (and an early OCV derate),
 and for each flop the earliest data arrival must clear that pin's hold constraint —
 reported as **WHS** / **THS** alongside WNS / TNS.
+On-chip variation has three modes. **Flat** (default) applies the scalar late/early
+derates to every stage. **AOCV** takes a *depth-dependent* derate table — shallow
+paths derate hard, deep paths relax toward 1.0 as variation averages out.
+**POCV** is statistical: each cell stage carries a 1-sigma `pocv_sigma · delay`, the
+variances sum along the path, and the reported delay carries an N-sigma band — so
+pessimism grows as **√depth** (RSS), not linearly. POCV wins when `pocv_sigma > 0`,
+else AOCV when a table is present, else flat.
 
 ## When & how to use it in your flow
 
@@ -102,8 +109,13 @@ miller:      2.0            # crosstalk Miller factor (1.0 disables SI)
 xtalk_window: 0.0           # ns — guard band added to the slew-derived window
 input_slew:  0.02           # ns
 output_load: 0.005          # pF at primary outputs
-late_derate: 1.0            # OCV late derate on cell delays (setup / max path)
-early_derate: 1.0           # OCV early derate on cell delays (hold / min path)
+late_derate: 1.0            # flat OCV late derate on cell delays (setup / max path)
+early_derate: 1.0           # flat OCV early derate on cell delays (hold / min path)
+# advanced OCV — pick ONE refinement over the flat derates above:
+aocv_late:  1:1.10, 8:1.02  # AOCV: late derate vs path depth (interpolated)
+aocv_early: 1:0.90, 8:0.98  # AOCV: early derate vs path depth
+pocv_sigma: 0.05            # POCV: per-stage 1-sigma as a fraction of stage delay
+pocv_n:     3.0             # POCV: number of sigmas for the bound (default 3.0)
 ```
 
 A complete, runnable example is in [`examples/top/`](examples/top/);
@@ -145,11 +157,13 @@ as **WHS / THS**. On top of that: NLDM cell delays interpolated on slew × load,
 late OCV derate, **SPEF-driven interconnect** (wire-cap load + **per-pin tree
 Elmore** net delay), and **crosstalk delta-delay with slew-derived switching
 windows, iterated to convergence** (arrivals set the windows, the windows set the
-coupling, repeat until the per-arc delays stabilise). Fully offline, no external
-deps, 19 tests green. It **closes the loop with the other engines**: it reads the
-Liberty `vyges-char` emits and the SPEF (incl. coupling + RC tree) `vyges-extract`
-emits — the SI margin OpenSTA lacks.
+coupling, repeat until the per-arc delays stabilise), and **AOCV / POCV** on-chip
+variation (depth-dependent derate table, or a statistical √depth N-sigma band) on
+top of the flat derates. Fully offline, no external deps, 22 tests green. It
+**closes the loop with the other engines**: it reads the Liberty `vyges-char` emits
+and the SPEF (incl. coupling + RC tree) `vyges-extract` emits — the SI margin
+OpenSTA lacks.
 
-The road to sign-off grade builds on the same graph: **AOCV/POCV** statistical
-derating and multi-corner/multi-mode. Correlation target: match OpenSTA on a routed
-block, then keep the SI margin it omits.
+The road to sign-off grade builds on the same graph: **multi-corner / multi-mode**
+(MCMM) and clock-network/skew modelling. Correlation target: match OpenSTA on a
+routed block, then keep the SI margin it omits.

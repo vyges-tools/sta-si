@@ -10,6 +10,12 @@
 //! input_slew:  0.05                 # ns, default input transition
 //! output_load: 0.005                # pF, load at primary outputs
 //! late_derate: 1.05                 # OCV late derate on cell delays (default 1.0)
+//! early_derate: 0.95                # OCV early derate (hold/min path; default 1.0)
+//! # advanced OCV (optional) — choose ONE refinement over the flat derates above:
+//! aocv_late:  1:1.10, 4:1.05, 8:1.02   # depth-dependent late derate (interpolated)
+//! aocv_early: 1:0.90, 4:0.95, 8:0.98   # depth-dependent early derate
+//! pocv_sigma: 0.05                  # POCV: per-stage 1-sigma as a fraction of delay
+//! pocv_n:     3.0                   # POCV: number of sigmas (default 3.0)
 //! ```
 
 use std::collections::BTreeMap;
@@ -27,6 +33,12 @@ pub struct StaJob {
     pub output_load: f64,
     pub late_derate: f64,
     pub early_derate: f64, // OCV early derate on cell delays for the hold (min) path
+    // OCV mode (resolved at analysis time): POCV if pocv_sigma > 0, else AOCV if an
+    // aocv table is present, else flat (the late/early scalar derates above).
+    pub pocv_sigma: f64, // POCV 1-sigma as a fraction of each stage's nominal delay
+    pub pocv_n: f64,     // number of sigmas for the statistical bound (default 3.0)
+    pub aocv_late: Vec<(f64, f64)>, // AOCV late derate vs path depth: (stages, derate)
+    pub aocv_early: Vec<(f64, f64)>, // AOCV early derate vs path depth
     pub miller: f64, // crosstalk Miller coupling factor (2.0 worst late; 1.0 disables SI)
     pub xtalk_window: f64, // ns — guard band added to the slew-derived switching window
     pub base_dir: String,
@@ -46,6 +58,19 @@ fn strip_comment(line: &str) -> &str {
         Some(i) => &line[..i],
         None => line,
     }
+}
+
+/// Parse `depth:derate` pairs, e.g. `1:1.10, 2:1.07, 4:1.04` -> [(1,1.10),...].
+fn pairs(s: &str) -> Vec<(f64, f64)> {
+    let mut v: Vec<(f64, f64)> = s
+        .split(',')
+        .filter_map(|p| {
+            let (a, b) = p.split_once(':')?;
+            Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+        })
+        .collect();
+    v.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    v
 }
 
 impl StaJob {
@@ -85,6 +110,10 @@ impl StaJob {
             output_load: num("output_load", 0.005),
             late_derate: num("late_derate", 1.0),
             early_derate: num("early_derate", 1.0),
+            pocv_sigma: num("pocv_sigma", 0.0),
+            pocv_n: num("pocv_n", 3.0),
+            aocv_late: kv.get("aocv_late").map(|s| pairs(s)).unwrap_or_default(),
+            aocv_early: kv.get("aocv_early").map(|s| pairs(s)).unwrap_or_default(),
             miller: num("miller", 2.0),
             xtalk_window: num("xtalk_window", 0.0), // guard band on top of slew-derived window
             base_dir: base_dir.to_string(),
