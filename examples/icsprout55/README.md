@@ -15,7 +15,7 @@ Typical corner (tt, 1.2 V, 25 °C), 2 ns clock:
 
 | run  | setup WNS | hold WHS |
 | ---- | --------- | -------- |
-| flat | 1.8273 ns | 0.1113 ns |
+| flat | 1.8281 ns | 0.1124 ns |
 | POCV (σ 6%, 3σ) | 1.8015 ns | **0.0906 ns** |
 
 A 3-sigma statistical band trims both margins — the concrete reason advanced-node
@@ -31,12 +31,12 @@ across them:
 
 ```
   scenario      WNS setup     WHS hold   verdict
-  ss_slow         1.6931        0.1800   MET
-  tt_typ          1.8273        0.1113   MET
-  ff_fast         1.8746        0.0750   MET
+  ss_slow         1.6963        0.1800   MET
+  tt_typ          1.8281        0.1124   MET
+  ff_fast         1.8746        0.0769   MET
 
-  worst setup: 1.6931 ns  (ss_slow)   [MET]
-  worst hold:  0.0750 ns  (ff_fast)   [MET]
+  worst setup: 1.6963 ns  (ss_slow)   [MET]
+  worst hold:  0.0769 ns  (ff_fast)   [MET]
 ```
 
 This is the textbook corner split: **setup binds at the slow corner** (slowest

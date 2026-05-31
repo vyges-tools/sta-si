@@ -3,8 +3,9 @@
 //! From a netlist + Liberty + clock it builds a directed timing graph — cell
 //! arcs (input pin → output pin, delay from the NLDM tables given input slew and
 //! output load) and net arcs (driver → sinks) — topologically orders it,
-//! propagates arrival time + slew forward, derives required time backward from
-//! the clock period, and reports WNS / TNS and the worst path.
+//! propagates arrival time + slew forward with **rise/fall split by arc
+//! unateness** (so a chain alternates edges instead of taking max(rise,fall) per
+//! stage), and reports WNS / TNS and the worst path.
 //!
 //! When a SPEF is supplied, net arcs carry a per-pin tree Elmore interconnect
 //! delay and the wire capacitance loads the driver; crosstalk (see `si`) adds a
@@ -320,42 +321,29 @@ pub fn analyze(
     };
 
     // ---- forward propagation, reusable over a net-delay table ------------
-    // `late=true` is the max-delay (setup) path: max-corner cell delay. `late=false`
-    // is the min-delay (hold) path: min-corner cell delay, accumulated with a min.
-    // Net arcs carry the SPEF delay and neither derate nor add depth/variance.
-    let edge_raw = |kind: &EdgeKind, slew_u: f64, load_v: f64, nd: &[f64], late: bool| -> (f64, f64, bool) {
-        match kind {
-            EdgeKind::Net(i) => (nd[*i], slew_u, false),
-            EdgeKind::Cell(a) => {
-                let r = a.cell_rise.lookup(slew_u, load_v);
-                let f = a.cell_fall.lookup(slew_u, load_v);
-                let sr = a.rise_transition.lookup(slew_u, load_v);
-                let sf = a.fall_transition.lookup(slew_u, load_v);
-                if late {
-                    (r.max(f), sr.max(sf), true)
-                } else {
-                    (r.min(f), sr.min(sf), true)
-                }
-            }
-        }
-    };
+    // Rise and fall propagate as **separate lanes** (0=rise, 1=fall): a cell arc
+    // maps input→output edges by its unateness (negative_unate inverts: out-rise
+    // comes from in-fall; positive_unate keeps; non_unate takes the worst of both),
+    // and uses the matching cell_rise/cell_fall + transition table. This avoids the
+    // pessimism of `max(rise,fall)` at every stage — an inverter chain alternates
+    // edges, so the true path is sum-of-alternating, not sum-of-max. `late=true`
+    // keeps the max edge, `late=false` the min. Per lane we also carry nominal
+    // arrival, cell-stage depth, and variance (AOCV/POCV). On return we collapse
+    // each node to its worst lane so every downstream consumer is unchanged.
     let input_slew = job.input_slew;
-    // Returns the reported (derated / N-sigma) arrival metric, slew, predecessor,
-    // and topo order. Internally tracks nominal arrival, accumulated depth, and
-    // variance so AOCV can derate per stage and POCV can band by sqrt(depth).
     let relax = |nd: &[f64], late: bool| -> (Vec<f64>, Vec<f64>, Vec<Option<usize>>, Vec<usize>) {
         let init = if late { f64::NEG_INFINITY } else { f64::INFINITY };
-        let mut arrival = vec![init; n]; // the metric: derated (flat/AOCV) or +-N*sigma (POCV)
-        let mut arr_nom = vec![0.0f64; n]; // nominal accumulated delay (for the next stage)
-        let mut var = vec![0.0f64; n]; // accumulated delay variance (POCV)
-        let mut depth = vec![0usize; n]; // cell-stage count on the selected path
-        let mut slew = vec![input_slew; n];
-        let mut from: Vec<Option<usize>> = vec![None; n];
+        let mut arr = vec![[init; 2]; n]; // per-lane metric (derated / +-N*sigma)
+        let mut arr_nom = vec![[0.0f64; 2]; n];
+        let mut var = vec![[0.0f64; 2]; n];
+        let mut depth = vec![[0usize; 2]; n];
+        let mut slew = vec![[input_slew; 2]; n];
+        let mut from: Vec<[Option<usize>; 2]> = vec![[None; 2]; n];
         let mut indeg_work = indeg.clone();
         let mut order: Vec<usize> = Vec::new();
         for v in 0..n {
             if indeg_work[v] == 0 {
-                arrival[v] = 0.0;
+                arr[v] = [0.0; 2];
                 order.push(v);
             }
         }
@@ -364,35 +352,105 @@ pub fn analyze(
             let u = order[head];
             head += 1;
             for e in &out_edges[u] {
-                let (d_nom, sout, is_cell) = edge_raw(&e.kind, slew[u], node_load[e.to], nd, late);
-                let stage = if is_cell { depth[u] + 1 } else { depth[u] };
-                let derate = if is_cell { cell_derate(late, stage) } else { 1.0 };
-                let arr_nom_cand = arr_nom[u] + d_nom * derate;
-                let sigma = if pocv && is_cell { pocv_sigma * d_nom } else { 0.0 };
-                let var_cand = var[u] + sigma * sigma;
-                let metric_cand = if pocv {
-                    let band = n_sigma * var_cand.sqrt();
-                    if late { arr_nom_cand + band } else { arr_nom_cand - band }
-                } else {
-                    arr_nom_cand
-                };
-                let better =
-                    if late { metric_cand > arrival[e.to] } else { metric_cand < arrival[e.to] };
-                if better {
-                    arrival[e.to] = metric_cand;
-                    arr_nom[e.to] = arr_nom_cand;
-                    var[e.to] = var_cand;
-                    depth[e.to] = stage;
-                    slew[e.to] = sout;
-                    from[e.to] = Some(u);
+                let v = e.to;
+                let load = node_load[v];
+                match &e.kind {
+                    EdgeKind::Net(i) => {
+                        // interconnect: rise->rise, fall->fall, same delay, no derate
+                        let d = nd[*i];
+                        for l in 0..2 {
+                            let a = arr[u][l];
+                            if !a.is_finite() {
+                                continue;
+                            }
+                            let metric = a + d; // band carries (no new variance)
+                            let better =
+                                if late { metric > arr[v][l] } else { metric < arr[v][l] };
+                            if better {
+                                arr[v][l] = metric;
+                                arr_nom[v][l] = arr_nom[u][l] + d;
+                                var[v][l] = var[u][l];
+                                depth[v][l] = depth[u][l];
+                                slew[v][l] = slew[u][l];
+                                from[v][l] = Some(u);
+                            }
+                        }
+                    }
+                    EdgeKind::Cell(arc) => {
+                        for ol in 0..2 {
+                            let (dt, st) = if ol == 0 {
+                                (&arc.cell_rise, &arc.rise_transition)
+                            } else {
+                                (&arc.cell_fall, &arc.fall_transition)
+                            };
+                            for il in 0..2 {
+                                // does input edge `il` drive output edge `ol`?
+                                let feeds = match arc.sense.as_str() {
+                                    "positive_unate" => il == ol,
+                                    "negative_unate" => il != ol,
+                                    _ => true, // non_unate / unknown: worst of both
+                                };
+                                if !feeds {
+                                    continue;
+                                }
+                                let a_in = arr[u][il];
+                                if !a_in.is_finite() {
+                                    continue;
+                                }
+                                let sin = slew[u][il];
+                                let d = dt.lookup(sin, load);
+                                let sout = st.lookup(sin, load);
+                                let stage = depth[u][il] + 1;
+                                let derate = cell_derate(late, stage);
+                                let nom = arr_nom[u][il] + d * derate;
+                                let sigma = if pocv { pocv_sigma * d } else { 0.0 };
+                                let var_c = var[u][il] + sigma * sigma;
+                                let metric = if pocv {
+                                    let band = n_sigma * var_c.sqrt();
+                                    if late { nom + band } else { nom - band }
+                                } else {
+                                    nom
+                                };
+                                let better =
+                                    if late { metric > arr[v][ol] } else { metric < arr[v][ol] };
+                                if better {
+                                    arr[v][ol] = metric;
+                                    arr_nom[v][ol] = nom;
+                                    var[v][ol] = var_c;
+                                    depth[v][ol] = stage;
+                                    slew[v][ol] = sout;
+                                    from[v][ol] = Some(u);
+                                }
+                            }
+                        }
+                    }
                 }
-                indeg_work[e.to] -= 1;
-                if indeg_work[e.to] == 0 {
-                    order.push(e.to);
+                indeg_work[v] -= 1;
+                if indeg_work[v] == 0 {
+                    order.push(v);
                 }
             }
         }
-        (arrival, slew, from, order)
+        // collapse each node to its worst lane (max for late, min for early)
+        let pick = |a: [f64; 2]| -> usize {
+            if late {
+                if a[0] >= a[1] { 0 } else { 1 }
+            } else if a[0] <= a[1] {
+                0
+            } else {
+                1
+            }
+        };
+        let mut arrival = vec![init; n];
+        let mut slew_c = vec![input_slew; n];
+        let mut from_c: Vec<Option<usize>> = vec![None; n];
+        for v in 0..n {
+            let l = pick(arr[v]);
+            arrival[v] = arr[v][l];
+            slew_c[v] = slew[v][l];
+            from_c[v] = from[v][l];
+        }
+        (arrival, slew_c, from_c, order)
     };
 
     // Per-arc interconnect delay, iterated to convergence. Each net's switching

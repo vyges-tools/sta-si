@@ -175,7 +175,7 @@ moves slack), **CRPR** (launch and capture take opposite clock corners — late/
 for setup, early/late for hold — and the OCV spread on the clock path they *share*
 is credited back, removing reconvergence pessimism; `crpr: false` to disable), and
 **MCMM** (a job can list per-corner scenario `.sta` files; the worst setup and worst
-hold are reported across them). Fully offline, no external deps, 30 tests green. It **closes the loop with the other engines**: it reads the
+hold are reported across them), and **rise/fall-split unate propagation**. Fully offline, no external deps, 32 tests green. It **closes the loop with the other engines**: it reads the
 Liberty `vyges-char` emits and the SPEF (incl. coupling + RC tree) `vyges-extract`
 emits — the SI margin OpenSTA lacks.
 
@@ -186,11 +186,13 @@ operating slews (not table maxima) — the constraint methodology matches OpenST
 first sub-100nm node)**, whose reg-to-reg setup/hold/POCV example is in
 [`examples/icsprout55/`](examples/icsprout55/) and pinned in the test suite.
 
-**Correlated against OpenSTA 2.7.0** on a sky130 reg→reg design: global WNS matches
-to 4 decimals (9.3760 ns), the DFF CK→Q arc is identical (0.6240 ns), and the
-multi-stage data path agrees within ~0.3% — slightly conservative because we take
-`max(rise,fall)` per stage rather than propagating unate edges (a safe bias).
+Propagation is **rise/fall-split by arc unateness** — an inverter chain alternates
+edges rather than taking `max(rise,fall)` per stage, matching how real paths behave.
 
-The road to sign-off grade builds on the same graph: unate-aware (rise/fall-split)
-propagation, then **multi-clock / generated clocks**. The SI margin it adds over
-OpenSTA stays.
+**Correlated against OpenSTA 2.7.0** on a sky130 design: single-arc paths match to
+4 decimals (global WNS 9.3760 ns, DFF CK→Q 0.6240 ns), and a multi-stage reg→reg
+path agrees within **~3%** (down from ~7% before unate-split), staying slightly
+conservative — the residual is second-order slew propagation.
+
+The road to sign-off grade builds on the same graph: slew-propagation refinement,
+then **multi-clock / generated clocks**. The SI margin it adds over OpenSTA stays.
