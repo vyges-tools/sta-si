@@ -40,13 +40,17 @@ pub struct Pin {
     pub name: String,
     pub direction: Dir,
     pub capacitance: f64,
-    pub arcs: Vec<Arc>, // populated for output pins
+    pub clock: bool,         // `clock : true` — the cell's clock pin
+    pub setup: Option<f64>,  // setup constraint (ns) on a data pin, vs the clock
+    pub arcs: Vec<Arc>,      // delay arcs (e.g. CK->Q on a flop output)
 }
 
 #[derive(Debug, Clone)]
 pub struct Cell {
     pub name: String,
     pub pins: BTreeMap<String, Pin>,
+    pub is_seq: bool,                // has an `ff`/`latch` group
+    pub clock_pin: Option<String>,   // the pin marked `clock : true`
 }
 
 #[derive(Debug, Clone, Default)]
@@ -252,6 +256,24 @@ fn parse_arc(timing_body: &str) -> Arc {
     }
 }
 
+/// Largest value in a constraint timing group (rise/fall_constraint) — a
+/// representative setup/hold number (interpolating at the real slews is later).
+fn constraint_max(timing_body: &str) -> f64 {
+    let mut m = 0.0f64;
+    for name in ["rise_constraint", "fall_constraint"] {
+        if let Some((_, tb, _)) = next_block(timing_body, 0, name) {
+            for row in &parse_table(&tb).values {
+                for &v in row {
+                    if v > m {
+                        m = v;
+                    }
+                }
+            }
+        }
+    }
+    m
+}
+
 fn parse_pin(name: String, body: &str) -> Pin {
     let direction = match simple_attr(body, "direction").as_deref() {
         Some("input") => Dir::In,
@@ -260,13 +282,22 @@ fn parse_pin(name: String, body: &str) -> Pin {
     };
     let capacitance =
         simple_attr(body, "capacitance").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let clock = simple_attr(body, "clock").as_deref() == Some("true");
     let mut arcs = Vec::new();
+    let mut setup: Option<f64> = None;
     let mut at = 0;
     while let Some((_, tbody, after)) = next_block(body, at, "timing") {
-        arcs.push(parse_arc(&tbody));
+        match simple_attr(&tbody, "timing_type").as_deref() {
+            Some(tt) if tt.starts_with("setup") => {
+                let v = constraint_max(&tbody);
+                setup = Some(setup.map_or(v, |s| s.max(v)));
+            }
+            Some(tt) if tt.starts_with("hold") => {} // hold handled in the early-path pass
+            _ => arcs.push(parse_arc(&tbody)), // delay arc (incl. rising_edge CK->Q)
+        }
         at = after;
     }
-    Pin { name, direction, capacitance, arcs }
+    Pin { name, direction, capacitance, clock, setup, arcs }
 }
 
 fn parse_cell(name: String, body: &str) -> Cell {
@@ -277,7 +308,9 @@ fn parse_cell(name: String, body: &str) -> Cell {
         pins.insert(pname, pin);
         at = after;
     }
-    Cell { name, pins }
+    let is_seq = next_block(body, 0, "ff").is_some() || next_block(body, 0, "latch").is_some();
+    let clock_pin = pins.iter().find(|(_, p)| p.clock).map(|(n, _)| n.clone());
+    Cell { name, pins, is_seq, clock_pin }
 }
 
 impl Lib {

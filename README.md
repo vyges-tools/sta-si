@@ -131,16 +131,18 @@ that foundry's NDA, never in this repository.
 
 ## Current state (2026-05-31)
 
-v1 does **combinational max-delay** timing (primary input → primary output) with
-NLDM cell delays interpolated on slew × load, a late OCV derate, **SPEF-driven
-interconnect** (wire-cap load + **per-pin tree Elmore** net delay), and **crosstalk
+v1 does **max-delay setup** timing — combinational (input → output) **and
+register-to-register** (flop Q launches via its CK→Q arc; flop D pins are capture
+endpoints with required = period − setup) — with NLDM cell delays interpolated on
+slew × load, a late OCV derate, **SPEF-driven interconnect** (wire-cap load +
+**per-pin tree Elmore** net delay), and **crosstalk
 delta-delay with slew-derived switching windows, iterated to convergence**
 (arrivals set the windows, the windows set the coupling, repeat until the per-arc
-delays stabilise). Fully offline, no external deps, 15 tests green. It **closes
+delays stabilise). Fully offline, no external deps, 17 tests green. It **closes
 the loop with the other engines**: it reads the Liberty `vyges-char` emits and
 the SPEF (incl. coupling + RC tree) `vyges-extract` emits — the SI margin OpenSTA
 lacks.
 
-The road to sign-off grade builds on the same graph: register setup/hold
-(sequential) timing and AOCV/POCV statistical derating. Correlation target:
-match OpenSTA on a routed block, then keep the SI margin it omits.
+The road to sign-off grade builds on the same graph: **hold timing** (the early /
+min-delay path) and AOCV/POCV statistical derating. Correlation target: match
+OpenSTA on a routed block, then keep the SI margin it omits.

@@ -6,12 +6,12 @@
 //! propagates arrival time + slew forward, derives required time backward from
 //! the clock period, and reports WNS / TNS and the worst path.
 //!
-//! When a SPEF is supplied, net arcs carry the lumped Elmore interconnect delay
-//! (R·C) and the wire capacitance is added to the driver load; without one the
-//! interconnect is ideal. v0 is **combinational max-delay** analysis (primary
-//! input → primary output) with a late OCV derate. Register CK→Q arcs are
-//! followed when present; flop setup/hold and crosstalk (see `si`) are the
-//! upgrades. Pure std — fully unit-tested offline.
+//! When a SPEF is supplied, net arcs carry a per-pin tree Elmore interconnect
+//! delay and the wire capacitance loads the driver; crosstalk (see `si`) adds a
+//! window-filtered margin. Analysis is **max-delay setup** — combinational
+//! (input → output) and register-to-register: a flop's Q launches via its CK→Q
+//! arc, and its D pins are capture endpoints (required = period − setup). Hold
+//! (the early / min-delay path) is the next layer. Pure std — unit-tested.
 
 use std::collections::HashMap;
 
@@ -125,7 +125,9 @@ pub fn analyze(
         net.load += job.output_load;
     }
 
-    // instance pins
+    // instance pins. A sequential cell's data pins (with a setup constraint)
+    // are *capture* endpoints; its Q launches via the CK->Q delay arc.
+    let mut flop_d: Vec<(usize, f64)> = Vec::new(); // (D pin node, setup ns)
     for inst in &nl.insts {
         let cell = lib.cell(&inst.cell).ok_or_else(|| StaError::UnknownCell(inst.cell.clone()))?;
         for (pin, net) in &inst.conns {
@@ -146,6 +148,12 @@ pub fn analyze(
                     let nref = nets.get_mut(net).unwrap();
                     nref.sinks.push(idx);
                     nref.load += cap;
+                    if cell.is_seq {
+                        if let Some(setup) = cell.pins[pin].setup {
+                            is_endpoint[idx] = true; // data pin = setup capture endpoint
+                            flop_d.push((idx, setup));
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -153,6 +161,12 @@ pub fn analyze(
     }
 
     let n = labels.len();
+    // required time at each endpoint: clock period, less setup at flop D pins
+    let period = job.period_ns;
+    let mut endpoint_req = vec![period; n];
+    for &(idx, setup) in &flop_d {
+        endpoint_req[idx] = period - setup;
+    }
     let mut node_load = vec![0.0f64; n];
     for (netname, net) in &nets {
         if let Some(d) = net.driver {
@@ -360,12 +374,11 @@ pub fn analyze(
     // final propagation consistent with the converged per-arc delays
     let (arrival, slew, from, order) = relax(&arc_delay);
 
-    // ---- backward: required time from the clock period -------------------
-    let period = job.period_ns;
+    // ---- backward: required time (period at outputs; period - setup at flops) --
     let mut required = vec![f64::INFINITY; n];
     for v in 0..n {
         if is_endpoint[v] {
-            required[v] = period;
+            required[v] = endpoint_req[v];
         }
     }
     for &u in order.iter().rev() {
