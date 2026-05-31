@@ -62,7 +62,7 @@ pub struct TimingReport {
 }
 
 enum EdgeKind {
-    Net(f64), // interconnect (Elmore) delay in ns, from SPEF (0 if ideal)
+    Net(usize), // net index — delay looked up from the per-net delay table
     Cell(Box<Arc>),
 }
 
@@ -186,31 +186,47 @@ pub fn analyze(
             }
         }
     }
-    // net arcs: driver -> each sink, carrying the SPEF Elmore net delay plus the
-    // worst-case crosstalk delta-delay from coupling (SI).
-    for (netname, net) in &nets {
+    // index the nets so net arcs can look up a (mutable, per-pass) delay table
+    let net_order: Vec<String> = nets.keys().cloned().collect();
+    let net_idx: HashMap<&str, usize> =
+        net_order.iter().enumerate().map(|(i, nm)| (nm.as_str(), i)).collect();
+    let nn = net_order.len();
+    let mut net_res = vec![0.0f64; nn];
+    let mut net_cap = vec![0.0f64; nn];
+    let mut net_drv: Vec<Option<usize>> = vec![None; nn];
+    let mut net_cpl: Vec<Vec<(usize, f64)>> = vec![Vec::new(); nn]; // (aggressor net idx, Cc)
+    for (name, net) in &nets {
+        let i = net_idx[name.as_str()];
+        net_drv[i] = net.driver;
+        if let Some(rc) = spef.and_then(|s| s.nets.get(name)) {
+            net_res[i] = rc.res_ohm;
+            net_cap[i] = rc.cap_ff;
+            for (agg, cc) in &rc.coupling {
+                if let Some(&ai) = net_idx.get(agg.as_str()) {
+                    net_cpl[i].push((ai, *cc));
+                }
+            }
+        }
+    }
+
+    // net arcs: driver -> each sink (delay resolved from the net delay table)
+    for (name, net) in &nets {
         if let Some(d) = net.driver {
-            let ndelay = spef
-                .and_then(|s| s.nets.get(netname))
-                .map(|rc| {
-                    rc.res_ohm * rc.cap_ff * 1e-6 // nominal Elmore (Cc counted once, grounded)
-                        + crate::si::xtalk_delta_ns(rc.res_ohm, rc.coupling_ff, job.miller)
-                })
-                .unwrap_or(0.0);
+            let i = net_idx[name.as_str()];
             for &s in &net.sinks {
                 if s != d {
-                    out_edges[d].push(Edge { to: s, kind: EdgeKind::Net(ndelay) });
+                    out_edges[d].push(Edge { to: s, kind: EdgeKind::Net(i) });
                     indeg[s] += 1;
                 }
             }
         }
     }
 
-    // ---- forward: topological propagation of arrival + slew --------------
+    // ---- forward propagation, reusable over a net-delay table ------------
     let derate = job.late_derate;
-    let edge_delay = |kind: &EdgeKind, slew_u: f64, load_v: f64| -> (f64, f64) {
+    let edge_delay = |kind: &EdgeKind, slew_u: f64, load_v: f64, nd: &[f64]| -> (f64, f64) {
         match kind {
-            EdgeKind::Net(d) => (*d, slew_u),
+            EdgeKind::Net(i) => (nd[*i], slew_u),
             EdgeKind::Cell(a) => {
                 let d = a.cell_rise.lookup(slew_u, load_v).max(a.cell_fall.lookup(slew_u, load_v));
                 let s = a
@@ -221,41 +237,70 @@ pub fn analyze(
             }
         }
     };
+    let input_slew = job.input_slew;
+    let relax = |nd: &[f64]| -> (Vec<f64>, Vec<f64>, Vec<Option<usize>>, Vec<usize>) {
+        let mut arrival = vec![f64::NEG_INFINITY; n];
+        let mut slew = vec![input_slew; n];
+        let mut from: Vec<Option<usize>> = vec![None; n];
+        let mut indeg_work = indeg.clone();
+        let mut order: Vec<usize> = Vec::new();
+        for v in 0..n {
+            if indeg_work[v] == 0 {
+                arrival[v] = 0.0;
+                order.push(v);
+            }
+        }
+        let mut head = 0;
+        while head < order.len() {
+            let u = order[head];
+            head += 1;
+            for e in &out_edges[u] {
+                let (d, sout) = edge_delay(&e.kind, slew[u], node_load[e.to], nd);
+                let cand = arrival[u] + d;
+                if cand > arrival[e.to] {
+                    arrival[e.to] = cand;
+                    slew[e.to] = sout;
+                    from[e.to] = Some(u);
+                }
+                indeg_work[e.to] -= 1;
+                if indeg_work[e.to] == 0 {
+                    order.push(e.to);
+                }
+            }
+        }
+        (arrival, slew, from, order)
+    };
 
-    let mut arrival = vec![f64::NEG_INFINITY; n];
-    let mut slew = vec![job.input_slew; n];
-    let mut from: Vec<Option<usize>> = vec![None; n];
-    let mut indeg_work = indeg.clone();
-    let mut queue: Vec<usize> = Vec::new();
-    for v in 0..n {
-        if indeg_work[v] == 0 {
-            arrival[v] = 0.0; // start point (primary input or undriven sink)
-            queue.push(v);
-        }
-    }
-    let mut processed = 0usize;
-    let mut head = 0;
-    while head < queue.len() {
-        let u = queue[head];
-        head += 1;
-        processed += 1;
-        for e in &out_edges[u] {
-            let (d, sout) = edge_delay(&e.kind, slew[u], node_load[e.to]);
-            let cand = arrival[u] + d;
-            if cand > arrival[e.to] {
-                arrival[e.to] = cand;
-                slew[e.to] = sout;
-                from[e.to] = Some(u);
-            }
-            indeg_work[e.to] -= 1;
-            if indeg_work[e.to] == 0 {
-                queue.push(e.to);
-            }
-        }
-    }
-    if processed != n {
+    // Pass A: nominal interconnect (Cc grounded once) -> per-net switching time.
+    let nominal: Vec<f64> = (0..nn).map(|i| net_res[i] * net_cap[i] * 1e-6).collect();
+    let (arr_a, _sa, _fa, order_a) = relax(&nominal);
+    if order_a.len() != n {
         return Err(StaError::CombinationalLoop);
     }
+    let sw: Vec<f64> =
+        (0..nn).map(|i| net_drv[i].map(|d| arr_a[d]).unwrap_or(f64::NEG_INFINITY)).collect();
+
+    // Window-aware crosstalk: a victim gains the Miller delta only from
+    // aggressors whose switching time falls within `xtalk_window` of its own.
+    let window = job.xtalk_window;
+    let net_delay: Vec<f64> = (0..nn)
+        .map(|i| {
+            let mut d = nominal[i];
+            let svi = sw[i];
+            if svi.is_finite() {
+                for &(ai, cc) in &net_cpl[i] {
+                    let sva = sw[ai];
+                    if sva.is_finite() && (sva - svi).abs() <= window {
+                        d += crate::si::xtalk_delta_ns(net_res[i], cc, job.miller);
+                    }
+                }
+            }
+            d
+        })
+        .collect();
+
+    // Pass B: re-propagate with the window-filtered crosstalk.
+    let (arrival, slew, from, order) = relax(&net_delay);
 
     // ---- backward: required time from the clock period -------------------
     let period = job.period_ns;
@@ -265,9 +310,9 @@ pub fn analyze(
             required[v] = period;
         }
     }
-    for &u in queue.iter().rev() {
+    for &u in order.iter().rev() {
         for e in &out_edges[u] {
-            let (d, _) = edge_delay(&e.kind, slew[u], node_load[e.to]);
+            let (d, _) = edge_delay(&e.kind, slew[u], node_load[e.to], &net_delay);
             let req = required[e.to] - d;
             if req < required[u] {
                 required[u] = req;

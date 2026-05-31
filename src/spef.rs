@@ -11,11 +11,12 @@
 
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct NetRc {
     pub cap_ff: f64,      // total cap (grounded + coupling), from *D_NET
     pub res_ohm: f64,     // summed *RES
-    pub coupling_ff: f64, // coupling cap to neighbours (for crosstalk delta)
+    pub coupling_ff: f64, // total coupling cap (sum over neighbours)
+    pub coupling: Vec<(String, f64)>, // per-aggressor coupling (net, Cc) for window-aware SI
 }
 
 #[derive(Debug, Clone, Default)]
@@ -37,6 +38,7 @@ impl Spef {
         let mut names: BTreeMap<usize, String> = BTreeMap::new();
         let mut nets: BTreeMap<String, NetRc> = BTreeMap::new();
         let mut coupling: BTreeMap<String, f64> = BTreeMap::new(); // per-net coupling total
+        let mut coupling_list: BTreeMap<String, Vec<(String, f64)>> = BTreeMap::new();
         let mut cur: Option<(String, NetRc)> = None;
         let mut in_namemap = false;
         let mut in_res = false;
@@ -73,7 +75,10 @@ impl Spef {
                 let id = toks.get(1).and_then(|s| s.trim_start_matches('*').parse::<usize>().ok());
                 let cap = toks.get(2).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
                 let name = id.and_then(|i| names.get(&i).cloned()).unwrap_or_default();
-                cur = Some((name, NetRc { cap_ff: cap, res_ohm: 0.0, coupling_ff: 0.0 }));
+                cur = Some((
+                    name,
+                    NetRc { cap_ff: cap, res_ohm: 0.0, coupling_ff: 0.0, coupling: Vec::new() },
+                ));
                 continue;
             }
             match t {
@@ -121,8 +126,10 @@ impl Spef {
                     if let (Some(a), Some(b), Ok(v)) =
                         (netname(toks[1], &names), netname(toks[2], &names), toks[3].parse::<f64>())
                     {
-                        *coupling.entry(a).or_default() += v;
-                        *coupling.entry(b).or_default() += v;
+                        *coupling.entry(a.clone()).or_default() += v;
+                        *coupling.entry(b.clone()).or_default() += v;
+                        coupling_list.entry(a.clone()).or_default().push((b.clone(), v));
+                        coupling_list.entry(b).or_default().push((a, v));
                     }
                 }
             }
@@ -130,6 +137,7 @@ impl Spef {
         finish(&mut cur, &mut nets);
         for (name, rc) in nets.iter_mut() {
             rc.coupling_ff = coupling.get(name).copied().unwrap_or(0.0);
+            rc.coupling = coupling_list.get(name).cloned().unwrap_or_default();
         }
         Spef { nets }
     }

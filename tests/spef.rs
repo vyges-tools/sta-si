@@ -13,9 +13,11 @@ const SPEF: &str = r#"
 *2 n2
 *3 u1
 *4 u2
+*5 u3
 *D_NET *1 20.000000
 *CONN
 *I *3:Y O
+*I *4:A I
 *CAP
 1 *3:Y 10.000000
 2 *1 10.000000
@@ -23,6 +25,17 @@ const SPEF: &str = r#"
 *RES
 1 *1 *3:Y 500.000000
 2 *1 *4:A 500.000000
+*END
+*D_NET *2 20.000000
+*CONN
+*I *4:Y O
+*I *5:A I
+*CAP
+1 *4:Y 10.000000
+2 *2 10.000000
+*RES
+1 *2 *4:Y 500.000000
+2 *2 *5:A 500.000000
 *END
 "#;
 
@@ -44,8 +57,11 @@ library (d) {
 }
 "#;
 
-const NL: &str = "module top ( a, y ); input a; output y; wire n1;\n\
-                  INV u1 ( .A(a), .Y(n1) ); INV u2 ( .A(n1), .Y(y) ); endmodule";
+// 3-inverter chain: n1 (driver u1) and n2 (driver u2) both exist and switch at
+// different times, so window-aware coupling between them is testable.
+const NL: &str = "module top ( a, y ); input a; output y; wire n1, n2;\n\
+                  INV u1 ( .A(a), .Y(n1) ); INV u2 ( .A(n1), .Y(n2) );\n\
+                  INV u3 ( .A(n2), .Y(y) ); endmodule";
 
 fn job() -> StaJob {
     StaJob {
@@ -59,6 +75,7 @@ fn job() -> StaJob {
         output_load: 0.005,
         late_derate: 1.0,
         miller: 2.0,
+        xtalk_window: 0.2,
         base_dir: String::new(),
     }
 }
@@ -81,11 +98,27 @@ fn crosstalk_reduces_slack_vs_quiet() {
     let lib = Lib::parse(LIB).unwrap();
     let spef = Spef::parse(SPEF);
     let mut j = job();
+    j.xtalk_window = 1.0; // wide window so the aggressor is in scope (test the Miller effect)
     j.miller = 2.0; // worst-case aggressor
     let with_si = analyze(&nl, &lib, &j, Some(&spef)).unwrap();
     j.miller = 1.0; // quiet aggressor -> coupling acts as plain ground (no extra)
     let quiet = analyze(&nl, &lib, &j, Some(&spef)).unwrap();
     assert!(with_si.wns < quiet.wns, "SI {} !< quiet {}", with_si.wns, quiet.wns);
+}
+
+#[test]
+fn window_filters_non_overlapping_aggressors() {
+    let nl = netlist::parse(NL).unwrap();
+    let lib = Lib::parse(LIB).unwrap();
+    let spef = Spef::parse(SPEF);
+    // n1 and n2 (coupled) switch ~0.1 ns apart in the chain.
+    let mut j = job();
+    j.miller = 2.0;
+    j.xtalk_window = 1.0; // wide -> windows overlap -> crosstalk counted
+    let wide = analyze(&nl, &lib, &j, Some(&spef)).unwrap();
+    j.xtalk_window = 0.0; // narrow -> no overlap -> crosstalk filtered out
+    let narrow = analyze(&nl, &lib, &j, Some(&spef)).unwrap();
+    assert!(wide.wns < narrow.wns, "wide {} !< narrow {}", wide.wns, narrow.wns);
 }
 
 #[test]

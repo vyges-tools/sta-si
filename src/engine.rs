@@ -53,6 +53,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         output_load: 0.005,
         late_derate: 1.0,
         miller: 2.0,
+        xtalk_window: 0.2,
         base_dir: String::new(),
     };
     let rep = analyze_inputs(DEMO_NETLIST, DEMO_LIB, &job).unwrap_or(TimingReport {

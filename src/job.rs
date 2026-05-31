@@ -27,6 +27,7 @@ pub struct StaJob {
     pub output_load: f64,
     pub late_derate: f64,
     pub miller: f64, // crosstalk Miller coupling factor (2.0 worst late; 1.0 disables SI)
+    pub xtalk_window: f64, // ns — couple an aggressor only if it switches within this of the victim
     pub base_dir: String,
 }
 
@@ -83,6 +84,7 @@ impl StaJob {
             output_load: num("output_load", 0.005),
             late_derate: num("late_derate", 1.0),
             miller: num("miller", 2.0),
+            xtalk_window: num("xtalk_window", 0.2),
             base_dir: base_dir.to_string(),
         };
         job.validate()?;
