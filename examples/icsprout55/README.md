@@ -8,6 +8,7 @@ analyzed for setup **and** hold against the foundry's NLDM Liberty.
 ```sh
 vyges-sta-si run regreg.sta        # flat OCV
 vyges-sta-si run regreg_pocv.sta   # POCV (statistical) OCV
+vyges-sta-si run mcmm.sta          # multi-corner sign-off (ss / tt / ff)
 ```
 
 Typical corner (tt, 1.2 V, 25 °C), 2 ns clock:
@@ -21,6 +22,30 @@ The hold margin is only ~19 ps to begin with, and a 3-sigma statistical band
 shrinks it to ~3 ps — the concrete reason advanced-node sign-off needs OCV, not a
 flat derate. The launch path is a real `DFFQX1H7R` CK→Q arc; delays are bilinear
 interpolations of the foundry's NLDM tables.
+
+## Multi-corner sign-off (MCMM)
+
+`mcmm.sta` lists three scenarios — the slow (ss), typical (tt), and fast (ff)
+corners, each its own extracted lib — and reports the worst setup and worst hold
+across them:
+
+```
+  scenario      WNS setup     WHS hold   verdict
+  ss_slow         1.4144       -0.0790   HOLD VIOLATED
+  tt_typ          1.7126        0.0191   MET
+  ff_fast         1.8053        0.0384   MET
+
+  worst setup: 1.4144 ns  (ss_slow)
+  worst hold: -0.0790 ns  (ss_slow)   [VIOLATED]
+```
+
+The slow corner binds setup (slowest paths) — and here it also fails hold at this
+2 ns clock, because the foundry's hold constraint grows at the cold/low-voltage
+corner faster than the slower data path compensates. That cross-corner catch is
+precisely the point of MCMM: each check is signed off against whichever corner is
+worst for it, automatically. (Corner files are extracted 2-cell libs; point each
+scenario's `lib:` at the full per-corner library from the PDK release for a real
+block.)
 
 ## The Liberty here
 

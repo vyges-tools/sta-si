@@ -118,8 +118,18 @@ pocv_sigma: 0.05            # POCV: per-stage 1-sigma as a fraction of stage del
 pocv_n:     3.0             # POCV: number of sigmas for the bound (default 3.0)
 ```
 
+For **MCMM**, a job instead lists scenario files and the engine reports the worst
+setup/hold across them:
+
+```text
+design:    top
+scenarios: corner_ss.sta, corner_tt.sta, corner_ff.sta   # each a full single-corner .sta
+```
+
 A complete, runnable example is in [`examples/top/`](examples/top/);
 `vyges-sta-si run examples/top/top.sta` reports the slack on a 3-inverter chain.
+See [`examples/icsprout55/`](examples/icsprout55/) for a 55nm reg-to-reg path with
+flat / POCV / multi-corner (`mcmm.sta`) runs.
 
 ## Open core, certified fab plugins
 
@@ -157,13 +167,20 @@ as **WHS / THS**. On top of that: NLDM cell delays interpolated on slew × load,
 late OCV derate, **SPEF-driven interconnect** (wire-cap load + **per-pin tree
 Elmore** net delay), and **crosstalk delta-delay with slew-derived switching
 windows, iterated to convergence** (arrivals set the windows, the windows set the
-coupling, repeat until the per-arc delays stabilise), and **AOCV / POCV** on-chip
-variation (depth-dependent derate table, or a statistical √depth N-sigma band) on
-top of the flat derates. Fully offline, no external deps, 22 tests green. It
-**closes the loop with the other engines**: it reads the Liberty `vyges-char` emits
-and the SPEF (incl. coupling + RC tree) `vyges-extract` emits — the SI margin
-OpenSTA lacks.
+coupling, repeat until the per-arc delays stabilise), **AOCV / POCV** on-chip
+variation (depth-dependent derate table, or a statistical √depth N-sigma band),
+**clock-network skew** (the clock is timed like any path; each capture flop's
+insertion delay enters its required time, so common latency cancels and only skew
+moves slack), and **MCMM** (a job can list per-corner scenario `.sta` files; the
+worst setup and worst hold are reported across them). Fully offline, no external
+deps, 28 tests green. It **closes the loop with the other engines**: it reads the
+Liberty `vyges-char` emits and the SPEF (incl. coupling + RC tree) `vyges-extract`
+emits — the SI margin OpenSTA lacks.
 
-The road to sign-off grade builds on the same graph: **multi-corner / multi-mode**
-(MCMM) and clock-network/skew modelling. Correlation target: match OpenSTA on a
+**Validated on real PDKs:** sky130, gf180, ihp-sg13g2, and **icsprout55 (55nm — our
+first sub-100nm node)**, whose reg-to-reg setup/hold/POCV example is in
+[`examples/icsprout55/`](examples/icsprout55/) and pinned in the test suite.
+
+The road to sign-off grade builds on the same graph: **CRPR** (clock reconvergence
+pessimism removal) and clock-path OCV. Correlation target: match OpenSTA on a
 routed block, then keep the SI margin it omits.

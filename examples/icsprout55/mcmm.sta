@@ -1,0 +1,3 @@
+# Multi-corner sign-off: setup is bound by the slow corner, hold by the fast one.
+design:    ics55_regreg_mcmm
+scenarios: corner_ss.sta, corner_tt.sta, corner_ff.sta

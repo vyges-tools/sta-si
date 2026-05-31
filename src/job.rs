@@ -17,6 +17,14 @@
 //! pocv_sigma: 0.05                  # POCV: per-stage 1-sigma as a fraction of delay
 //! pocv_n:     3.0                   # POCV: number of sigmas (default 3.0)
 //! ```
+//!
+//! An **MCMM** job instead lists per-corner scenario files (each a full `.sta`);
+//! the engine runs all and reports the worst setup/hold across them:
+//!
+//! ```text
+//! design:    top
+//! scenarios: corner_ss.sta, corner_tt.sta, corner_ff.sta
+//! ```
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -41,6 +49,10 @@ pub struct StaJob {
     pub aocv_early: Vec<(f64, f64)>, // AOCV early derate vs path depth
     pub miller: f64, // crosstalk Miller coupling factor (2.0 worst late; 1.0 disables SI)
     pub xtalk_window: f64, // ns — guard band added to the slew-derived switching window
+    // MCMM: when non-empty, this is a multi-corner/multi-mode job — each entry is a
+    // path to a single-scenario `.sta`; the engine runs all and reports the worst
+    // setup and worst hold across them. The fields above are then unused.
+    pub scenarios: Vec<String>,
     pub base_dir: String,
 }
 
@@ -87,22 +99,31 @@ impl StaJob {
             kv.insert(k.trim().to_lowercase(), v.trim().to_string());
         }
         let get = |k: &str| kv.get(k).cloned().ok_or_else(|| JobError(format!("missing key: {k}")));
-        let clock = get("clock")?;
-        let mut parts = clock.split_whitespace();
-        let clock_port = parts.next().unwrap_or("").to_string();
-        let period_ns = parts
-            .next()
-            .and_then(|s| s.parse().ok())
-            .ok_or_else(|| JobError("clock needs 'port period_ns'".into()))?;
+        let split_list = |s: &str| {
+            s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect::<Vec<_>>()
+        };
+        let scenarios = kv.get("scenarios").map(|s| split_list(s)).unwrap_or_default();
+        let mcmm = !scenarios.is_empty();
+        // clock/netlist/lib are required for a single run, optional for an MCMM job
+        // (each scenario file carries its own).
+        let (clock_port, period_ns) = match kv.get("clock") {
+            Some(clock) => {
+                let mut parts = clock.split_whitespace();
+                let port = parts.next().unwrap_or("").to_string();
+                let period = parts
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .ok_or_else(|| JobError("clock needs 'port period_ns'".into()))?;
+                (port, period)
+            }
+            None if mcmm => (String::new(), 0.0),
+            None => return Err(JobError("missing key: clock".into())),
+        };
         let num = |k: &str, d: f64| kv.get(k).and_then(|s| s.parse().ok()).unwrap_or(d);
         let job = StaJob {
             design: get("design")?,
-            netlist: get("netlist")?,
-            libs: get("lib")?
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect(),
+            netlist: kv.get("netlist").cloned().unwrap_or_default(),
+            libs: kv.get("lib").map(|s| split_list(s)).unwrap_or_default(),
             spef: kv.get("spef").filter(|s| !s.is_empty()).cloned(),
             clock_port,
             period_ns,
@@ -116,6 +137,7 @@ impl StaJob {
             aocv_early: kv.get("aocv_early").map(|s| pairs(s)).unwrap_or_default(),
             miller: num("miller", 2.0),
             xtalk_window: num("xtalk_window", 0.0), // guard band on top of slew-derived window
+            scenarios,
             base_dir: base_dir.to_string(),
         };
         job.validate()?;
@@ -136,7 +158,15 @@ impl StaJob {
         }
     }
 
+    /// True when this job orchestrates multiple corner/mode scenarios.
+    pub fn is_mcmm(&self) -> bool {
+        !self.scenarios.is_empty()
+    }
+
     fn validate(&self) -> Result<(), JobError> {
+        if self.is_mcmm() {
+            return Ok(()); // each scenario file is validated when it's loaded
+        }
         if self.netlist.is_empty() || self.libs.is_empty() {
             return Err(JobError("netlist and at least one lib are required".into()));
         }

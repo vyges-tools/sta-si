@@ -59,6 +59,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         aocv_early: vec![],
         miller: 2.0,
         xtalk_window: 0.0,
+        scenarios: vec![],
         base_dir: String::new(),
     };
     let rep = analyze_inputs(DEMO_NETLIST, DEMO_LIB, &job).unwrap_or(TimingReport {
@@ -176,6 +177,141 @@ pub fn report_json(job: &StaJob, rep: &TimingReport) -> String {
         ));
     }
     s.push_str("]}\n");
+    s
+}
+
+// ---- MCMM (multi-corner / multi-mode) -----------------------------------
+
+/// One scenario's analysis within an MCMM run.
+pub struct ScenarioResult {
+    pub name: String,
+    pub period_ns: f64,
+    pub report: TimingReport,
+}
+
+/// Aggregated result of an MCMM job: every scenario, plus the worst setup and
+/// worst hold across them (sign-off is the worst corner per check).
+pub struct McmmReport {
+    pub scenarios: Vec<ScenarioResult>,
+}
+
+impl McmmReport {
+    /// Worst (minimum) setup slack across scenarios that have setup endpoints.
+    pub fn worst_setup(&self) -> Option<(&str, f64)> {
+        self.scenarios
+            .iter()
+            .filter(|s| s.report.endpoints > 0)
+            .map(|s| (s.name.as_str(), s.report.wns))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+    }
+    /// Worst (minimum) hold slack across scenarios that have hold endpoints.
+    pub fn worst_hold(&self) -> Option<(&str, f64)> {
+        self.scenarios
+            .iter()
+            .filter(|s| s.report.hold_endpoints > 0)
+            .map(|s| (s.name.as_str(), s.report.whs))
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+    }
+}
+
+/// Run every scenario `.sta` listed in the MCMM job and collect the results.
+/// Each scenario is a full, independent STA (own corner libs, derates, clock).
+pub fn analyze_mcmm(job: &StaJob) -> Result<McmmReport, StaError> {
+    let mut scenarios = Vec::new();
+    for s in &job.scenarios {
+        let sub = StaJob::load(&job.resolve(s)).map_err(|e| StaError::Parse(e.to_string()))?;
+        let report = analyze_job(&sub)?;
+        scenarios.push(ScenarioResult { name: sub.design.clone(), period_ns: sub.period_ns, report });
+    }
+    if scenarios.is_empty() {
+        return Err(StaError::Parse("MCMM job lists no scenarios".into()));
+    }
+    Ok(McmmReport { scenarios })
+}
+
+/// Human-readable MCMM report: per-scenario slacks + the worst corner per check.
+pub fn render_mcmm(job: &StaJob, rep: &McmmReport) -> String {
+    let mut s = String::new();
+    s.push_str(&format!("MCMM report — design {}\n", job.design));
+    s.push_str(&format!("  scenarios: {}\n\n", rep.scenarios.len()));
+    s.push_str(&format!(
+        "  {:<20} {:>8}  {:>12}  {:>12}   verdict\n",
+        "scenario", "period", "WNS setup", "WHS hold"
+    ));
+    for sc in &rep.scenarios {
+        let r = &sc.report;
+        let setup_bad = r.endpoints > 0 && r.wns < 0.0;
+        let hold_bad = r.hold_endpoints > 0 && r.whs < 0.0;
+        let verdict = match (setup_bad, hold_bad) {
+            (false, false) => "MET",
+            (true, false) => "SETUP VIOLATED",
+            (false, true) => "HOLD VIOLATED",
+            (true, true) => "SETUP+HOLD VIOLATED",
+        };
+        let wns = if r.endpoints > 0 { format!("{:.4}", r.wns) } else { "  —".into() };
+        let whs = if r.hold_endpoints > 0 { format!("{:.4}", r.whs) } else { "  —".into() };
+        s.push_str(&format!(
+            "  {:<20} {:>8.3}  {:>12}  {:>12}   {}\n",
+            sc.name, sc.period_ns, wns, whs, verdict
+        ));
+    }
+    s.push('\n');
+    match rep.worst_setup() {
+        Some((name, wns)) => s.push_str(&format!(
+            "  worst setup: {:.4} ns  (scenario {})   [{}]\n",
+            wns, name, if wns >= 0.0 { "MET" } else { "VIOLATED" }
+        )),
+        None => s.push_str("  worst setup: (no setup endpoints)\n"),
+    }
+    match rep.worst_hold() {
+        Some((name, whs)) => s.push_str(&format!(
+            "  worst hold:  {:.4} ns  (scenario {})   [{}]\n",
+            whs, name, if whs >= 0.0 { "MET" } else { "VIOLATED" }
+        )),
+        None => s.push_str("  worst hold:  (no hold endpoints)\n"),
+    }
+    s
+}
+
+/// MCMM report as machine-readable JSON.
+pub fn mcmm_json(job: &StaJob, rep: &McmmReport) -> String {
+    let num = |v: f64| if v.is_finite() { format!("{v:.6}") } else { "null".to_string() };
+    let mut s = String::new();
+    s.push('{');
+    s.push_str(&format!("\"design\":{:?},", job.design));
+    s.push_str("\"scenarios\":[");
+    for (i, sc) in rep.scenarios.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        let r = &sc.report;
+        s.push_str(&format!(
+            "{{\"name\":{:?},\"period_ns\":{:.6},\"wns_ns\":{},\"tns_ns\":{},\"whs_ns\":{},\"ths_ns\":{}}}",
+            sc.name, sc.period_ns, num(r.wns), num(r.tns), num(r.whs), num(r.ths)
+        ));
+    }
+    s.push_str("],");
+    let ws = rep.worst_setup();
+    let wh = rep.worst_hold();
+    s.push_str(&format!(
+        "\"worst_setup_ns\":{},",
+        ws.map(|x| num(x.1)).unwrap_or_else(|| "null".into())
+    ));
+    s.push_str(&format!(
+        "\"worst_setup_scenario\":{},",
+        ws.map(|x| format!("{:?}", x.0)).unwrap_or_else(|| "null".into())
+    ));
+    s.push_str(&format!(
+        "\"worst_hold_ns\":{},",
+        wh.map(|x| num(x.1)).unwrap_or_else(|| "null".into())
+    ));
+    s.push_str(&format!(
+        "\"worst_hold_scenario\":{},",
+        wh.map(|x| format!("{:?}", x.0)).unwrap_or_else(|| "null".into())
+    ));
+    let met = ws.map(|x| x.1 >= 0.0).unwrap_or(true) && wh.map(|x| x.1 >= 0.0).unwrap_or(true);
+    s.push_str(&format!("\"met\":{met}"));
+    s.push_str("}\n");
     s
 }
 

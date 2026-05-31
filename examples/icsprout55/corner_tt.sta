@@ -1,0 +1,6 @@
+design:      tt_typ
+netlist:     regreg.v
+lib:         ics55_LLSC_H7CR_inv_dff.lib
+clock:       clk 2.0
+input_slew:  0.05
+output_load: 0.005

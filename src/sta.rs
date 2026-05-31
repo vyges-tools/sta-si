@@ -161,10 +161,13 @@ pub fn analyze(
 
     // instance pins. A sequential cell's data pins (with a setup constraint)
     // are *capture* endpoints; its Q launches via the CK->Q delay arc.
-    let mut flop_d: Vec<(usize, f64)> = Vec::new(); // (D pin node, setup ns)
-    let mut flop_hold: Vec<(usize, f64)> = Vec::new(); // (D pin node, hold ns)
+    // (D pin node, constraint ns, this flop's CK pin key) — the CK key resolves to
+    // a node whose arrival is the clock insertion delay to this flop (skew).
+    let mut flop_d: Vec<(usize, f64, Option<String>)> = Vec::new();
+    let mut flop_hold: Vec<(usize, f64, Option<String>)> = Vec::new();
     for inst in &nl.insts {
         let cell = lib.cell(&inst.cell).ok_or_else(|| StaError::UnknownCell(inst.cell.clone()))?;
+        let ck_key = cell.clock_pin.as_ref().map(|cp| pin_key(&inst.name, cp));
         for (pin, net) in &inst.conns {
             let idx = node(
                 pin_key(&inst.name, pin),
@@ -186,10 +189,10 @@ pub fn analyze(
                     if cell.is_seq {
                         if let Some(setup) = cell.pins[pin].setup {
                             is_endpoint[idx] = true; // data pin = setup capture endpoint
-                            flop_d.push((idx, setup));
+                            flop_d.push((idx, setup, ck_key.clone()));
                         }
                         if let Some(hold) = cell.pins[pin].hold {
-                            flop_hold.push((idx, hold)); // same pin = hold capture endpoint
+                            flop_hold.push((idx, hold, ck_key.clone())); // hold capture endpoint
                         }
                     }
                 }
@@ -199,12 +202,10 @@ pub fn analyze(
     }
 
     let n = labels.len();
-    // required time at each endpoint: clock period, less setup at flop D pins
+    // endpoint required times are filled after the forward pass (they depend on the
+    // clock arrival at each capture flop — see clock-skew handling below).
     let period = job.period_ns;
     let mut endpoint_req = vec![period; n];
-    for &(idx, setup) in &flop_d {
-        endpoint_req[idx] = period - setup;
-    }
     let mut node_load = vec![0.0f64; n];
     for (netname, net) in &nets {
         if let Some(d) = net.driver {
@@ -465,6 +466,21 @@ pub fn analyze(
     // final late propagation consistent with the converged per-arc delays
     let (arrival, slew, from, _order) = relax(&arc_delay, true);
 
+    // clock insertion delay to a flop = the (late) arrival at its CK pin node.
+    let clk_late = |ck: &Option<String>| -> f64 {
+        ck.as_deref()
+            .and_then(|k| key2idx.get(k))
+            .map(|&i| arrival[i])
+            .filter(|a| a.is_finite())
+            .unwrap_or(0.0)
+    };
+    // capture edge is the launch edge + one period, shifted by the capture flop's
+    // clock arrival; setup constraint pulls it in. The launch flop's insertion delay
+    // is already inside `arrival` at D, so equal latencies cancel and only skew bites.
+    for (idx, setup, ck) in &flop_d {
+        endpoint_req[*idx] = clk_late(ck) + period - setup;
+    }
+
     // ---- setup slack + worst path ---------------------------------------
     // Each endpoint's required time is fixed (period at outputs, period - setup at
     // flop D), so slack = required - latest arrival; no backward pass needed.
@@ -515,16 +531,26 @@ pub fn analyze(
     // `hold` ns after the (same, zero-skew) capture edge, so the earliest arrival
     // must be >= hold. Slack = earliest_arrival - hold.
     let (arr_min, slew_min, from_min, _ord_min) = relax(&arc_delay_nom, false);
+    // capture clock for hold uses the early (min) insertion delay to that flop.
+    let clk_early = |ck: &Option<String>| -> f64 {
+        ck.as_deref()
+            .and_then(|k| key2idx.get(k))
+            .map(|&i| arr_min[i])
+            .filter(|a| a.is_finite())
+            .unwrap_or(0.0)
+    };
     let mut whs = f64::INFINITY;
     let mut ths = 0.0;
     let mut worst_hold = None;
     let mut hold_endpoints = 0;
-    for &(idx, hold) in &flop_hold {
+    for (idx, hold, ck) in &flop_hold {
+        let idx = *idx;
         if arr_min[idx] == f64::INFINITY {
             continue; // unreached
         }
         hold_endpoints += 1;
-        let slack = arr_min[idx] - hold;
+        // earliest data must arrive after the capture edge + hold (both at this flop)
+        let slack = arr_min[idx] - (clk_early(ck) + hold);
         if slack < 0.0 {
             ths += slack;
         }

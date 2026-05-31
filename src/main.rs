@@ -4,6 +4,9 @@
 //!   vyges-sta-si check JOB                                          validate the job
 //!   vyges-sta-si demo  [-o OUT] [--json]                            built-in design
 //!
+//! `run` auto-detects an MCMM job (one with a `scenarios:` list) and reports the
+//! worst setup/hold across the per-corner scenarios.
+//!
 //! Common flags: -h/--help, -V/--version, -q/--quiet, -v/--verbose.
 //! Exit codes: 0 ok · 1 runtime/analysis error · 2 usage/validation · 3 timing
 //! violation (only with --fail-on-violation).
@@ -108,6 +111,22 @@ fn emit(job: &StaJob, rep: &TimingReport, cli: &Cli) -> ! {
     exit(0);
 }
 
+fn emit_mcmm(job: &StaJob, rep: &engine::McmmReport, cli: &Cli) -> ! {
+    let text = if cli.json { engine::mcmm_json(job, rep) } else { engine::render_mcmm(job, rep) };
+    write_out(&text, cli);
+    if cli.fail_on_violation {
+        let setup_bad = rep.worst_setup().map(|x| x.1 < 0.0).unwrap_or(false);
+        let hold_bad = rep.worst_hold().map(|x| x.1 < 0.0).unwrap_or(false);
+        if setup_bad || hold_bad {
+            if !cli.quiet {
+                eprintln!("MCMM timing VIOLATED");
+            }
+            exit(3);
+        }
+    }
+    exit(0);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cli = parse_cli(&args);
@@ -155,6 +174,18 @@ fn main() {
                     exit(2);
                 }
             };
+            if job.is_mcmm() {
+                if cli.verbose {
+                    eprintln!("MCMM: {} scenario(s)", job.scenarios.len());
+                }
+                match engine::analyze_mcmm(&job) {
+                    Ok(rep) => emit_mcmm(&job, &rep, &cli),
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        exit(1);
+                    }
+                }
+            }
             if cli.verbose {
                 eprintln!("loaded {} ({} lib(s))", job.netlist, job.libs.len());
             }

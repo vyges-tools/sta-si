@@ -81,6 +81,7 @@ fn job() -> StaJob {
         aocv_early: vec![],
         miller: 2.0,
         xtalk_window: 0.2,
+        scenarios: vec![],
         base_dir: String::new(),
     }
 }
