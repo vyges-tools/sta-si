@@ -90,11 +90,20 @@ fn emit(job: &StaJob, rep: &TimingReport, cli: &Cli) -> ! {
         engine::render_report(job, rep)
     };
     write_out(&text, cli);
-    if cli.fail_on_violation && rep.endpoints > 0 && rep.wns < 0.0 {
-        if !cli.quiet {
-            eprintln!("timing VIOLATED: WNS {:.4} ns", rep.wns);
+    if cli.fail_on_violation {
+        let setup_bad = rep.endpoints > 0 && rep.wns < 0.0;
+        let hold_bad = rep.hold_endpoints > 0 && rep.whs < 0.0;
+        if setup_bad || hold_bad {
+            if !cli.quiet {
+                if setup_bad {
+                    eprintln!("setup VIOLATED: WNS {:.4} ns", rep.wns);
+                }
+                if hold_bad {
+                    eprintln!("hold VIOLATED: WHS {:.4} ns", rep.whs);
+                }
+            }
+            exit(3);
         }
-        exit(3);
     }
     exit(0);
 }

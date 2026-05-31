@@ -42,6 +42,7 @@ pub struct Pin {
     pub capacitance: f64,
     pub clock: bool,         // `clock : true` — the cell's clock pin
     pub setup: Option<f64>,  // setup constraint (ns) on a data pin, vs the clock
+    pub hold: Option<f64>,   // hold constraint (ns) on a data pin, vs the clock
     pub arcs: Vec<Arc>,      // delay arcs (e.g. CK->Q on a flop output)
 }
 
@@ -285,6 +286,7 @@ fn parse_pin(name: String, body: &str) -> Pin {
     let clock = simple_attr(body, "clock").as_deref() == Some("true");
     let mut arcs = Vec::new();
     let mut setup: Option<f64> = None;
+    let mut hold: Option<f64> = None;
     let mut at = 0;
     while let Some((_, tbody, after)) = next_block(body, at, "timing") {
         match simple_attr(&tbody, "timing_type").as_deref() {
@@ -292,12 +294,15 @@ fn parse_pin(name: String, body: &str) -> Pin {
                 let v = constraint_max(&tbody);
                 setup = Some(setup.map_or(v, |s| s.max(v)));
             }
-            Some(tt) if tt.starts_with("hold") => {} // hold handled in the early-path pass
+            Some(tt) if tt.starts_with("hold") => {
+                let v = constraint_max(&tbody); // ns the data must stay stable post-edge
+                hold = Some(hold.map_or(v, |h| h.max(v)));
+            }
             _ => arcs.push(parse_arc(&tbody)), // delay arc (incl. rising_edge CK->Q)
         }
         at = after;
     }
-    Pin { name, direction, capacitance, clock, setup, arcs }
+    Pin { name, direction, capacitance, clock, setup, hold, arcs }
 }
 
 fn parse_cell(name: String, body: &str) -> Cell {

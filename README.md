@@ -45,6 +45,10 @@ whose switching window overlaps the victim's**. Windows are **slew-derived** (ea
 net's transition is an interval of width = its slew, so they overlap when
 `|Δsw| ≤ (slew_v + slew_a)/2`), so sequentially-switching neighbours don't pile
 on false pessimism. A late OCV derate is applied to cell delays.
+It checks **setup** (max-delay) *and* **hold** (min-delay): the hold pass is a
+second forward propagation using min-corner cell delays (and an early OCV derate),
+and for each flop the earliest data arrival must clear that pin's hold constraint —
+reported as **WHS** / **THS** alongside WNS / TNS.
 
 ## When & how to use it in your flow
 
@@ -98,7 +102,8 @@ miller:      2.0            # crosstalk Miller factor (1.0 disables SI)
 xtalk_window: 0.0           # ns — guard band added to the slew-derived window
 input_slew:  0.02           # ns
 output_load: 0.005          # pF at primary outputs
-late_derate: 1.0            # OCV late derate on cell delays
+late_derate: 1.0            # OCV late derate on cell delays (setup / max path)
+early_derate: 1.0           # OCV early derate on cell delays (hold / min path)
 ```
 
 A complete, runnable example is in [`examples/top/`](examples/top/);
@@ -131,18 +136,20 @@ that foundry's NDA, never in this repository.
 
 ## Current state (2026-05-31)
 
-v1 does **max-delay setup** timing — combinational (input → output) **and
-register-to-register** (flop Q launches via its CK→Q arc; flop D pins are capture
-endpoints with required = period − setup) — with NLDM cell delays interpolated on
-slew × load, a late OCV derate, **SPEF-driven interconnect** (wire-cap load +
-**per-pin tree Elmore** net delay), and **crosstalk
-delta-delay with slew-derived switching windows, iterated to convergence**
-(arrivals set the windows, the windows set the coupling, repeat until the per-arc
-delays stabilise). Fully offline, no external deps, 17 tests green. It **closes
-the loop with the other engines**: it reads the Liberty `vyges-char` emits and
-the SPEF (incl. coupling + RC tree) `vyges-extract` emits — the SI margin OpenSTA
-lacks.
+v1 does **setup *and* hold** timing. Setup is the max-delay path — combinational
+(input → output) **and register-to-register** (flop Q launches via its CK→Q arc;
+flop D pins are capture endpoints with required = period − setup). Hold is a second,
+min-delay forward pass (min-corner cell delays + an early OCV derate) where the
+earliest data arrival at each flop D must clear that pin's hold constraint, reported
+as **WHS / THS**. On top of that: NLDM cell delays interpolated on slew × load, a
+late OCV derate, **SPEF-driven interconnect** (wire-cap load + **per-pin tree
+Elmore** net delay), and **crosstalk delta-delay with slew-derived switching
+windows, iterated to convergence** (arrivals set the windows, the windows set the
+coupling, repeat until the per-arc delays stabilise). Fully offline, no external
+deps, 19 tests green. It **closes the loop with the other engines**: it reads the
+Liberty `vyges-char` emits and the SPEF (incl. coupling + RC tree) `vyges-extract`
+emits — the SI margin OpenSTA lacks.
 
-The road to sign-off grade builds on the same graph: **hold timing** (the early /
-min-delay path) and AOCV/POCV statistical derating. Correlation target: match
-OpenSTA on a routed block, then keep the SI margin it omits.
+The road to sign-off grade builds on the same graph: **AOCV/POCV** statistical
+derating and multi-corner/multi-mode. Correlation target: match OpenSTA on a routed
+block, then keep the SI margin it omits.

@@ -29,6 +29,12 @@ library (seq_demo) {
         rise_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.05" ); }
         fall_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.05" ); }
       }
+      timing () {
+        related_pin : "CK";
+        timing_type : hold_rising;
+        rise_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.02" ); }
+        fall_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.02" ); }
+      }
     }
     pin (Q) {
       direction : output;

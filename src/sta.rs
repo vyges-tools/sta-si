@@ -8,10 +8,11 @@
 //!
 //! When a SPEF is supplied, net arcs carry a per-pin tree Elmore interconnect
 //! delay and the wire capacitance loads the driver; crosstalk (see `si`) adds a
-//! window-filtered margin. Analysis is **max-delay setup** — combinational
-//! (input → output) and register-to-register: a flop's Q launches via its CK→Q
-//! arc, and its D pins are capture endpoints (required = period − setup). Hold
-//! (the early / min-delay path) is the next layer. Pure std — unit-tested.
+//! window-filtered margin. Analysis covers **max-delay setup** (combinational
+//! input → output, and register-to-register: a flop's Q launches via its CK→Q
+//! arc, its D pins are capture endpoints with required = period − setup) **and
+//! min-delay hold** (a second, min-corner forward pass; earliest data arrival at
+//! each flop D must clear its hold constraint). Pure std — unit-tested.
 
 use std::collections::HashMap;
 
@@ -54,11 +55,17 @@ pub struct PathNode {
 
 #[derive(Debug, Clone)]
 pub struct TimingReport {
-    pub wns: f64,           // worst negative slack (ns); >0 means met
-    pub tns: f64,           // total negative slack over endpoints (ns)
+    pub wns: f64,           // setup worst negative slack (ns); >0 means met
+    pub tns: f64,           // setup total negative slack over endpoints (ns)
     pub endpoints: usize,
     pub worst_endpoint: String,
     pub worst_path: Vec<PathNode>,
+    // hold (early / min-delay path) — only meaningful when there are flop endpoints
+    pub whs: f64,           // worst hold slack (ns); >0 means met
+    pub ths: f64,           // total hold negative slack (ns)
+    pub hold_endpoints: usize,
+    pub worst_hold_endpoint: String,
+    pub worst_hold_path: Vec<PathNode>,
 }
 
 enum EdgeKind {
@@ -128,6 +135,7 @@ pub fn analyze(
     // instance pins. A sequential cell's data pins (with a setup constraint)
     // are *capture* endpoints; its Q launches via the CK->Q delay arc.
     let mut flop_d: Vec<(usize, f64)> = Vec::new(); // (D pin node, setup ns)
+    let mut flop_hold: Vec<(usize, f64)> = Vec::new(); // (D pin node, hold ns)
     for inst in &nl.insts {
         let cell = lib.cell(&inst.cell).ok_or_else(|| StaError::UnknownCell(inst.cell.clone()))?;
         for (pin, net) in &inst.conns {
@@ -152,6 +160,9 @@ pub fn analyze(
                         if let Some(setup) = cell.pins[pin].setup {
                             is_endpoint[idx] = true; // data pin = setup capture endpoint
                             flop_d.push((idx, setup));
+                        }
+                        if let Some(hold) = cell.pins[pin].hold {
+                            flop_hold.push((idx, hold)); // same pin = hold capture endpoint
                         }
                     }
                 }
@@ -251,23 +262,31 @@ pub fn analyze(
     let n_arcs = arcs.len();
 
     // ---- forward propagation, reusable over a net-delay table ------------
-    let derate = job.late_derate;
-    let edge_delay = |kind: &EdgeKind, slew_u: f64, load_v: f64, nd: &[f64]| -> (f64, f64) {
+    // `late=true` is the max-delay (setup) path: max-corner cell delay + late
+    // derate. `late=false` is the min-delay (hold) path: min-corner cell delay +
+    // early derate, accumulated with a min instead of a max.
+    let late_derate = job.late_derate;
+    let early_derate = job.early_derate;
+    let edge_delay = |kind: &EdgeKind, slew_u: f64, load_v: f64, nd: &[f64], late: bool| -> (f64, f64) {
         match kind {
             EdgeKind::Net(i) => (nd[*i], slew_u),
             EdgeKind::Cell(a) => {
-                let d = a.cell_rise.lookup(slew_u, load_v).max(a.cell_fall.lookup(slew_u, load_v));
-                let s = a
-                    .rise_transition
-                    .lookup(slew_u, load_v)
-                    .max(a.fall_transition.lookup(slew_u, load_v));
-                (d * derate, s)
+                let r = a.cell_rise.lookup(slew_u, load_v);
+                let f = a.cell_fall.lookup(slew_u, load_v);
+                let sr = a.rise_transition.lookup(slew_u, load_v);
+                let sf = a.fall_transition.lookup(slew_u, load_v);
+                if late {
+                    (r.max(f) * late_derate, sr.max(sf))
+                } else {
+                    (r.min(f) * early_derate, sr.min(sf))
+                }
             }
         }
     };
     let input_slew = job.input_slew;
-    let relax = |nd: &[f64]| -> (Vec<f64>, Vec<f64>, Vec<Option<usize>>, Vec<usize>) {
-        let mut arrival = vec![f64::NEG_INFINITY; n];
+    let relax = |nd: &[f64], late: bool| -> (Vec<f64>, Vec<f64>, Vec<Option<usize>>, Vec<usize>) {
+        let init = if late { f64::NEG_INFINITY } else { f64::INFINITY };
+        let mut arrival = vec![init; n];
         let mut slew = vec![input_slew; n];
         let mut from: Vec<Option<usize>> = vec![None; n];
         let mut indeg_work = indeg.clone();
@@ -283,9 +302,10 @@ pub fn analyze(
             let u = order[head];
             head += 1;
             for e in &out_edges[u] {
-                let (d, sout) = edge_delay(&e.kind, slew[u], node_load[e.to], nd);
+                let (d, sout) = edge_delay(&e.kind, slew[u], node_load[e.to], nd, late);
                 let cand = arrival[u] + d;
-                if cand > arrival[e.to] {
+                let better = if late { cand > arrival[e.to] } else { cand < arrival[e.to] };
+                if better {
                     arrival[e.to] = cand;
                     slew[e.to] = sout;
                     from[e.to] = Some(u);
@@ -350,10 +370,11 @@ pub fn analyze(
     const SI_TOL: f64 = 1e-9; // ns — per-arc delay change below which we stop
     let neg = vec![f64::NEG_INFINITY; nn];
     let zero = vec![0.0f64; nn];
-    let mut arc_delay = compute(&neg, &zero); // nominal: no windows -> no crosstalk
+    let arc_delay_nom = compute(&neg, &zero); // nominal: no windows -> no crosstalk
+    let mut arc_delay = arc_delay_nom.clone();
     let mut cycle_checked = false;
     for _ in 0..MAX_SI_ITERS {
-        let (arr, slw, _f, ord) = relax(&arc_delay);
+        let (arr, slw, _f, ord) = relax(&arc_delay, true);
         if !cycle_checked {
             if ord.len() != n {
                 return Err(StaError::CombinationalLoop);
@@ -371,8 +392,8 @@ pub fn analyze(
             break;
         }
     }
-    // final propagation consistent with the converged per-arc delays
-    let (arrival, slew, from, order) = relax(&arc_delay);
+    // final late propagation consistent with the converged per-arc delays
+    let (arrival, slew, from, order) = relax(&arc_delay, true);
 
     // ---- backward: required time (period at outputs; period - setup at flops) --
     let mut required = vec![f64::INFINITY; n];
@@ -383,7 +404,7 @@ pub fn analyze(
     }
     for &u in order.iter().rev() {
         for e in &out_edges[u] {
-            let (d, _) = edge_delay(&e.kind, slew[u], node_load[e.to], &arc_delay);
+            let (d, _) = edge_delay(&e.kind, slew[u], node_load[e.to], &arc_delay, true);
             let req = required[e.to] - d;
             if req < required[u] {
                 required[u] = req;
@@ -433,11 +454,62 @@ pub fn analyze(
         None => String::new(),
     };
 
+    // ---- hold (early / min-delay) path ----------------------------------
+    // Earliest data arrival via min-corner cell delays + nominal (no-crosstalk)
+    // interconnect. A flop D pin's hold check: the data must stay stable for
+    // `hold` ns after the (same, zero-skew) capture edge, so the earliest arrival
+    // must be >= hold. Slack = earliest_arrival - hold.
+    let (arr_min, slew_min, from_min, _ord_min) = relax(&arc_delay_nom, false);
+    let mut whs = f64::INFINITY;
+    let mut ths = 0.0;
+    let mut worst_hold = None;
+    let mut hold_endpoints = 0;
+    for &(idx, hold) in &flop_hold {
+        if arr_min[idx] == f64::INFINITY {
+            continue; // unreached
+        }
+        hold_endpoints += 1;
+        let slack = arr_min[idx] - hold;
+        if slack < 0.0 {
+            ths += slack;
+        }
+        if slack < whs {
+            whs = slack;
+            worst_hold = Some(idx);
+        }
+    }
+    let mut worst_hold_path = Vec::new();
+    let worst_hold_endpoint = match worst_hold {
+        Some(mut v) => {
+            let end_label = labels[v].clone();
+            let mut chain = vec![v];
+            while let Some(u) = from_min[v] {
+                chain.push(u);
+                v = u;
+            }
+            chain.reverse();
+            for idx in chain {
+                worst_hold_path.push(PathNode {
+                    label: labels[idx].clone(),
+                    arrival: arr_min[idx],
+                    slew: slew_min[idx],
+                });
+            }
+            end_label
+        }
+        None => String::new(),
+    };
+
     Ok(TimingReport {
         wns: if endpoints == 0 { f64::INFINITY } else { wns },
         tns,
         endpoints,
         worst_endpoint,
         worst_path,
+        whs: if hold_endpoints == 0 { f64::INFINITY } else { whs },
+        ths,
+        hold_endpoints,
+        worst_hold_endpoint,
+        worst_hold_path,
     })
 }

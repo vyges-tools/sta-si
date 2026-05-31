@@ -28,6 +28,12 @@ library (seq) {
         rise_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.05" ); }
         fall_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.05" ); }
       }
+      timing () {
+        related_pin : "CK";
+        timing_type : hold_rising;
+        rise_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.02" ); }
+        fall_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.02" ); }
+      }
     }
     pin (Q) {
       direction : output;
@@ -44,9 +50,10 @@ library (seq) {
 }
 "#;
 
-// reg -> comb -> reg : r1.Q -> g1 -> r2.D ; r2.Q -> y
-const NL: &str = "module seq ( clk, a, y ); input clk, a; output y; wire q1, n1;\n\
-                  DFF r1 ( .CK(clk), .D(a),  .Q(q1) );\n\
+// two-flop ring: r1.Q -[g1]-> r2.D ; r2.Q (= output y) -> r1.D.
+// both flop D pins are launched by a flop Q, so setup + hold are reg-to-reg.
+const NL: &str = "module seq ( clk, y ); input clk; output y; wire q1, n1;\n\
+                  DFF r1 ( .CK(clk), .D(y),  .Q(q1) );\n\
                   INV g1 ( .A(q1),   .Y(n1) );\n\
                   DFF r2 ( .CK(clk), .D(n1), .Q(y)  );\n\
                   endmodule";
@@ -62,6 +69,7 @@ fn job(period: f64) -> StaJob {
         input_slew: 0.02,
         output_load: 0.005,
         late_derate: 1.0,
+        early_derate: 1.0,
         miller: 2.0,
         xtalk_window: 0.0,
         base_dir: String::new(),
@@ -87,4 +95,28 @@ fn tighter_setup_eats_slack() {
     let base = analyze_inputs(NL, LIB, &job(1.0)).unwrap();
     let tight = analyze_inputs(NL, &LIB.replace("\"0.05\"", "\"0.20\""), &job(1.0)).unwrap();
     assert!(tight.wns < base.wns, "tight {} !< base {}", tight.wns, base.wns);
+}
+
+#[test]
+fn reg_to_reg_hold_path() {
+    let rep = analyze_inputs(NL, LIB, &job(1.0)).unwrap();
+    // both flop D pins are hold endpoints, launched by the min CK->Q path
+    assert_eq!(rep.hold_endpoints, 2, "hold_endpoints={}", rep.hold_endpoints);
+    // earliest data (>= ~min CK->Q) easily clears the 0.02 ns hold here
+    assert!(rep.whs > 0.0, "whs={}", rep.whs);
+    // worst hold path starts at the clock and reaches a flop D via a flop Q
+    let labels: Vec<&str> = rep.worst_hold_path.iter().map(|p| p.label.as_str()).collect();
+    assert!(rep.worst_hold_endpoint.ends_with("/D"), "{}", rep.worst_hold_endpoint);
+    assert!(labels.iter().any(|l| l.ends_with("/Q")), "{:?}", labels);
+}
+
+#[test]
+fn bigger_hold_eats_hold_slack() {
+    // larger hold requirement -> the same early arrival clears less of it
+    let base = analyze_inputs(NL, LIB, &job(1.0)).unwrap();
+    let tight = analyze_inputs(NL, &LIB.replace("\"0.02\"", "\"0.09\""), &job(1.0)).unwrap();
+    assert!(tight.whs < base.whs, "tight {} !< base {}", tight.whs, base.whs);
+    // hold slack is period-independent (same-edge check) — unchanged at 2 ns
+    let wide = analyze_inputs(NL, LIB, &job(2.0)).unwrap();
+    assert!((wide.whs - base.whs).abs() < 1e-9, "hold moved with period");
 }

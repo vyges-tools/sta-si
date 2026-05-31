@@ -52,6 +52,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         input_slew: 0.02,
         output_load: 0.005,
         late_derate: 1.0,
+        early_derate: 1.0,
         miller: 2.0,
         xtalk_window: 0.0,
         base_dir: String::new(),
@@ -62,6 +63,11 @@ pub fn demo() -> (StaJob, TimingReport) {
         endpoints: 0,
         worst_endpoint: String::new(),
         worst_path: Vec::new(),
+        whs: f64::INFINITY,
+        ths: 0.0,
+        hold_endpoints: 0,
+        worst_hold_endpoint: String::new(),
+        worst_hold_path: Vec::new(),
     });
     (job, rep)
 }
@@ -110,6 +116,21 @@ pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
     for p in &rep.worst_path {
         s.push_str(&format!("    {:9.4}  {:7.4}   {}\n", p.arrival, p.slew, p.label));
     }
+    if rep.hold_endpoints > 0 {
+        let hverdict = if rep.whs >= 0.0 { "MET" } else { "VIOLATED" };
+        s.push_str(&format!(
+            "\n  hold endpoints: {}    WHS: {:.4} ns    THS: {:.4} ns    [{}]\n",
+            rep.hold_endpoints, rep.whs, rep.ths, hverdict
+        ));
+        s.push_str(&format!(
+            "  worst hold path to {}  (slack {:.4} ns):\n",
+            rep.worst_hold_endpoint, rep.whs
+        ));
+        s.push_str(&format!("    {:>9}  {:>7}   node\n", "arrival", "slew"));
+        for p in &rep.worst_hold_path {
+            s.push_str(&format!("    {:9.4}  {:7.4}   {}\n", p.arrival, p.slew, p.label));
+        }
+    }
     s
 }
 
@@ -126,6 +147,11 @@ pub fn report_json(job: &StaJob, rep: &TimingReport) -> String {
     s.push_str(&format!("\"wns_ns\":{},", num(rep.wns)));
     s.push_str(&format!("\"tns_ns\":{},", num(rep.tns)));
     s.push_str(&format!("\"met\":{},", rep.endpoints > 0 && rep.wns >= 0.0));
+    s.push_str(&format!("\"hold_endpoints\":{},", rep.hold_endpoints));
+    s.push_str(&format!("\"whs_ns\":{},", num(rep.whs)));
+    s.push_str(&format!("\"ths_ns\":{},", num(rep.ths)));
+    s.push_str(&format!("\"hold_met\":{},", rep.hold_endpoints > 0 && rep.whs >= 0.0));
+    s.push_str(&format!("\"worst_hold_endpoint\":{:?},", rep.worst_hold_endpoint));
     s.push_str(&format!("\"worst_endpoint\":{:?},", rep.worst_endpoint));
     s.push_str("\"worst_path\":[");
     for (i, p) in rep.worst_path.iter().enumerate() {
