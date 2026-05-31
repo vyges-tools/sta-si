@@ -171,9 +171,11 @@ coupling, repeat until the per-arc delays stabilise), **AOCV / POCV** on-chip
 variation (depth-dependent derate table, or a statistical √depth N-sigma band),
 **clock-network skew** (the clock is timed like any path; each capture flop's
 insertion delay enters its required time, so common latency cancels and only skew
-moves slack), and **MCMM** (a job can list per-corner scenario `.sta` files; the
-worst setup and worst hold are reported across them). Fully offline, no external
-deps, 28 tests green. It **closes the loop with the other engines**: it reads the
+moves slack), **CRPR** (launch and capture take opposite clock corners — late/early
+for setup, early/late for hold — and the OCV spread on the clock path they *share*
+is credited back, removing reconvergence pessimism; `crpr: false` to disable), and
+**MCMM** (a job can list per-corner scenario `.sta` files; the worst setup and worst
+hold are reported across them). Fully offline, no external deps, 30 tests green. It **closes the loop with the other engines**: it reads the
 Liberty `vyges-char` emits and the SPEF (incl. coupling + RC tree) `vyges-extract`
 emits — the SI margin OpenSTA lacks.
 
@@ -181,6 +183,6 @@ emits — the SI margin OpenSTA lacks.
 first sub-100nm node)**, whose reg-to-reg setup/hold/POCV example is in
 [`examples/icsprout55/`](examples/icsprout55/) and pinned in the test suite.
 
-The road to sign-off grade builds on the same graph: **CRPR** (clock reconvergence
-pessimism removal) and clock-path OCV. Correlation target: match OpenSTA on a
+The road to sign-off grade builds on the same graph: **multi-clock / generated
+clocks** and inter-clock domain checks. Correlation target: match OpenSTA on a
 routed block, then keep the SI margin it omits.

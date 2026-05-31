@@ -60,6 +60,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         miller: 2.0,
         xtalk_window: 0.0,
         scenarios: vec![],
+        crpr: true,
         base_dir: String::new(),
     };
     let rep = analyze_inputs(DEMO_NETLIST, DEMO_LIB, &job).unwrap_or(TimingReport {
@@ -110,7 +111,7 @@ pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
     } else {
         format!("flat derate — late {:.3} / early {:.3}", job.late_derate, job.early_derate)
     };
-    s.push_str(&format!("  OCV: {ocv}\n"));
+    s.push_str(&format!("  OCV: {ocv}   CRPR: {}\n", if job.crpr { "on" } else { "off" }));
     s.push_str(&format!("  endpoints: {}\n", rep.endpoints));
     if rep.endpoints == 0 {
         s.push_str("  (no timing endpoints — no primary outputs reached)\n");

@@ -49,6 +49,7 @@ pub struct StaJob {
     pub aocv_early: Vec<(f64, f64)>, // AOCV early derate vs path depth
     pub miller: f64, // crosstalk Miller coupling factor (2.0 worst late; 1.0 disables SI)
     pub xtalk_window: f64, // ns — guard band added to the slew-derived switching window
+    pub crpr: bool, // remove clock-reconvergence pessimism on the shared clock path (default true)
     // MCMM: when non-empty, this is a multi-corner/multi-mode job — each entry is a
     // path to a single-scenario `.sta`; the engine runs all and reports the worst
     // setup and worst hold across them. The fields above are then unused.
@@ -137,6 +138,7 @@ impl StaJob {
             aocv_early: kv.get("aocv_early").map(|s| pairs(s)).unwrap_or_default(),
             miller: num("miller", 2.0),
             xtalk_window: num("xtalk_window", 0.0), // guard band on top of slew-derived window
+            crpr: kv.get("crpr").map(|s| s != "false" && s != "0").unwrap_or(true),
             scenarios,
             base_dir: base_dir.to_string(),
         };

@@ -165,6 +165,7 @@ pub fn analyze(
     // a node whose arrival is the clock insertion delay to this flop (skew).
     let mut flop_d: Vec<(usize, f64, Option<String>)> = Vec::new();
     let mut flop_hold: Vec<(usize, f64, Option<String>)> = Vec::new();
+    let mut ck_node_list: Vec<usize> = Vec::new(); // nodes that are clock (CK) pins
     for inst in &nl.insts {
         let cell = lib.cell(&inst.cell).ok_or_else(|| StaError::UnknownCell(inst.cell.clone()))?;
         let ck_key = cell.clock_pin.as_ref().map(|cp| pin_key(&inst.name, cp));
@@ -186,6 +187,9 @@ pub fn analyze(
                     let nref = nets.get_mut(net).unwrap();
                     nref.sinks.push(idx);
                     nref.load += cap;
+                    if cell.pins[pin].clock {
+                        ck_node_list.push(idx); // clock pin — root of insertion-delay paths
+                    }
                     if cell.is_seq {
                         if let Some(setup) = cell.pins[pin].setup {
                             is_endpoint[idx] = true; // data pin = setup capture endpoint
@@ -463,22 +467,72 @@ pub fn analyze(
             break;
         }
     }
-    // final late propagation consistent with the converged per-arc delays
+    // final late propagation consistent with the converged per-arc delays, and the
+    // early (min-delay) propagation used for hold and for early clock arrivals.
     let (arrival, slew, from, _order) = relax(&arc_delay, true);
+    let (arr_min, slew_min, from_min, _ord_min) = relax(&arc_delay_nom, false);
 
-    // clock insertion delay to a flop = the (late) arrival at its CK pin node.
-    let clk_late = |ck: &Option<String>| -> f64 {
-        ck.as_deref()
-            .and_then(|k| key2idx.get(k))
-            .map(|&i| arrival[i])
-            .filter(|a| a.is_finite())
-            .unwrap_or(0.0)
+    // ---- clock paths + CRPR ---------------------------------------------
+    // Proper OCV uses opposite clock corners on launch vs capture (setup: late
+    // launch / early capture; hold: early launch / late capture). The launch and
+    // capture clock paths share a segment from the root to their common point;
+    // deriving that shared segment two ways is unphysical pessimism, so CRPR credits
+    // back its OCV spread (late arrival − early arrival at the common point).
+    let mut is_ck = vec![false; n];
+    for &i in &ck_node_list {
+        is_ck[i] = true;
+    }
+    let ck_node = |k: &Option<String>| -> Option<usize> {
+        k.as_deref().and_then(|s| key2idx.get(s)).copied()
     };
-    // capture edge is the launch edge + one period, shifted by the capture flop's
-    // clock arrival; setup constraint pulls it in. The launch flop's insertion delay
-    // is already inside `arrival` at D, so equal latencies cancel and only skew bites.
+    // clock-network path from a CK pin back to the root, using clock-tree topology
+    let path_to_root = |start: usize| -> Vec<usize> {
+        let mut p = vec![start];
+        let mut v = start;
+        while let Some(u) = from[v] {
+            p.push(u);
+            v = u;
+            if p.len() > n {
+                break; // safety against a pathological cycle
+            }
+        }
+        p
+    };
+    // deepest node shared by both clock paths (least common ancestor toward root)
+    let common_point = |a: usize, b: usize| -> Option<usize> {
+        let pb: HashMap<usize, ()> = path_to_root(b).into_iter().map(|x| (x, ())).collect();
+        path_to_root(a).into_iter().find(|x| pb.contains_key(x))
+    };
+    // first clock pin reached walking the data path backward = the launch flop's CK
+    let launch_ck = |endpoint: usize, pred: &[Option<usize>]| -> Option<usize> {
+        let mut v = endpoint;
+        while let Some(u) = pred[v] {
+            if is_ck[u] {
+                return Some(u);
+            }
+            v = u;
+        }
+        None
+    };
+    let crpr_on = job.crpr;
+    // CRPR credit for a (launch CK, capture CK) pair: the OCV spread at their
+    // common clock node, i.e. late − early arrival there (>= 0).
+    let crpr_credit = |lck: usize, cck: usize| -> f64 {
+        if !crpr_on {
+            return 0.0;
+        }
+        common_point(lck, cck).map(|p| (arrival[p] - arr_min[p]).max(0.0)).unwrap_or(0.0)
+    };
+
+    // setup capture uses the EARLY clock; CRPR adds back the shared-path pessimism.
     for (idx, setup, ck) in &flop_d {
-        endpoint_req[*idx] = clk_late(ck) + period - setup;
+        let cap = ck_node(ck);
+        let cap_early = cap.map(|i| arr_min[i]).filter(|a| a.is_finite()).unwrap_or(0.0);
+        let crpr = match (launch_ck(*idx, &from), cap) {
+            (Some(l), Some(c)) => crpr_credit(l, c),
+            _ => 0.0,
+        };
+        endpoint_req[*idx] = cap_early + period - setup + crpr;
     }
 
     // ---- setup slack + worst path ---------------------------------------
@@ -526,19 +580,10 @@ pub fn analyze(
     };
 
     // ---- hold (early / min-delay) path ----------------------------------
-    // Earliest data arrival via min-corner cell delays + nominal (no-crosstalk)
-    // interconnect. A flop D pin's hold check: the data must stay stable for
-    // `hold` ns after the (same, zero-skew) capture edge, so the earliest arrival
-    // must be >= hold. Slack = earliest_arrival - hold.
-    let (arr_min, slew_min, from_min, _ord_min) = relax(&arc_delay_nom, false);
-    // capture clock for hold uses the early (min) insertion delay to that flop.
-    let clk_early = |ck: &Option<String>| -> f64 {
-        ck.as_deref()
-            .and_then(|k| key2idx.get(k))
-            .map(|&i| arr_min[i])
-            .filter(|a| a.is_finite())
-            .unwrap_or(0.0)
-    };
+    // Earliest data arrival (min-corner cells + nominal no-crosstalk interconnect,
+    // including the early launch clock) must clear the capture edge + hold. The
+    // capture clock uses the LATE insertion delay (pessimistic for hold); CRPR adds
+    // back the shared clock-path spread. The early forward pass was run above.
     let mut whs = f64::INFINITY;
     let mut ths = 0.0;
     let mut worst_hold = None;
@@ -549,8 +594,14 @@ pub fn analyze(
             continue; // unreached
         }
         hold_endpoints += 1;
-        // earliest data must arrive after the capture edge + hold (both at this flop)
-        let slack = arr_min[idx] - (clk_early(ck) + hold);
+        let cap = ck_node(ck);
+        let cap_late = cap.map(|i| arrival[i]).filter(|a| a.is_finite()).unwrap_or(0.0);
+        let crpr = match (launch_ck(idx, &from_min), cap) {
+            (Some(l), Some(c)) => crpr_credit(l, c),
+            _ => 0.0,
+        };
+        // earliest data must arrive after the (late) capture edge + hold
+        let slack = arr_min[idx] - (cap_late + hold) + crpr;
         if slack < 0.0 {
             ths += slack;
         }
