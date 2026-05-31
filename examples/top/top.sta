@@ -1,6 +1,7 @@
 design:      top
 netlist:     top.v
 lib:         cells.lib
+spef:        top.spef     # parasitics -> wire load + Elmore net delay
 clock:       clk 1.0      # port + period (ns)
 input_slew:  0.02         # ns
 output_load: 0.005        # pF at the primary output

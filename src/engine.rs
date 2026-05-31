@@ -7,6 +7,7 @@
 use crate::job::StaJob;
 use crate::liberty::Lib;
 use crate::netlist;
+use crate::spef::Spef;
 use crate::sta::{self, StaError, TimingReport};
 
 const DEMO_LIB: &str = r#"
@@ -45,6 +46,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         design: "demo".into(),
         netlist: "(builtin)".into(),
         libs: vec!["(builtin)".into()],
+        spef: None,
         clock_port: "clk".into(),
         period_ns: 1.0,
         input_slew: 0.02,
@@ -73,7 +75,11 @@ pub fn analyze_job(job: &StaJob) -> Result<TimingReport, StaError> {
     if lib.cells.is_empty() {
         return Err(StaError::Parse("no cells in any .lib".into()));
     }
-    sta::analyze(&nl, &lib, job)
+    let spef = match &job.spef {
+        Some(p) => Some(Spef::load(&job.resolve(p)).map_err(|e| StaError::Parse(e.to_string()))?),
+        None => None,
+    };
+    sta::analyze(&nl, &lib, job, spef.as_ref())
 }
 
 /// Render a human-readable timing report.
@@ -140,5 +146,5 @@ pub fn analyze_inputs(
 ) -> Result<TimingReport, StaError> {
     let nl = netlist::parse(nl_text).map_err(|e| StaError::Parse(e.to_string()))?;
     let lib = Lib::parse(lib_text).map_err(|e| StaError::Parse(e.to_string()))?;
-    sta::analyze(&nl, &lib, job)
+    sta::analyze(&nl, &lib, job, None)
 }

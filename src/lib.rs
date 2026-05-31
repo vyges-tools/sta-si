@@ -20,6 +20,7 @@
 pub mod job;
 pub mod liberty;
 pub mod netlist;
+pub mod spef;
 pub mod sta;
 pub mod si;
 pub mod engine;

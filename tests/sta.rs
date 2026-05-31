@@ -27,6 +27,7 @@ fn job(period: f64) -> StaJob {
         design: "top".into(),
         netlist: "x".into(),
         libs: vec!["x".into()],
+        spef: None,
         clock_port: "clk".into(),
         period_ns: period,
         input_slew: 0.02,

@@ -2,20 +2,23 @@
 //!
 //! From a netlist + Liberty + clock it builds a directed timing graph — cell
 //! arcs (input pin → output pin, delay from the NLDM tables given input slew and
-//! output load) and net arcs (driver → sinks, ideal in v0) — topologically
-//! orders it, propagates arrival time + slew forward, derives required time
-//! backward from the clock period, and reports WNS / TNS and the worst path.
+//! output load) and net arcs (driver → sinks) — topologically orders it,
+//! propagates arrival time + slew forward, derives required time backward from
+//! the clock period, and reports WNS / TNS and the worst path.
 //!
-//! v0 is **combinational max-delay** analysis (primary input → primary output),
-//! with a late OCV derate on cell delays. Register CK→Q arcs are followed when
-//! present; flop setup/hold, SPEF-driven net delay, and crosstalk (see `si`)
-//! are the upgrades. Pure std — fully unit-tested offline.
+//! When a SPEF is supplied, net arcs carry the lumped Elmore interconnect delay
+//! (R·C) and the wire capacitance is added to the driver load; without one the
+//! interconnect is ideal. v0 is **combinational max-delay** analysis (primary
+//! input → primary output) with a late OCV derate. Register CK→Q arcs are
+//! followed when present; flop setup/hold and crosstalk (see `si`) are the
+//! upgrades. Pure std — fully unit-tested offline.
 
 use std::collections::HashMap;
 
 use crate::job::StaJob;
 use crate::liberty::{Arc, Dir, Lib};
 use crate::netlist::Netlist;
+use crate::spef::Spef;
 
 #[derive(Debug)]
 pub enum StaError {
@@ -59,7 +62,7 @@ pub struct TimingReport {
 }
 
 enum EdgeKind {
-    Net,
+    Net(f64), // interconnect (Elmore) delay in ns, from SPEF (0 if ideal)
     Cell(Box<Arc>),
 }
 
@@ -75,7 +78,12 @@ struct Net {
 }
 
 /// Run combinational max-delay STA and return the slack report.
-pub fn analyze(nl: &Netlist, lib: &Lib, job: &StaJob) -> Result<TimingReport, StaError> {
+pub fn analyze(
+    nl: &Netlist,
+    lib: &Lib,
+    job: &StaJob,
+    spef: Option<&Spef>,
+) -> Result<TimingReport, StaError> {
     let mut labels: Vec<String> = Vec::new();
     let mut key2idx: HashMap<String, usize> = HashMap::new();
     let mut is_endpoint: Vec<bool> = Vec::new();
@@ -146,9 +154,11 @@ pub fn analyze(nl: &Netlist, lib: &Lib, job: &StaJob) -> Result<TimingReport, St
 
     let n = labels.len();
     let mut node_load = vec![0.0f64; n];
-    for net in nets.values() {
+    for (netname, net) in &nets {
         if let Some(d) = net.driver {
-            node_load[d] = net.load;
+            // driver load = receiver pin caps + wire cap from SPEF (fF -> pF)
+            let wire = spef.map(|s| s.wire_load_pf(netname)).unwrap_or(0.0);
+            node_load[d] = net.load + wire;
         }
     }
 
@@ -176,12 +186,13 @@ pub fn analyze(nl: &Netlist, lib: &Lib, job: &StaJob) -> Result<TimingReport, St
             }
         }
     }
-    // net arcs: driver -> each sink
-    for net in nets.values() {
+    // net arcs: driver -> each sink, carrying the SPEF Elmore net delay
+    for (netname, net) in &nets {
         if let Some(d) = net.driver {
+            let ndelay = spef.map(|s| s.net_delay_ns(netname)).unwrap_or(0.0);
             for &s in &net.sinks {
                 if s != d {
-                    out_edges[d].push(Edge { to: s, kind: EdgeKind::Net });
+                    out_edges[d].push(Edge { to: s, kind: EdgeKind::Net(ndelay) });
                     indeg[s] += 1;
                 }
             }
@@ -192,7 +203,7 @@ pub fn analyze(nl: &Netlist, lib: &Lib, job: &StaJob) -> Result<TimingReport, St
     let derate = job.late_derate;
     let edge_delay = |kind: &EdgeKind, slew_u: f64, load_v: f64| -> (f64, f64) {
         match kind {
-            EdgeKind::Net => (0.0, slew_u),
+            EdgeKind::Net(d) => (*d, slew_u),
             EdgeKind::Cell(a) => {
                 let d = a.cell_rise.lookup(slew_u, load_v).max(a.cell_fall.lookup(slew_u, load_v));
                 let s = a

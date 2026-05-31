@@ -20,6 +20,7 @@ pub struct StaJob {
     pub design: String,
     pub netlist: String,
     pub libs: Vec<String>,
+    pub spef: Option<String>, // optional parasitics -> wire load + net delay
     pub clock_port: String,
     pub period_ns: f64,
     pub input_slew: f64,
@@ -74,6 +75,7 @@ impl StaJob {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .collect(),
+            spef: kv.get("spef").filter(|s| !s.is_empty()).cloned(),
             clock_port,
             period_ns,
             input_slew: num("input_slew", 0.05),

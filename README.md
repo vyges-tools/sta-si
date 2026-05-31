@@ -29,11 +29,14 @@ and advanced OCV are where it stops short of advanced-node sign-off.
 ## The problem it solves
 
 Given a **gate-level netlist** (`*.v`), one or more **Liberty** libraries
-(`*.lib`), and a **clock**, it builds a timing graph — cell arcs (delay from the
-NLDM tables, interpolated on input slew × output load) and net arcs — propagates
+(`*.lib`), a **clock**, and *(optional)* **SPEF** parasitics (`*.spef`), it
+builds a timing graph — cell arcs (delay from the NLDM tables, interpolated on
+input slew × output load) and net arcs (the SPEF interconnect delay) — propagates
 arrival and required times, and reports **WNS** (worst negative slack), **TNS**
 (total negative slack), and the **worst path** with per-node arrival and slew.
-A late OCV derate is applied to cell delays.
+With SPEF, the wire capacitance loads the driver and a lumped Elmore (R·C) net
+delay is added to each driver→sink arc; without it the interconnect is ideal. A
+late OCV derate is applied to cell delays.
 
 ## When & how to use it in your flow
 
@@ -81,6 +84,7 @@ A job (`*.sta`) is a few `key: value` lines:
 design:      top
 netlist:     top.v          # gate-level structural Verilog
 lib:         cells.lib      # one or more, comma-separated
+spef:        top.spef       # optional parasitics -> wire load + net delay
 clock:       clk 1.0        # clock port + period (ns)
 input_slew:  0.02           # ns
 output_load: 0.005          # pF at primary outputs
@@ -115,16 +119,17 @@ that foundry's NDA, never in this repository.
                                                    AOCV/POCV + SI margins, under NDA
 ```
 
-## Current state (2026-05-30)
+## Current state (2026-05-31)
 
-v0 does **combinational max-delay** timing (primary input → primary output) with
-NLDM cell delays interpolated on slew × load, ideal interconnect, and a late OCV
-derate — fully offline, no external deps, 9 tests green. It closes the loop with
-the other engines: it reads the Liberty `vyges-char` emits and is built to read
-the SPEF `vyges-extract` emits.
+v1 does **combinational max-delay** timing (primary input → primary output) with
+NLDM cell delays interpolated on slew × load, a late OCV derate, and **SPEF-driven
+interconnect** — the wire cap loads the driver and a lumped Elmore (R·C) net delay
+is added per arc. Fully offline, no external deps, 12 tests green. It **closes the
+loop with the other engines**: it reads the Liberty `vyges-char` emits and the
+SPEF `vyges-extract` emits.
 
-The road to sign-off grade builds on the same graph: SPEF-driven net delay,
-register setup/hold (sequential) timing, AOCV/POCV statistical derating, and
-crosstalk delta-delay (the SI layer — the engine reserves the
-`StaError::SiNotModeled` hook). Correlation target: match OpenSTA on a routed
-block, then add the SI margin OpenSTA lacks.
+The road to sign-off grade builds on the same graph: per-pin (path) Elmore from
+the full SPEF RC tree (v1 lumps R·C), register setup/hold (sequential) timing,
+AOCV/POCV statistical derating, and crosstalk delta-delay (the SI layer — the
+engine reserves the `StaError::SiNotModeled` hook). Correlation target: match
+OpenSTA on a routed block, then add the SI margin OpenSTA lacks.
