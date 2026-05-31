@@ -66,6 +66,7 @@ fn job(period: f64) -> StaJob {
         spef: None,
         clock_port: "clk".into(),
         period_ns: period,
+        clocks: vec![],
         input_slew: 0.02,
         output_load: 0.005,
         late_derate: 1.0,

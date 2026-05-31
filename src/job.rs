@@ -18,6 +18,17 @@
 //! pocv_n:     3.0                   # POCV: number of sigmas (default 3.0)
 //! ```
 //!
+//! **Multiple clocks** (and generated/divided clocks) are listed with one `clock:`
+//! line each — `clock: <name> <source> <period>` (source is a port or `inst/pin`,
+//! e.g. a divider output). Cross-domain paths get the tightest launch→capture edge
+//! relation; same-domain paths use that domain's period.
+//!
+//! ```text
+//! clock: clk    clk      10.0
+//! clock: spiclk spi_clk   4.0
+//! clock: divclk u_div/Q  20.0     # generated: divide-by-2 off an internal pin
+//! ```
+//!
 //! An **MCMM** job instead lists per-corner scenario files (each a full `.sta`);
 //! the engine runs all and reports the worst setup/hold across them:
 //!
@@ -35,8 +46,12 @@ pub struct StaJob {
     pub netlist: String,
     pub libs: Vec<String>,
     pub spef: Option<String>, // optional parasitics -> wire load + net delay
-    pub clock_port: String,
+    pub clock_port: String,   // primary clock (first); back-compat + report header
     pub period_ns: f64,
+    // all clocks: (name, source port|inst/pin, period_ns). Empty -> single clock
+    // synthesized from clock_port/period_ns. A generated/divided clock is just an
+    // entry whose source is an internal pin and period the divided value.
+    pub clocks: Vec<(String, String, f64)>,
     pub input_slew: f64,
     pub output_load: f64,
     pub late_derate: f64,
@@ -89,6 +104,8 @@ fn pairs(s: &str) -> Vec<(f64, f64)> {
 impl StaJob {
     pub fn parse(text: &str, base_dir: &str) -> Result<StaJob, JobError> {
         let mut kv: BTreeMap<String, String> = BTreeMap::new();
+        // clock lines are collected separately — a BTreeMap would dedupe multiple.
+        let mut clocks: Vec<(String, String, f64)> = Vec::new();
         for raw in text.lines() {
             let line = strip_comment(raw).trim();
             if line.is_empty() {
@@ -97,7 +114,21 @@ impl StaJob {
             let (k, v) = line
                 .split_once(':')
                 .ok_or_else(|| JobError(format!("expected 'key: value', got {line:?}")))?;
-            kv.insert(k.trim().to_lowercase(), v.trim().to_string());
+            let key = k.trim().to_lowercase();
+            if key == "clock" {
+                // `clock: <port> <period>`  or  `clock: <name> <source> <period>`
+                let toks: Vec<&str> = v.split_whitespace().collect();
+                let (name, src, per) = match toks.as_slice() {
+                    [src, per] => (src.to_string(), src.to_string(), per),
+                    [name, src, per] => (name.to_string(), src.to_string(), per),
+                    _ => return Err(JobError("clock needs 'port period' or 'name source period'".into())),
+                };
+                let period: f64 =
+                    per.parse().map_err(|_| JobError(format!("bad clock period: {per:?}")))?;
+                clocks.push((name, src, period));
+                continue;
+            }
+            kv.insert(key, v.trim().to_string());
         }
         let get = |k: &str| kv.get(k).cloned().ok_or_else(|| JobError(format!("missing key: {k}")));
         let split_list = |s: &str| {
@@ -105,18 +136,9 @@ impl StaJob {
         };
         let scenarios = kv.get("scenarios").map(|s| split_list(s)).unwrap_or_default();
         let mcmm = !scenarios.is_empty();
-        // clock/netlist/lib are required for a single run, optional for an MCMM job
-        // (each scenario file carries its own).
-        let (clock_port, period_ns) = match kv.get("clock") {
-            Some(clock) => {
-                let mut parts = clock.split_whitespace();
-                let port = parts.next().unwrap_or("").to_string();
-                let period = parts
-                    .next()
-                    .and_then(|s| s.parse().ok())
-                    .ok_or_else(|| JobError("clock needs 'port period_ns'".into()))?;
-                (port, period)
-            }
+        // clock/netlist/lib are required for a single run, optional for an MCMM job.
+        let (clock_port, period_ns) = match clocks.first() {
+            Some((_, src, per)) => (src.clone(), *per),
             None if mcmm => (String::new(), 0.0),
             None => return Err(JobError("missing key: clock".into())),
         };
@@ -128,6 +150,7 @@ impl StaJob {
             spef: kv.get("spef").filter(|s| !s.is_empty()).cloned(),
             clock_port,
             period_ns,
+            clocks,
             input_slew: num("input_slew", 0.05),
             output_load: num("output_load", 0.005),
             late_derate: num("late_derate", 1.0),

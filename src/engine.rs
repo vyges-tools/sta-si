@@ -49,6 +49,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         spef: None,
         clock_port: "clk".into(),
         period_ns: 1.0,
+        clocks: vec![],
         input_slew: 0.02,
         output_load: 0.005,
         late_derate: 1.0,
@@ -100,10 +101,16 @@ pub fn analyze_job(job: &StaJob) -> Result<TimingReport, StaError> {
 pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
     let mut s = String::new();
     s.push_str(&format!("STA report — design {}\n", job.design));
-    s.push_str(&format!(
-        "  clock {}  period {:.3} ns   xtalk_miller {:.2}\n",
-        job.clock_port, job.period_ns, job.miller
-    ));
+    if job.clocks.len() > 1 {
+        let cl: Vec<String> =
+            job.clocks.iter().map(|(n, _, p)| format!("{n}@{p:.2}ns")).collect();
+        s.push_str(&format!("  clocks: {}   xtalk_miller {:.2}\n", cl.join(", "), job.miller));
+    } else {
+        s.push_str(&format!(
+            "  clock {}  period {:.3} ns   xtalk_miller {:.2}\n",
+            job.clock_port, job.period_ns, job.miller
+        ));
+    }
     let ocv = if job.pocv_sigma > 0.0 {
         format!("POCV — per-stage sigma {:.3}, {:.1}-sigma band", job.pocv_sigma, job.pocv_n)
     } else if !job.aocv_late.is_empty() || !job.aocv_early.is_empty() {

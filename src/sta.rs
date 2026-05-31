@@ -583,23 +583,86 @@ pub fn analyze(
         common_point(lck, cck).map(|p| (arrival[p] - arr_min[p]).max(0.0)).unwrap_or(0.0)
     };
 
+    // ---- multi-clock: which clock reaches each flop, and the launch→capture
+    // edge relation between two clock domains ------------------------------
+    // Map each clock's source node to its period (a single-clock job synthesizes
+    // one entry from clock_port/period_ns). A generated/divided clock is just an
+    // entry whose source is an internal pin.
+    let eff_clocks: Vec<(String, f64)> = if job.clocks.is_empty() {
+        vec![(job.clock_port.clone(), period)]
+    } else {
+        job.clocks.iter().map(|(_, src, per)| (src.clone(), *per)).collect()
+    };
+    let mut clock_src: HashMap<usize, f64> = HashMap::new();
+    for (src, per) in &eff_clocks {
+        let node = match src.split_once('/') {
+            Some((inst, pin)) => key2idx.get(&pin_key(inst, pin)).copied(),
+            None => key2idx.get(&port_key(src)).copied(),
+        };
+        if let Some(nd) = node {
+            clock_src.insert(nd, *per);
+        }
+    }
+    // period of the clock reaching a CK pin = nearest clock source toward the root
+    let clock_period_of = |ck: usize| -> f64 {
+        for node in path_to_root(ck) {
+            if let Some(&p) = clock_src.get(&node) {
+                return p;
+            }
+        }
+        period // fallback: the primary period
+    };
+    // (setup, hold) launch→capture edge relation between launch period `pl` and
+    // capture period `pc`. Same clock → (pc, 0) (the common case). Else scan launch
+    // edges over a common multiple: setup = tightest positive capture-after-launch,
+    // hold = the capture edge one period earlier (worst across launches).
+    let edge_relation = |pl: f64, pc: f64| -> (f64, f64) {
+        if (pl - pc).abs() < 1e-9 {
+            return (pc, 0.0);
+        }
+        let hyper = pl * pc; // a common multiple of both ( >= LCM )
+        let mut setup_rel = f64::INFINITY;
+        let mut hold_rel = f64::NEG_INFINITY;
+        let mut j = 0usize;
+        loop {
+            let le = j as f64 * pl;
+            if le >= hyper || j > 100_000 {
+                break;
+            }
+            let k = (le / pc).floor() + 1.0; // first capture edge strictly after le
+            let ce = k * pc;
+            setup_rel = setup_rel.min(ce - le);
+            hold_rel = hold_rel.max((ce - pc) - le);
+            j += 1;
+        }
+        if !setup_rel.is_finite() {
+            setup_rel = pc;
+        }
+        (setup_rel, hold_rel)
+    };
+
     // worst (max) constraint over a pin's groups, interpolated at the operating
     // clock + data transitions — matches how delay arcs are looked up.
     let eval_cons = |cons: &[Constraint], clk_slew: f64, data_slew: f64| -> f64 {
         cons.iter().map(|c| c.eval(clk_slew, data_slew)).fold(f64::NEG_INFINITY, f64::max)
     };
 
-    // setup capture uses the EARLY clock; CRPR adds back the shared-path pessimism.
+    // setup capture uses the EARLY clock; CRPR adds back the shared-path pessimism;
+    // the capture window is the launch→capture edge relation (one period intra-domain).
     for (idx, setup, ck) in &flop_d {
         let cap = ck_node(ck);
+        let lck = launch_ck(*idx, &from);
         let cap_early = cap.map(|i| arr_min[i]).filter(|a| a.is_finite()).unwrap_or(0.0);
-        let crpr = match (launch_ck(*idx, &from), cap) {
+        let crpr = match (lck, cap) {
             (Some(l), Some(c)) => crpr_credit(l, c),
             _ => 0.0,
         };
         let ck_slew = cap.map(|i| slew[i]).unwrap_or(input_slew);
         let setup_v = eval_cons(setup, ck_slew, slew[*idx]);
-        endpoint_req[*idx] = cap_early + period - setup_v + crpr;
+        let pc = cap.map(&clock_period_of).unwrap_or(period);
+        let pl = lck.map(&clock_period_of).unwrap_or(pc);
+        let (setup_rel, _) = edge_relation(pl, pc);
+        endpoint_req[*idx] = cap_early + setup_rel - setup_v + crpr;
     }
 
     // ---- setup slack + worst path ---------------------------------------
@@ -662,15 +725,19 @@ pub fn analyze(
         }
         hold_endpoints += 1;
         let cap = ck_node(ck);
+        let lck = launch_ck(idx, &from_min);
         let cap_late = cap.map(|i| arrival[i]).filter(|a| a.is_finite()).unwrap_or(0.0);
-        let crpr = match (launch_ck(idx, &from_min), cap) {
+        let crpr = match (lck, cap) {
             (Some(l), Some(c)) => crpr_credit(l, c),
             _ => 0.0,
         };
         let ck_slew = cap.map(|i| slew_min[i]).unwrap_or(input_slew);
         let hold_v = eval_cons(hold, ck_slew, slew_min[idx]);
-        // earliest data must arrive after the (late) capture edge + hold
-        let slack = arr_min[idx] - (cap_late + hold_v) + crpr;
+        let pc = cap.map(&clock_period_of).unwrap_or(period);
+        let pl = lck.map(&clock_period_of).unwrap_or(pc);
+        let (_, hold_rel) = edge_relation(pl, pc);
+        // earliest data must arrive after the (late) capture edge + hold relation
+        let slack = arr_min[idx] - (cap_late + hold_rel + hold_v) + crpr;
         if slack < 0.0 {
             ths += slack;
         }

@@ -104,7 +104,9 @@ design:      top
 netlist:     top.v          # gate-level structural Verilog
 lib:         cells.lib      # one or more, comma-separated
 spef:        top.spef       # optional parasitics -> wire load + net delay
-clock:       clk 1.0        # clock port + period (ns)
+clock:       clk 1.0        # clock port + period (ns); repeat for multiple clocks:
+#clock:      spiclk spi_clk 4.0       # name source period (source: port or inst/pin)
+#clock:      divclk u_div/Q 2.0       # generated/divided clock off an internal pin
 miller:      2.0            # crosstalk Miller factor (1.0 disables SI)
 xtalk_window: 0.0           # ns — guard band added to the slew-derived window
 input_slew:  0.02           # ns
@@ -175,7 +177,10 @@ moves slack), **CRPR** (launch and capture take opposite clock corners — late/
 for setup, early/late for hold — and the OCV spread on the clock path they *share*
 is credited back, removing reconvergence pessimism; `crpr: false` to disable), and
 **MCMM** (a job can list per-corner scenario `.sta` files; the worst setup and worst
-hold are reported across them), and **rise/fall-split unate propagation**. Fully offline, no external deps, 32 tests green. It **closes the loop with the other engines**: it reads the
+hold are reported across them), **rise/fall-split unate propagation**, and
+**multi-clock / generated clocks** (cross-domain paths use the tightest launch→capture
+edge relation, not a single period). Fully offline, no external deps, 34 tests green.
+It **closes the loop with the other engines**: it reads the
 Liberty `vyges-char` emits and the SPEF (incl. coupling + RC tree) `vyges-extract`
 emits — the SI margin OpenSTA lacks.
 
@@ -194,5 +199,6 @@ edges rather than taking `max(rise,fall)` per stage, matching how real paths beh
 path agrees within **~3%** (down from ~7% before unate-split), staying slightly
 conservative — the residual is second-order slew propagation.
 
-The road to sign-off grade builds on the same graph: slew-propagation refinement,
-then **multi-clock / generated clocks**. The SI margin it adds over OpenSTA stays.
+The road to sign-off grade builds on the same graph: clock phases / waveforms and
+false-path & multicycle exceptions, plus slew-propagation refinement. The SI margin
+it adds over OpenSTA stays.
