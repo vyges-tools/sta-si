@@ -355,7 +355,8 @@ pub fn analyze(
     // arrival, cell-stage depth, and variance (AOCV/POCV). On return we collapse
     // each node to its worst lane so every downstream consumer is unchanged.
     let input_slew = job.input_slew;
-    let relax = |nd: &[f64], late: bool| -> (Vec<f64>, Vec<f64>, Vec<Option<usize>>, Vec<usize>) {
+    // `nd` = per-arc net delay, `ns` = per-arc degraded sink slew (0 = keep driver slew).
+    let relax = |nd: &[f64], ns: &[f64], late: bool| -> (Vec<f64>, Vec<f64>, Vec<Option<usize>>, Vec<usize>) {
         let init = if late { f64::NEG_INFINITY } else { f64::INFINITY };
         let mut arr = vec![[init; 2]; n]; // per-lane metric (derated / +-N*sigma)
         let mut arr_nom = vec![[0.0f64; 2]; n];
@@ -380,8 +381,11 @@ pub fn analyze(
                 let load = node_load[v];
                 match &e.kind {
                     EdgeKind::Net(i) => {
-                        // interconnect: rise->rise, fall->fall, same delay, no derate
+                        // interconnect: rise->rise, fall->fall, same delay, no derate.
+                        // The sink slew is the transient-degraded value when available
+                        // (>0), else the driver slew passes through unchanged.
                         let d = nd[*i];
+                        let sink_slew = ns[*i];
                         for l in 0..2 {
                             let a = arr[u][l];
                             if !a.is_finite() {
@@ -395,7 +399,8 @@ pub fn analyze(
                                 arr_nom[v][l] = arr_nom[u][l] + d;
                                 var[v][l] = var[u][l];
                                 depth[v][l] = depth[u][l];
-                                slew[v][l] = slew[u][l];
+                                slew[v][l] =
+                                    if sink_slew > 0.0 { sink_slew } else { slew[u][l] };
                                 from[v][l] = Some(u);
                             }
                         }
@@ -503,7 +508,7 @@ pub fn analyze(
     // into arrivals, so we iterate until the per-arc delays stabilise.
     let guard = job.xtalk_window;
     let miller = job.miller;
-    let compute = |sw: &[f64], net_slew: &[f64]| -> Vec<f64> {
+    let compute = |sw: &[f64], net_slew: &[f64]| -> (Vec<f64>, Vec<f64>) {
         // per-net crosstalk cap (fF) from window-overlapping aggressors
         let xc: Vec<f64> = (0..nn)
             .map(|i| {
@@ -530,17 +535,18 @@ pub fn analyze(
                 rc.transient(dn, net_slew[i], xc[i])
             })
             .collect();
+        // each arc -> (net delay, degraded sink slew); slew 0 means "keep driver slew"
         arcs.iter()
             .map(|a| {
                 let i = a.net_idx;
                 let Some(rc) = spef.and_then(|s| s.nets.get(&net_order[i])) else {
-                    return 0.0; // no parasitics -> ideal interconnect
+                    return (0.0, 0.0); // no parasitics -> ideal interconnect
                 };
-                // transient (waveform-into-RC) delay to the sink when available
+                // transient (waveform-into-RC) delay + degraded slew at the sink
                 if let (Some(map), Some((si, sp))) = (&tr_net[i], &a.sink_ip) {
                     if let Some(sn) = rc.pin_node(si, sp) {
-                        if let Some(&(delay, _slew)) = map.get(sn) {
-                            return delay;
+                        if let Some(&(delay, slew)) = map.get(sn) {
+                            return (delay, slew);
                         }
                     }
                 }
@@ -549,26 +555,27 @@ pub fn analyze(
                     if let (Some(dt), Some(st)) = (rc.pin_node(di, dp), rc.pin_node(si, sp)) {
                         if let Some(dl) = rc.elmore(dt, xc[i]) {
                             if let Some(&v) = dl.get(st) {
-                                return v;
+                                return (v, 0.0);
                             }
                         }
                     }
                 }
                 // last resort: lumped Elmore (R·C) + lumped crosstalk (R·xtalk-cap)
-                net_res[i] * net_cap[i] * 1e-6 + net_res[i] * xc[i] * 1e-6
+                (net_res[i] * net_cap[i] * 1e-6 + net_res[i] * xc[i] * 1e-6, 0.0)
             })
-            .collect()
+            .unzip()
     };
 
     const MAX_SI_ITERS: usize = 20;
     const SI_TOL: f64 = 1e-9; // ns — per-arc delay change below which we stop
     let neg = vec![f64::NEG_INFINITY; nn];
     let zero = vec![0.0f64; nn];
-    let arc_delay_nom = compute(&neg, &zero); // nominal: no windows -> no crosstalk
-    let mut arc_delay = arc_delay_nom.clone();
+    let (nom_d, nom_s) = compute(&neg, &zero); // nominal: no windows -> no crosstalk
+    let mut arc_d = nom_d.clone();
+    let mut arc_s = nom_s.clone();
     let mut cycle_checked = false;
     for _ in 0..MAX_SI_ITERS {
-        let (arr, slw, _f, ord) = relax(&arc_delay, true);
+        let (arr, slw, _f, ord) = relax(&arc_d, &arc_s, true);
         if !cycle_checked {
             if ord.len() != n {
                 return Err(StaError::CombinationalLoop);
@@ -579,17 +586,18 @@ pub fn analyze(
             (0..nn).map(|i| net_drv[i].map(|d| arr[d]).unwrap_or(f64::NEG_INFINITY)).collect();
         let net_slew: Vec<f64> =
             (0..nn).map(|i| net_drv[i].map(|d| slw[d]).unwrap_or(0.0)).collect();
-        let next = compute(&sw, &net_slew);
-        let delta = (0..n_arcs).map(|k| (next[k] - arc_delay[k]).abs()).fold(0.0, f64::max);
-        arc_delay = next;
+        let (nd, ns) = compute(&sw, &net_slew);
+        let delta = (0..n_arcs).map(|k| (nd[k] - arc_d[k]).abs()).fold(0.0, f64::max);
+        arc_d = nd;
+        arc_s = ns;
         if delta < SI_TOL {
             break;
         }
     }
     // final late propagation consistent with the converged per-arc delays, and the
     // early (min-delay) propagation used for hold and for early clock arrivals.
-    let (arrival, slew, from, _order) = relax(&arc_delay, true);
-    let (arr_min, slew_min, from_min, _ord_min) = relax(&arc_delay_nom, false);
+    let (arrival, slew, from, _order) = relax(&arc_d, &arc_s, true);
+    let (arr_min, slew_min, from_min, _ord_min) = relax(&nom_d, &nom_s, false);
 
     // ---- clock paths + CRPR ---------------------------------------------
     // Proper OCV uses opposite clock corners on launch vs capture (setup: late

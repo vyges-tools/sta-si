@@ -189,7 +189,9 @@ lumped total (Ceff iterated to convergence with the output slew), so cell delay
 drops on resistive nets (this benefits NLDM too, not just CCS). The interconnect
 delay to each sink is a **transient waveform-into-RC solve** (backward-Euler on the
 RC tree driven by the driver edge) — the true response, e.g. 0.69·RC for a single
-RC, not Elmore's pessimistic R·C. Fully offline, no external deps, 44 tests green.
+RC, not Elmore's pessimistic R·C — and the **degraded sink slew** it computes is
+propagated downstream (a resistive net hands the next stage a slower edge, raising
+its delay). Fully offline, no external deps, 45 tests green.
 It **closes the loop with the other engines**: it reads the
 Liberty `vyges-char` emits and the SPEF (incl. coupling + RC tree) `vyges-extract`
 emits — the SI margin OpenSTA lacks.
