@@ -131,14 +131,13 @@ that foundry's NDA, never in this repository.
 v1 does **combinational max-delay** timing (primary input → primary output) with
 NLDM cell delays interpolated on slew × load, a late OCV derate, **SPEF-driven
 interconnect** (wire-cap load + lumped Elmore net delay), and **crosstalk
-delta-delay with slew-derived switching windows** (Miller margin from the SPEF
-coupling caps, applied only where transitions overlap in time). Fully offline,
-no external deps, 14 tests green. It **closes the loop with the other engines**:
-it reads the Liberty `vyges-char` emits and the SPEF (incl. coupling)
-`vyges-extract` emits — the SI margin OpenSTA lacks.
+delta-delay with slew-derived switching windows, iterated to convergence**
+(arrivals set the windows, the windows set the coupling, repeat until the net
+delays stabilise). Fully offline, no external deps, 14 tests green. It **closes
+the loop with the other engines**: it reads the Liberty `vyges-char` emits and
+the SPEF (incl. coupling) `vyges-extract` emits — the SI margin OpenSTA lacks.
 
-The road to sign-off grade builds on the same graph: iterate the windows to
-convergence (v1 is a single window pass), per-pin (path) Elmore from the full RC
-tree (v1 lumps R·C), register setup/hold (sequential) timing, and AOCV/POCV
-statistical derating. Correlation target: match OpenSTA on a routed block, then
-keep the SI margin it omits.
+The road to sign-off grade builds on the same graph: per-pin (path) Elmore from
+the full RC tree (v1 lumps R·C), register setup/hold (sequential) timing, and
+AOCV/POCV statistical derating. Correlation target: match OpenSTA on a routed
+block, then keep the SI margin it omits.
