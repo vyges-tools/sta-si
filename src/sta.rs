@@ -8,7 +8,9 @@
 //! stage), and reports WNS / TNS and the worst path.
 //!
 //! When a SPEF is supplied, net arcs carry a per-pin tree Elmore interconnect
-//! delay and the wire capacitance loads the driver; crosstalk (see `si`) adds a
+//! delay and the driver sees an **effective capacitance** (resistive shielding via
+//! the net π-model, with a CCS current-source delay when the lib provides it);
+//! crosstalk (see `si`) adds a
 //! window-filtered margin. Analysis covers **max-delay setup** (combinational
 //! input → output, and register-to-register: a flop's Q launches via its CK→Q
 //! arc, its D pins are capture endpoints with required = period − setup) **and
@@ -275,6 +277,25 @@ pub fn analyze(
         }
     }
 
+    // effective-capacitance shielding per driver node (CCS-into-RC): the driver
+    // sees a near cap + a far cap shielded behind the wire resistance, so its cell
+    // delay is computed at Ceff < total on resistive nets.
+    let mut shield: Vec<Option<(f64, f64)>> = vec![None; n]; // driver node -> (C1 pF, tau ns)
+    if let Some(s) = spef {
+        for (name, net) in &nets {
+            if let Some(d) = net.driver {
+                let i = net_idx[name.as_str()];
+                if let (Some(rc), Some((di, dp))) = (s.nets.get(name), &net_drv_ip[i]) {
+                    if let Some(dnode) = rc.pin_node(di, dp) {
+                        if let Some((c1_ff, tau)) = rc.pi_reduce(dnode) {
+                            shield[d] = Some((c1_ff / 1000.0, tau));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // net arcs: driver -> each sink. Each arc gets its own delay (per-pin Elmore),
     // indexed by an arc id. Record the sink's (inst,pin) to resolve its SPEF node.
     struct ArcInfo {
@@ -400,14 +421,23 @@ pub fn analyze(
                                     continue;
                                 }
                                 let sin = slew[u][il];
-                                // CCS current-source delay when the arc carries it;
-                                // else the NLDM table lookup. (v1 CCS is lumped-load.)
+                                // CCS-into-RC: drive the effective capacitance (resistive
+                                // shielding) rather than the lumped load. T estimated from
+                                // the lumped-load transition (one pass).
+                                let leff = match shield[v] {
+                                    Some((c1, tau)) => {
+                                        let t0 = st.lookup(sin, load);
+                                        crate::ccs::ceff(c1, load - c1, tau, t0)
+                                    }
+                                    None => load,
+                                };
+                                // CCS current-source delay when the arc carries it; else NLDM.
                                 let (d, sout) = if !arc.ccs.is_empty() {
                                     arc.ccs
-                                        .delay_slew(ol == 0, sin, load, 0.3, 0.7)
-                                        .unwrap_or((dt.lookup(sin, load), st.lookup(sin, load)))
+                                        .delay_slew(ol == 0, sin, leff, 0.3, 0.7)
+                                        .unwrap_or((dt.lookup(sin, leff), st.lookup(sin, leff)))
                                 } else {
-                                    (dt.lookup(sin, load), st.lookup(sin, load))
+                                    (dt.lookup(sin, leff), st.lookup(sin, leff))
                                 };
                                 let stage = depth[u][il] + 1;
                                 let derate = cell_derate(late, stage);

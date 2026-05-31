@@ -82,6 +82,23 @@ impl CcsArc {
     }
 }
 
+/// Effective capacitance the driver sees through a resistive net (the CCS-into-RC
+/// step). `c1` is the near (un-shielded) cap, `c2` the far cap shielded behind the
+/// net's resistance, `tau_sh = R·C2` the shielding time constant, `t` the output
+/// transition. Limits: τ→0 (R→0) → C1+C2 = total (no shielding); τ→∞ (very
+/// resistive) → C1 (driver sees only the near cap). This is the standard
+/// O'Brien-Savarino / Dartu form; it makes the cell delay smaller than the lumped
+/// load on resistive nets — where CCS (and NLDM) beat a lumped cap.
+pub fn ceff(c1: f64, c2: f64, tau_sh: f64, t: f64) -> f64 {
+    let c2 = c2.max(0.0);
+    if c2 <= 0.0 || tau_sh <= 0.0 || t <= 0.0 {
+        return c1 + c2; // no shielding -> total cap
+    }
+    let y = t / tau_sh;
+    let bracket = 1.0 - (1.0 - (-y).exp()) / y; // 0 (full shield) .. 1 (none)
+    c1 + c2 * bracket
+}
+
 /// Nearest waveform to (slew, load) by normalized distance on the grid.
 fn nearest(set: &[CcsWaveform], slew: f64, load: f64) -> Option<&CcsWaveform> {
     set.iter().min_by(|a, b| {
@@ -116,6 +133,19 @@ mod tests {
         assert!((d - 0.5).abs() < 1e-9, "delay {d}");
         // 30%..70% of a linear ramp over 1 ns = 0.4 ns
         assert!((s - 0.4).abs() < 1e-9, "slew {s}");
+    }
+
+    #[test]
+    fn ceff_limits_and_monotonicity() {
+        let (c1, c2) = (0.001, 0.009); // total 0.010 pF
+        // R->0 (tau->0): no shielding -> total
+        assert!((ceff(c1, c2, 0.0, 0.1) - 0.010).abs() < 1e-12);
+        // very resistive (tau huge): driver sees only the near cap
+        assert!((ceff(c1, c2, 1e6, 0.1) - c1).abs() < 1e-6);
+        // monotonic: more shielding (bigger tau) -> smaller Ceff
+        let a = ceff(c1, c2, 0.02, 0.1);
+        let b = ceff(c1, c2, 0.20, 0.1);
+        assert!(b < a && a < 0.010 && b > c1, "a={a} b={b}");
     }
 
     #[test]

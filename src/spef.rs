@@ -110,6 +110,52 @@ impl NetRc {
         Some(delay)
     }
 
+    /// Reduce the net to (near cap C1 fF, shielding time constant τ ns) seen from
+    /// `driver`, for the effective-capacitance model. C1 = the driver node's own
+    /// ground cap (sees ~0 resistance); τ = R·C2 ≈ Σ_k c_k·r_k (resistance-weighted
+    /// cap, the net's first RC moment), in ns. Returns None if the net has no
+    /// resistors (purely lumped — no shielding).
+    pub fn pi_reduce(&self, driver: &str) -> Option<(f64, f64)> {
+        if self.res.is_empty() {
+            return None;
+        }
+        let mut cap: HashMap<&str, f64> = HashMap::new();
+        for (node, c) in &self.ground {
+            *cap.entry(node.as_str()).or_default() += c;
+        }
+        let mut adj: HashMap<&str, Vec<(&str, f64)>> = HashMap::new();
+        for (a, b, r) in &self.res {
+            adj.entry(a).or_default().push((b, *r));
+            adj.entry(b).or_default().push((a, *r));
+            cap.entry(a.as_str()).or_default();
+            cap.entry(b.as_str()).or_default();
+        }
+        if !adj.contains_key(driver) {
+            return None;
+        }
+        // BFS from driver, accumulating path resistance to each node
+        let mut rpath: HashMap<&str, f64> = HashMap::new();
+        rpath.insert(driver, 0.0);
+        let mut order: Vec<&str> = vec![driver];
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        seen.insert(driver);
+        let mut head = 0;
+        while head < order.len() {
+            let u = order[head];
+            head += 1;
+            let ru = rpath[u];
+            for &(v, r) in adj.get(u).map(|x| x.as_slice()).unwrap_or(&[]) {
+                if seen.insert(v) {
+                    rpath.insert(v, ru + r);
+                    order.push(v);
+                }
+            }
+        }
+        let c1 = cap.get(driver).copied().unwrap_or(0.0); // near cap (fF)
+        let m2: f64 = cap.iter().map(|(nd, c)| c * rpath.get(nd).copied().unwrap_or(0.0)).sum();
+        Some((c1, m2 * 1e-6)) // (fF, ns)
+    }
+
     /// SPEF node token for an instance pin, if present in `*CONN`.
     pub fn pin_node(&self, inst: &str, pin: &str) -> Option<&str> {
         self.pins.iter().find(|(i, p, _)| i == inst && p == pin).map(|(_, _, n)| n.as_str())
