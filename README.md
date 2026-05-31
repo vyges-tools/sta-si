@@ -34,8 +34,11 @@ builds a timing graph — cell arcs (delay from the NLDM tables, interpolated on
 input slew × output load) and net arcs (the SPEF interconnect delay) — propagates
 arrival and required times, and reports **WNS** (worst negative slack), **TNS**
 (total negative slack), and the **worst path** with per-node arrival and slew.
-With SPEF, the wire capacitance loads the driver and a lumped Elmore (R·C) net
-delay is added to each driver→sink arc; without it the interconnect is ideal.
+With SPEF, the wire capacitance loads the driver and a **per-pin tree Elmore**
+net delay is computed to each sink (delay = Σ over the driver→sink path of
+`R · downstream-cap`), so different sinks see different interconnect delays;
+without SPEF the interconnect is ideal (a lumped `R·C` is the fallback when the
+SPEF has no usable tree).
 **Coupling** capacitance in the SPEF adds a **crosstalk delta-delay** to victim
 nets — the Miller-amplified coupling `R·(MCF−1)·Cc` — but **only from aggressors
 whose switching window overlaps the victim's**. Windows are **slew-derived** (each
@@ -130,14 +133,14 @@ that foundry's NDA, never in this repository.
 
 v1 does **combinational max-delay** timing (primary input → primary output) with
 NLDM cell delays interpolated on slew × load, a late OCV derate, **SPEF-driven
-interconnect** (wire-cap load + lumped Elmore net delay), and **crosstalk
+interconnect** (wire-cap load + **per-pin tree Elmore** net delay), and **crosstalk
 delta-delay with slew-derived switching windows, iterated to convergence**
-(arrivals set the windows, the windows set the coupling, repeat until the net
-delays stabilise). Fully offline, no external deps, 14 tests green. It **closes
+(arrivals set the windows, the windows set the coupling, repeat until the per-arc
+delays stabilise). Fully offline, no external deps, 15 tests green. It **closes
 the loop with the other engines**: it reads the Liberty `vyges-char` emits and
-the SPEF (incl. coupling) `vyges-extract` emits — the SI margin OpenSTA lacks.
+the SPEF (incl. coupling + RC tree) `vyges-extract` emits — the SI margin OpenSTA
+lacks.
 
-The road to sign-off grade builds on the same graph: per-pin (path) Elmore from
-the full RC tree (v1 lumps R·C), register setup/hold (sequential) timing, and
-AOCV/POCV statistical derating. Correlation target: match OpenSTA on a routed
-block, then keep the SI margin it omits.
+The road to sign-off grade builds on the same graph: register setup/hold
+(sequential) timing and AOCV/POCV statistical derating. Correlation target:
+match OpenSTA on a routed block, then keep the SI margin it omits.

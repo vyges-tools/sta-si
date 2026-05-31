@@ -107,6 +107,30 @@ fn crosstalk_reduces_slack_vs_quiet() {
 }
 
 #[test]
+fn per_pin_elmore_differentiates_sinks() {
+    use vyges_sta_si::spef::NetRc;
+    // D --10Ω--> C ; C --5Ω--> s1 (near) ; C --50Ω--> s2 (far). Caps C=1, s1=2, s2=3 fF.
+    let rc = NetRc {
+        net_node: "C".into(),
+        res: vec![
+            ("D".into(), "C".into(), 10.0),
+            ("C".into(), "s1".into(), 5.0),
+            ("C".into(), "s2".into(), 50.0),
+        ],
+        ground: vec![("C".into(), 1.0), ("s1".into(), 2.0), ("s2".into(), 3.0)],
+        ..Default::default()
+    };
+    let d = rc.elmore("D", 0.0).unwrap();
+    // s1 = 10·6 + 5·2 = 70 (×1e-6 ns) ; s2 = 10·6 + 50·3 = 210 (×1e-6 ns)
+    assert!((d["s1"] - 7e-5).abs() < 1e-12, "s1={}", d["s1"]);
+    assert!((d["s2"] - 2.1e-4).abs() < 1e-12, "s2={}", d["s2"]);
+    assert!(d["s2"] > d["s1"]); // far sink is slower — the whole point of per-pin
+    // a crosstalk cap at the net node raises every downstream sink
+    let dx = rc.elmore("D", 10.0).unwrap();
+    assert!(dx["s1"] > d["s1"] && dx["s2"] > d["s2"]);
+}
+
+#[test]
 fn window_filters_non_overlapping_aggressors() {
     let nl = netlist::parse(NL).unwrap();
     let lib = Lib::parse(LIB).unwrap();

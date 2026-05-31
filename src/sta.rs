@@ -194,10 +194,15 @@ pub fn analyze(
     let mut net_res = vec![0.0f64; nn];
     let mut net_cap = vec![0.0f64; nn];
     let mut net_drv: Vec<Option<usize>> = vec![None; nn];
+    let mut net_drv_ip: Vec<Option<(String, String)>> = vec![None; nn]; // driver (inst, pin)
     let mut net_cpl: Vec<Vec<(usize, f64)>> = vec![Vec::new(); nn]; // (aggressor net idx, Cc)
+    let ip_of = |node: usize| -> Option<(String, String)> {
+        labels[node].split_once('/').map(|(a, b)| (a.to_string(), b.to_string()))
+    };
     for (name, net) in &nets {
         let i = net_idx[name.as_str()];
         net_drv[i] = net.driver;
+        net_drv_ip[i] = net.driver.and_then(ip_of);
         if let Some(rc) = spef.and_then(|s| s.nets.get(name)) {
             net_res[i] = rc.res_ohm;
             net_cap[i] = rc.cap_ff;
@@ -209,18 +214,27 @@ pub fn analyze(
         }
     }
 
-    // net arcs: driver -> each sink (delay resolved from the net delay table)
+    // net arcs: driver -> each sink. Each arc gets its own delay (per-pin Elmore),
+    // indexed by an arc id. Record the sink's (inst,pin) to resolve its SPEF node.
+    struct ArcInfo {
+        net_idx: usize,
+        sink_ip: Option<(String, String)>,
+    }
+    let mut arcs: Vec<ArcInfo> = Vec::new();
     for (name, net) in &nets {
         if let Some(d) = net.driver {
             let i = net_idx[name.as_str()];
             for &s in &net.sinks {
                 if s != d {
-                    out_edges[d].push(Edge { to: s, kind: EdgeKind::Net(i) });
+                    let aid = arcs.len();
+                    arcs.push(ArcInfo { net_idx: i, sink_ip: ip_of(s) });
+                    out_edges[d].push(Edge { to: s, kind: EdgeKind::Net(aid) });
                     indeg[s] += 1;
                 }
             }
         }
     }
+    let n_arcs = arcs.len();
 
     // ---- forward propagation, reusable over a net-delay table ------------
     let derate = job.late_derate;
@@ -271,53 +285,80 @@ pub fn analyze(
         (arrival, slew, from, order)
     };
 
-    // Crosstalk is iterated to convergence: arrivals set the switching windows,
-    // the windows set which couplings apply, and that feeds back into arrivals.
-    // Each net's window is slew-derived — its transition is an interval of width
-    // = its slew, so a victim gains the Miller delta only from aggressors whose
-    // interval overlaps (|Δsw| ≤ (slew_v + slew_a)/2 + guard).
-    let nominal: Vec<f64> = (0..nn).map(|i| net_res[i] * net_cap[i] * 1e-6).collect();
-    let drv_at = |i: usize, v: &[f64]| net_drv[i].map(|d| v[d]).unwrap_or(f64::NEG_INFINITY);
+    // Per-arc interconnect delay, iterated to convergence. Each net's switching
+    // window is slew-derived; an aggressor's Miller cap is added (window-overlap)
+    // at the victim's net node, and a **per-pin tree Elmore** turns the RC network
+    // into a distinct delay for each driver→sink arc (lumped R·C fallback when the
+    // SPEF has no usable tree). Arrivals set the windows and the windows feed back
+    // into arrivals, so we iterate until the per-arc delays stabilise.
     let guard = job.xtalk_window;
-    let filtered = |sw: &[f64], net_slew: &[f64]| -> Vec<f64> {
-        (0..nn)
+    let miller = job.miller;
+    let compute = |sw: &[f64], net_slew: &[f64]| -> Vec<f64> {
+        // per-net crosstalk cap (fF) from window-overlapping aggressors
+        let xc: Vec<f64> = (0..nn)
             .map(|i| {
-                let mut d = nominal[i];
                 let svi = sw[i];
+                let mut x = 0.0;
                 if svi.is_finite() {
                     for &(ai, cc) in &net_cpl[i] {
-                        let sva = sw[ai];
                         let window = (net_slew[i] + net_slew[ai]) / 2.0 + guard;
-                        if sva.is_finite() && (sva - svi).abs() <= window {
-                            d += crate::si::xtalk_delta_ns(net_res[i], cc, job.miller);
+                        if sw[ai].is_finite() && (sw[ai] - svi).abs() <= window {
+                            x += (miller - 1.0).max(0.0) * cc;
                         }
                     }
                 }
-                d
+                x
+            })
+            .collect();
+        arcs.iter()
+            .map(|a| {
+                let i = a.net_idx;
+                let Some(rc) = spef.and_then(|s| s.nets.get(&net_order[i])) else {
+                    return 0.0; // no parasitics -> ideal interconnect
+                };
+                // per-pin tree Elmore when the driver + sink map to SPEF nodes
+                if let (Some((di, dp)), Some((si, sp))) = (&net_drv_ip[i], &a.sink_ip) {
+                    if let (Some(dt), Some(st)) = (rc.pin_node(di, dp), rc.pin_node(si, sp)) {
+                        if let Some(dl) = rc.elmore(dt, xc[i]) {
+                            if let Some(&v) = dl.get(st) {
+                                return v;
+                            }
+                        }
+                    }
+                }
+                // fallback: lumped Elmore (R·C) + lumped crosstalk (R·xtalk-cap)
+                net_res[i] * net_cap[i] * 1e-6 + net_res[i] * xc[i] * 1e-6
             })
             .collect()
     };
 
     const MAX_SI_ITERS: usize = 20;
-    const SI_TOL: f64 = 1e-9; // ns — net-delay change below which we stop
-    let mut net_delay = nominal.clone();
-    for it in 0..MAX_SI_ITERS {
-        let (arr, slw, _f, ord) = relax(&net_delay);
-        if it == 0 && ord.len() != n {
-            return Err(StaError::CombinationalLoop);
+    const SI_TOL: f64 = 1e-9; // ns — per-arc delay change below which we stop
+    let neg = vec![f64::NEG_INFINITY; nn];
+    let zero = vec![0.0f64; nn];
+    let mut arc_delay = compute(&neg, &zero); // nominal: no windows -> no crosstalk
+    let mut cycle_checked = false;
+    for _ in 0..MAX_SI_ITERS {
+        let (arr, slw, _f, ord) = relax(&arc_delay);
+        if !cycle_checked {
+            if ord.len() != n {
+                return Err(StaError::CombinationalLoop);
+            }
+            cycle_checked = true;
         }
-        let sw: Vec<f64> = (0..nn).map(|i| drv_at(i, &arr)).collect();
+        let sw: Vec<f64> =
+            (0..nn).map(|i| net_drv[i].map(|d| arr[d]).unwrap_or(f64::NEG_INFINITY)).collect();
         let net_slew: Vec<f64> =
             (0..nn).map(|i| net_drv[i].map(|d| slw[d]).unwrap_or(0.0)).collect();
-        let next = filtered(&sw, &net_slew);
-        let delta = (0..nn).map(|i| (next[i] - net_delay[i]).abs()).fold(0.0, f64::max);
-        net_delay = next;
+        let next = compute(&sw, &net_slew);
+        let delta = (0..n_arcs).map(|k| (next[k] - arc_delay[k]).abs()).fold(0.0, f64::max);
+        arc_delay = next;
         if delta < SI_TOL {
             break;
         }
     }
-    // final propagation consistent with the converged net delays
-    let (arrival, slew, from, order) = relax(&net_delay);
+    // final propagation consistent with the converged per-arc delays
+    let (arrival, slew, from, order) = relax(&arc_delay);
 
     // ---- backward: required time from the clock period -------------------
     let period = job.period_ns;
@@ -329,7 +370,7 @@ pub fn analyze(
     }
     for &u in order.iter().rev() {
         for e in &out_edges[u] {
-            let (d, _) = edge_delay(&e.kind, slew[u], node_load[e.to], &net_delay);
+            let (d, _) = edge_delay(&e.kind, slew[u], node_load[e.to], &arc_delay);
             let req = required[e.to] - d;
             if req < required[u] {
                 required[u] = req;
