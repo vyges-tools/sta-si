@@ -1,0 +1,11 @@
+# Same 55nm path with POCV: at 55nm the hold margin is only ~19 ps, and a
+# 3-sigma statistical band shrinks it to ~3 ps — exactly why advanced-node
+# sign-off needs OCV, not a flat derate.
+design:      ics55_regreg
+netlist:     regreg.v
+lib:         ics55_LLSC_H7CR_inv_dff.lib
+clock:       clk 2.0
+pocv_sigma:  0.06
+pocv_n:      3.0
+input_slew:  0.05
+output_load: 0.005
