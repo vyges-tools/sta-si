@@ -237,12 +237,20 @@ pub fn analyze_mcmm(job: &StaJob) -> Result<McmmReport, StaError> {
     for s in &job.scenarios {
         let sub = StaJob::load(&job.resolve(s)).map_err(|e| StaError::Parse(e.to_string()))?;
         let report = analyze_job(&sub)?;
-        scenarios.push(ScenarioResult { name: sub.design.clone(), period_ns: sub.period_ns, report });
+        // Label the row by the scenario file (the corner identity, e.g. `ss_n40C_1v60`),
+        // not the design name — every scenario shares the same design.
+        scenarios.push(ScenarioResult { name: scenario_label(s), period_ns: sub.period_ns, report });
     }
     if scenarios.is_empty() {
         return Err(StaError::Parse("MCMM job lists no scenarios".into()));
     }
     Ok(McmmReport { scenarios })
+}
+
+/// A scenario's display label: its file's basename without the `.sta` extension.
+fn scenario_label(path: &str) -> String {
+    let base = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    base.strip_suffix(".sta").unwrap_or(base).to_string()
 }
 
 /// Human-readable MCMM report: per-scenario slacks + the worst corner per check.

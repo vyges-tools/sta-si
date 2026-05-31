@@ -42,13 +42,14 @@ fn runs_committed_icsprout55_mcmm_job() {
     assert!(job.is_mcmm(), "should be detected as MCMM");
     let m = analyze_mcmm(&job).expect("analyze");
     assert_eq!(m.scenarios.len(), 3, "ss/tt/ff");
-    // setup binds at the SLOW corner (slowest paths)
+    // setup binds at the SLOW corner (slowest paths). Rows are labelled by the
+    // scenario file stem (the corner identity), not the shared design name.
     let (sname, swns) = m.worst_setup().expect("setup");
-    assert_eq!(sname, "ss_slow", "worst setup corner");
+    assert_eq!(sname, "corner_ss", "worst setup corner");
     assert!(swns > 0.0, "setup meets at the slow corner: {swns}");
     // hold binds at the FAST corner (fastest data) — the textbook MCMM split, now
     // that constraints are slew-interpolated rather than table-max
     let (hname, whs) = m.worst_hold().expect("hold");
-    assert_eq!(hname, "ff_fast", "worst hold corner");
+    assert_eq!(hname, "corner_ff", "worst hold corner");
     assert!(whs > 0.0, "hold meets at the fast corner: {whs}");
 }
