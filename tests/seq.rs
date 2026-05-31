@@ -80,6 +80,7 @@ fn job(period: f64) -> StaJob {
         scenarios: vec![],
         exceptions: vec![],
         crpr: true,
+        pba: false,
         base_dir: String::new(),
     }
 }

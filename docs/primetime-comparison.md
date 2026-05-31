@@ -21,7 +21,7 @@ today.** This doc says exactly where we stand and what is — and isn't — reac
 | MMMC | distributed multi-scenario (DMSA) | serial scenarios, worst-merge | medium (scale) |
 | Multi-clock / generated | waveforms, phase, async/exclusive groups, virtual clocks | periods + simple generated + edge relation | medium |
 | Timing exceptions | full SDC, `-through`, path groups | false-path + multicycle (from/to) | medium |
-| **Path-based analysis (PBA)** | yes — removes graph pessimism | **no** (graph-based only) | **large** (accuracy) |
+| **Path-based analysis (PBA)** | yes — removes graph pessimism | **partial** (`pba:true`): our GBA already ties slew to the arrival-winning path (no worst-slew-merge pessimism); PBA re-times the critical path + 1-exchange fan-in alternatives, catching non-greedy worst paths. Not yet full k-worst enumeration | **small–medium** |
 | Full SDC constraints | complete | tiny `.sta` subset | medium |
 | ECO / what-if / hierarchical | full | none | large (scope) |
 | Scale | multi-million-instance, incremental, distributed | single block, in-memory | large (scale) |

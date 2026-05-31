@@ -76,6 +76,7 @@ fn job(exceptions: Vec<Exception>) -> StaJob {
         scenarios: vec![],
         exceptions,
         crpr: true,
+        pba: false,
         base_dir: String::new(),
     }
 }

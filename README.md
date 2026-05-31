@@ -191,7 +191,10 @@ delay to each sink is a **transient waveform-into-RC solve** (backward-Euler on 
 RC tree driven by the driver edge) — the true response, e.g. 0.69·RC for a single
 RC, not Elmore's pessimistic R·C — and the **degraded sink slew** it computes is
 propagated downstream (a resistive net hands the next stage a slower edge, raising
-its delay). Fully offline, no external deps, 45 tests green.
+its delay). With `pba: true` it adds **path-based analysis** — re-timing the
+critical path and its fan-in alternatives with strictly path-local slews, catching
+a non-greedy worst path that the graph-based max can miss. Fully offline, no external
+deps, 47 tests green.
 It **closes the loop with the other engines**: it reads the
 Liberty `vyges-char` emits and the SPEF (incl. coupling + RC tree) `vyges-extract`
 emits — the SI margin OpenSTA lacks.
@@ -211,8 +214,8 @@ edges rather than taking `max(rise,fall)` per stage, matching how real paths beh
 path agrees within **~3%** (down from ~7% before unate-split), staying slightly
 conservative — the residual is second-order slew propagation.
 
-The road to sign-off grade builds on the same graph: path-based analysis (PBA),
-LVF-grade variation, and CCS receiver models. See
+The road to sign-off grade builds on the same graph: LVF-grade statistical variation
+and CCS receiver models (plus widening PBA from 1-exchange to k-worst enumeration). See
 [`docs/primetime-comparison.md`](docs/primetime-comparison.md) for an honest
 feature-by-feature comparison to Synopsys PrimeTime and where this engine can and
 can't reach it. The SI margin it adds over OpenSTA stays.

@@ -21,7 +21,9 @@
 //! (per-stage sigma, N-sigma band growing as sqrt(depth)) when configured. Multiple
 //! clocks (incl. generated) are supported — cross-domain paths use the tightest
 //! launch→capture edge relation — and false-path / multicycle **exceptions** drop or
-//! shift paths. Pure std — unit-tested.
+//! shift paths. With `pba` on, a path-based pass re-times the critical path and its
+//! fan-in alternatives (path-local slew) to catch non-greedy worst paths. Pure std
+//! — unit-tested.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -99,6 +101,10 @@ pub struct TimingReport {
     pub hold_endpoints: usize,
     pub worst_hold_endpoint: String,
     pub worst_hold_path: Vec<PathNode>,
+    // path-based analysis: worst setup slack after re-timing critical paths with
+    // path-local slews (Some only when `pba` is enabled). Catches non-greedy worst
+    // paths the graph-based max misses.
+    pub pba_wns: Option<f64>,
 }
 
 enum EdgeKind {
@@ -794,6 +800,100 @@ pub fn analyze(
         None => String::new(),
     };
 
+    // ---- path-based analysis (optional) ---------------------------------
+    // Re-time the worst path and its 1-exchange fan-in alternatives with strictly
+    // path-local slew (flat late derate; AOCV-depth not re-applied). Catches a
+    // non-greedy worst path: where GBA's local max-arrival pick at a reconvergent
+    // node took the faster-slew fan-in but a slower-slew one is worse downstream.
+    let pba_wns = if job.pba {
+        let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (u, edges) in out_edges.iter().enumerate() {
+            for e in edges {
+                preds[e.to].push(u);
+            }
+        }
+        let cell_dly = |arc: &Arc, sin: f64, vnode: usize| -> (f64, f64) {
+            let cl = node_load[vnode];
+            let leff = match shield[vnode] {
+                Some((c1, tau)) => crate::ccs::ceff_iter(c1, cl - c1, tau, |c| {
+                    arc.rise_transition.lookup(sin, c).max(arc.fall_transition.lookup(sin, c))
+                }),
+                None => cl,
+            };
+            let (d, s) = if !arc.ccs.is_empty() {
+                match (
+                    arc.ccs.delay_slew(true, sin, leff, 0.3, 0.7),
+                    arc.ccs.delay_slew(false, sin, leff, 0.3, 0.7),
+                ) {
+                    (Some(a), Some(b)) => (a.0.max(b.0), a.1.max(b.1)),
+                    (Some(a), None) => a,
+                    (None, Some(b)) => b,
+                    _ => (0.0, sin),
+                }
+            } else {
+                (
+                    arc.cell_rise.lookup(sin, leff).max(arc.cell_fall.lookup(sin, leff)),
+                    arc.rise_transition.lookup(sin, leff).max(arc.fall_transition.lookup(sin, leff)),
+                )
+            };
+            (d * late_derate, s)
+        };
+        let retime = |path: &[usize]| -> f64 {
+            let mut t = 0.0;
+            let mut s = input_slew;
+            for w in path.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                let Some(e) = out_edges[a].iter().find(|e| e.to == b) else {
+                    return f64::NEG_INFINITY;
+                };
+                match &e.kind {
+                    EdgeKind::Net(i) => {
+                        t += arc_d[*i];
+                        if arc_s[*i] > 0.0 {
+                            s = arc_s[*i];
+                        }
+                    }
+                    EdgeKind::Cell(arc) => {
+                        let (d, so) = cell_dly(arc, s, b);
+                        t += d;
+                        s = so;
+                    }
+                }
+            }
+            t
+        };
+        // GBA-best prefix to a node (source-first)
+        let prefix = |start: usize| -> Vec<usize> {
+            let mut c = vec![start];
+            let mut v = start;
+            while let Some(u) = from[v] {
+                c.push(u);
+                v = u;
+            }
+            c.reverse();
+            c
+        };
+        worst.map(|end| {
+            let gba_path = prefix(end);
+            let mut worst_arr = retime(&gba_path);
+            for wi in 1..gba_path.len() {
+                let node = gba_path[wi];
+                let on_path = gba_path[wi - 1];
+                for &alt in &preds[node] {
+                    if alt == on_path {
+                        continue;
+                    }
+                    let alt_path: Vec<usize> =
+                        prefix(alt).iter().chain(gba_path[wi..].iter()).copied().collect();
+                    worst_arr = worst_arr.max(retime(&alt_path));
+                }
+            }
+            endpoint_req[end] - worst_arr
+        })
+    } else {
+        None
+    };
+
     // ---- hold (early / min-delay) path ----------------------------------
     // Earliest data arrival (min-corner cells + nominal no-crosstalk interconnect,
     // including the early launch clock) must clear the capture edge + hold. The
@@ -873,5 +973,6 @@ pub fn analyze(
         hold_endpoints,
         worst_hold_endpoint,
         worst_hold_path,
+        pba_wns,
     })
 }

@@ -63,6 +63,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         scenarios: vec![],
         exceptions: vec![],
         crpr: true,
+        pba: false,
         base_dir: String::new(),
     };
     let rep = analyze_inputs(DEMO_NETLIST, DEMO_LIB, &job).unwrap_or(TimingReport {
@@ -76,6 +77,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         hold_endpoints: 0,
         worst_hold_endpoint: String::new(),
         worst_hold_path: Vec::new(),
+        pba_wns: None,
     });
     (job, rep)
 }
@@ -120,6 +122,10 @@ pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
         format!("flat derate — late {:.3} / early {:.3}", job.late_derate, job.early_derate)
     };
     s.push_str(&format!("  OCV: {ocv}   CRPR: {}\n", if job.crpr { "on" } else { "off" }));
+    if let Some(pba) = rep.pba_wns {
+        let v = if pba >= 0.0 { "MET" } else { "VIOLATED" };
+        s.push_str(&format!("  PBA WNS: {pba:.4} ns   [{v}]  (path-based re-timing)\n"));
+    }
     s.push_str(&format!("  endpoints: {}\n", rep.endpoints));
     if rep.endpoints == 0 {
         s.push_str("  (no timing endpoints — no primary outputs reached)\n");
@@ -169,6 +175,7 @@ pub fn report_json(job: &StaJob, rep: &TimingReport) -> String {
     s.push_str(&format!("\"wns_ns\":{},", num(rep.wns)));
     s.push_str(&format!("\"tns_ns\":{},", num(rep.tns)));
     s.push_str(&format!("\"met\":{},", rep.endpoints > 0 && rep.wns >= 0.0));
+    s.push_str(&format!("\"pba_wns_ns\":{},", rep.pba_wns.map(num).unwrap_or_else(|| "null".into())));
     s.push_str(&format!("\"hold_endpoints\":{},", rep.hold_endpoints));
     s.push_str(&format!("\"whs_ns\":{},", num(rep.whs)));
     s.push_str(&format!("\"ths_ns\":{},", num(rep.ths)));
