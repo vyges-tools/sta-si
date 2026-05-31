@@ -15,13 +15,13 @@ Typical corner (tt, 1.2 V, 25 °C), 2 ns clock:
 
 | run  | setup WNS | hold WHS |
 | ---- | --------- | -------- |
-| flat | 1.7126 ns | 0.0191 ns |
-| POCV (σ 6%, 3σ) | 1.6860 ns | **0.0031 ns** |
+| flat | 1.8273 ns | 0.1113 ns |
+| POCV (σ 6%, 3σ) | 1.8015 ns | **0.0906 ns** |
 
-The hold margin is only ~19 ps to begin with, and a 3-sigma statistical band
-shrinks it to ~3 ps — the concrete reason advanced-node sign-off needs OCV, not a
-flat derate. The launch path is a real `DFFQX1H7R` CK→Q arc; delays are bilinear
-interpolations of the foundry's NLDM tables.
+A 3-sigma statistical band trims both margins — the concrete reason advanced-node
+sign-off needs OCV, not a flat derate. The launch path is a real `DFFQX1H7R` CK→Q
+arc; cell delays *and* setup/hold constraints are bilinear interpolations of the
+foundry's NLDM tables (constraints correlated against OpenSTA).
 
 ## Multi-corner sign-off (MCMM)
 
@@ -31,21 +31,19 @@ across them:
 
 ```
   scenario      WNS setup     WHS hold   verdict
-  ss_slow         1.4144       -0.0790   HOLD VIOLATED
-  tt_typ          1.7126        0.0191   MET
-  ff_fast         1.8053        0.0384   MET
+  ss_slow         1.6931        0.1800   MET
+  tt_typ          1.8273        0.1113   MET
+  ff_fast         1.8746        0.0750   MET
 
-  worst setup: 1.4144 ns  (ss_slow)
-  worst hold: -0.0790 ns  (ss_slow)   [VIOLATED]
+  worst setup: 1.6931 ns  (ss_slow)   [MET]
+  worst hold:  0.0750 ns  (ff_fast)   [MET]
 ```
 
-The slow corner binds setup (slowest paths) — and here it also fails hold at this
-2 ns clock, because the foundry's hold constraint grows at the cold/low-voltage
-corner faster than the slower data path compensates. That cross-corner catch is
-precisely the point of MCMM: each check is signed off against whichever corner is
-worst for it, automatically. (Corner files are extracted 2-cell libs; point each
-scenario's `lib:` at the full per-corner library from the PDK release for a real
-block.)
+This is the textbook corner split: **setup binds at the slow corner** (slowest
+paths) and **hold binds at the fast corner** (fastest data) — exactly what MCMM is
+for, signing each check off against whichever corner is worst for it. (Corner files
+are extracted 2-cell libs; point each scenario's `lib:` at the full per-corner
+library from the PDK release for a real block.)
 
 ## The Liberty here
 

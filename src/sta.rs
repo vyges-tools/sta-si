@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 
 use crate::job::StaJob;
-use crate::liberty::{Arc, Dir, Lib};
+use crate::liberty::{Arc, Constraint, Dir, Lib};
 use crate::netlist::Netlist;
 use crate::spef::Spef;
 
@@ -161,10 +161,11 @@ pub fn analyze(
 
     // instance pins. A sequential cell's data pins (with a setup constraint)
     // are *capture* endpoints; its Q launches via the CK->Q delay arc.
-    // (D pin node, constraint ns, this flop's CK pin key) — the CK key resolves to
-    // a node whose arrival is the clock insertion delay to this flop (skew).
-    let mut flop_d: Vec<(usize, f64, Option<String>)> = Vec::new();
-    let mut flop_hold: Vec<(usize, f64, Option<String>)> = Vec::new();
+    // (D pin node, constraint table(s), this flop's CK pin key) — the constraint is
+    // interpolated at the operating slews later; the CK key resolves to a node whose
+    // arrival is the clock insertion delay to this flop (skew).
+    let mut flop_d: Vec<(usize, Vec<Constraint>, Option<String>)> = Vec::new();
+    let mut flop_hold: Vec<(usize, Vec<Constraint>, Option<String>)> = Vec::new();
     let mut ck_node_list: Vec<usize> = Vec::new(); // nodes that are clock (CK) pins
     for inst in &nl.insts {
         let cell = lib.cell(&inst.cell).ok_or_else(|| StaError::UnknownCell(inst.cell.clone()))?;
@@ -191,12 +192,12 @@ pub fn analyze(
                         ck_node_list.push(idx); // clock pin — root of insertion-delay paths
                     }
                     if cell.is_seq {
-                        if let Some(setup) = cell.pins[pin].setup {
+                        if !cell.pins[pin].setup.is_empty() {
                             is_endpoint[idx] = true; // data pin = setup capture endpoint
-                            flop_d.push((idx, setup, ck_key.clone()));
+                            flop_d.push((idx, cell.pins[pin].setup.clone(), ck_key.clone()));
                         }
-                        if let Some(hold) = cell.pins[pin].hold {
-                            flop_hold.push((idx, hold, ck_key.clone())); // hold capture endpoint
+                        if !cell.pins[pin].hold.is_empty() {
+                            flop_hold.push((idx, cell.pins[pin].hold.clone(), ck_key.clone()));
                         }
                     }
                 }
@@ -524,6 +525,12 @@ pub fn analyze(
         common_point(lck, cck).map(|p| (arrival[p] - arr_min[p]).max(0.0)).unwrap_or(0.0)
     };
 
+    // worst (max) constraint over a pin's groups, interpolated at the operating
+    // clock + data transitions — matches how delay arcs are looked up.
+    let eval_cons = |cons: &[Constraint], clk_slew: f64, data_slew: f64| -> f64 {
+        cons.iter().map(|c| c.eval(clk_slew, data_slew)).fold(f64::NEG_INFINITY, f64::max)
+    };
+
     // setup capture uses the EARLY clock; CRPR adds back the shared-path pessimism.
     for (idx, setup, ck) in &flop_d {
         let cap = ck_node(ck);
@@ -532,7 +539,9 @@ pub fn analyze(
             (Some(l), Some(c)) => crpr_credit(l, c),
             _ => 0.0,
         };
-        endpoint_req[*idx] = cap_early + period - setup + crpr;
+        let ck_slew = cap.map(|i| slew[i]).unwrap_or(input_slew);
+        let setup_v = eval_cons(setup, ck_slew, slew[*idx]);
+        endpoint_req[*idx] = cap_early + period - setup_v + crpr;
     }
 
     // ---- setup slack + worst path ---------------------------------------
@@ -600,8 +609,10 @@ pub fn analyze(
             (Some(l), Some(c)) => crpr_credit(l, c),
             _ => 0.0,
         };
+        let ck_slew = cap.map(|i| slew_min[i]).unwrap_or(input_slew);
+        let hold_v = eval_cons(hold, ck_slew, slew_min[idx]);
         // earliest data must arrive after the (late) capture edge + hold
-        let slack = arr_min[idx] - (cap_late + hold) + crpr;
+        let slack = arr_min[idx] - (cap_late + hold_v) + crpr;
         if slack < 0.0 {
             ths += slack;
         }

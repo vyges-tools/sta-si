@@ -179,10 +179,18 @@ hold are reported across them). Fully offline, no external deps, 30 tests green.
 Liberty `vyges-char` emits and the SPEF (incl. coupling + RC tree) `vyges-extract`
 emits — the SI margin OpenSTA lacks.
 
+Cell delays *and* setup/hold constraints are bilinear NLDM interpolations at the
+operating slews (not table maxima) — the constraint methodology matches OpenSTA.
+
 **Validated on real PDKs:** sky130, gf180, ihp-sg13g2, and **icsprout55 (55nm — our
 first sub-100nm node)**, whose reg-to-reg setup/hold/POCV example is in
 [`examples/icsprout55/`](examples/icsprout55/) and pinned in the test suite.
 
-The road to sign-off grade builds on the same graph: **multi-clock / generated
-clocks** and inter-clock domain checks. Correlation target: match OpenSTA on a
-routed block, then keep the SI margin it omits.
+**Correlated against OpenSTA 2.7.0** on a sky130 reg→reg design: global WNS matches
+to 4 decimals (9.3760 ns), the DFF CK→Q arc is identical (0.6240 ns), and the
+multi-stage data path agrees within ~0.3% — slightly conservative because we take
+`max(rise,fall)` per stage rather than propagating unate edges (a safe bias).
+
+The road to sign-off grade builds on the same graph: unate-aware (rise/fall-split)
+propagation, then **multi-clock / generated clocks**. The SI margin it adds over
+OpenSTA stays.

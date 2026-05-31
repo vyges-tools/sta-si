@@ -35,15 +35,32 @@ pub struct Arc {
     pub fall_transition: Table,
 }
 
+/// A setup or hold constraint: rise/fall tables indexed by
+/// (index_1 = related/clock transition, index_2 = constrained/data transition).
+/// Evaluated by bilinear interpolation at the operating slews (like delay arcs),
+/// not collapsed to a table-max — matching OpenSTA.
+#[derive(Debug, Clone, Default)]
+pub struct Constraint {
+    pub rise: Table,
+    pub fall: Table,
+}
+
+impl Constraint {
+    /// Worst (max) of rise/fall, interpolated at the clock and data transitions.
+    pub fn eval(&self, clock_slew: f64, data_slew: f64) -> f64 {
+        self.rise.lookup(clock_slew, data_slew).max(self.fall.lookup(clock_slew, data_slew))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Pin {
     pub name: String,
     pub direction: Dir,
     pub capacitance: f64,
-    pub clock: bool,         // `clock : true` — the cell's clock pin
-    pub setup: Option<f64>,  // setup constraint (ns) on a data pin, vs the clock
-    pub hold: Option<f64>,   // hold constraint (ns) on a data pin, vs the clock
-    pub arcs: Vec<Arc>,      // delay arcs (e.g. CK->Q on a flop output)
+    pub clock: bool,             // `clock : true` — the cell's clock pin
+    pub setup: Vec<Constraint>,  // setup constraint group(s) vs the clock
+    pub hold: Vec<Constraint>,   // hold constraint group(s) vs the clock
+    pub arcs: Vec<Arc>,          // delay arcs (e.g. CK->Q on a flop output)
 }
 
 #[derive(Debug, Clone)]
@@ -257,22 +274,12 @@ fn parse_arc(timing_body: &str) -> Arc {
     }
 }
 
-/// Largest value in a constraint timing group (rise/fall_constraint) — a
-/// representative setup/hold number (interpolating at the real slews is later).
-fn constraint_max(timing_body: &str) -> f64 {
-    let mut m = 0.0f64;
-    for name in ["rise_constraint", "fall_constraint"] {
-        if let Some((_, tb, _)) = next_block(timing_body, 0, name) {
-            for row in &parse_table(&tb).values {
-                for &v in row {
-                    if v > m {
-                        m = v;
-                    }
-                }
-            }
-        }
-    }
-    m
+/// Parse a setup/hold constraint group's rise/fall tables.
+fn parse_constraint(timing_body: &str) -> Constraint {
+    let tbl = |name: &str| {
+        next_block(timing_body, 0, name).map(|(_, b, _)| parse_table(&b)).unwrap_or_default()
+    };
+    Constraint { rise: tbl("rise_constraint"), fall: tbl("fall_constraint") }
 }
 
 fn parse_pin(name: String, body: &str) -> Pin {
@@ -285,19 +292,13 @@ fn parse_pin(name: String, body: &str) -> Pin {
         simple_attr(body, "capacitance").and_then(|s| s.parse().ok()).unwrap_or(0.0);
     let clock = simple_attr(body, "clock").as_deref() == Some("true");
     let mut arcs = Vec::new();
-    let mut setup: Option<f64> = None;
-    let mut hold: Option<f64> = None;
+    let mut setup: Vec<Constraint> = Vec::new();
+    let mut hold: Vec<Constraint> = Vec::new();
     let mut at = 0;
     while let Some((_, tbody, after)) = next_block(body, at, "timing") {
         match simple_attr(&tbody, "timing_type").as_deref() {
-            Some(tt) if tt.starts_with("setup") => {
-                let v = constraint_max(&tbody);
-                setup = Some(setup.map_or(v, |s| s.max(v)));
-            }
-            Some(tt) if tt.starts_with("hold") => {
-                let v = constraint_max(&tbody); // ns the data must stay stable post-edge
-                hold = Some(hold.map_or(v, |h| h.max(v)));
-            }
+            Some(tt) if tt.starts_with("setup") => setup.push(parse_constraint(&tbody)),
+            Some(tt) if tt.starts_with("hold") => hold.push(parse_constraint(&tbody)),
             _ => arcs.push(parse_arc(&tbody)), // delay arc (incl. rising_edge CK->Q)
         }
         at = after;

@@ -37,9 +37,10 @@ fn icsprout55_reg_to_reg_setup_and_hold() {
     // 2 flop D pins + 1 primary output
     assert_eq!(rep.endpoints, 3, "endpoints={}", rep.endpoints);
     assert_eq!(rep.hold_endpoints, 2, "hold_endpoints={}", rep.hold_endpoints);
-    // values measured against the foundry NLDM at the typical corner, 2 ns clock
-    assert!((rep.wns - 1.7126).abs() < 0.01, "setup WNS drifted: {}", rep.wns);
-    assert!((rep.whs - 0.0191).abs() < 0.005, "hold WHS drifted: {}", rep.whs);
+    // values measured against the foundry NLDM at the typical corner, 2 ns clock,
+    // with slew-interpolated setup/hold constraints (OpenSTA-correlated)
+    assert!((rep.wns - 1.8273).abs() < 0.01, "setup WNS drifted: {}", rep.wns);
+    assert!((rep.whs - 0.1113).abs() < 0.005, "hold WHS drifted: {}", rep.whs);
     // both must meet
     assert!(rep.wns > 0.0 && rep.whs > 0.0, "55nm path should meet: wns={} whs={}", rep.wns, rep.whs);
     // setup launched by a real flop Q (CK->Q arc)
