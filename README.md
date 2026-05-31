@@ -186,8 +186,10 @@ multicycle paths, matched on launch/capture instance or port), and **CCS-into-RC
 delay** — a current-source model (`output_current` waveforms) plus an **effective
 capacitance**: the driver behind a resistive net sees C1 + shielded-C2, not the
 lumped total (Ceff iterated to convergence with the output slew), so cell delay
-drops on resistive nets (this benefits NLDM too, not just CCS). Fully offline, no
-external deps, 43 tests green.
+drops on resistive nets (this benefits NLDM too, not just CCS). The interconnect
+delay to each sink is a **transient waveform-into-RC solve** (backward-Euler on the
+RC tree driven by the driver edge) — the true response, e.g. 0.69·RC for a single
+RC, not Elmore's pessimistic R·C. Fully offline, no external deps, 44 tests green.
 It **closes the loop with the other engines**: it reads the
 Liberty `vyges-char` emits and the SPEF (incl. coupling + RC tree) `vyges-extract`
 emits — the SI margin OpenSTA lacks.
@@ -207,9 +209,8 @@ edges rather than taking `max(rise,fall)` per stage, matching how real paths beh
 path agrees within **~3%** (down from ~7% before unate-split), staying slightly
 conservative — the residual is second-order slew propagation.
 
-The road to sign-off grade builds on the same graph: full waveform-into-RC
-convolution (the last CCS accuracy step), then path-based analysis (PBA) and
-LVF-grade variation. See
+The road to sign-off grade builds on the same graph: path-based analysis (PBA),
+LVF-grade variation, and CCS receiver models. See
 [`docs/primetime-comparison.md`](docs/primetime-comparison.md) for an honest
 feature-by-feature comparison to Synopsys PrimeTime and where this engine can and
 can't reach it. The SI margin it adds over OpenSTA stays.

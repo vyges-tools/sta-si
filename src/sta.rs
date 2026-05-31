@@ -7,10 +7,11 @@
 //! unateness** (so a chain alternates edges instead of taking max(rise,fall) per
 //! stage), and reports WNS / TNS and the worst path.
 //!
-//! When a SPEF is supplied, net arcs carry a per-pin tree Elmore interconnect
-//! delay and the driver sees an **effective capacitance** (resistive shielding via
-//! the net π-model, with a CCS current-source delay when the lib provides it);
-//! crosstalk (see `si`) adds a
+//! When a SPEF is supplied, the driver sees an **effective capacitance** (resistive
+//! shielding via the net π-model, iterated with the output slew; CCS current-source
+//! delay when the lib provides it) and each sink's interconnect delay comes from a
+//! **transient waveform-into-RC** solve (Elmore is the fallback); crosstalk (see
+//! `si`) adds a
 //! window-filtered margin. Analysis covers **max-delay setup** (combinational
 //! input → output, and register-to-register: a flop's Q launches via its CK→Q
 //! arc, its D pins are capture endpoints with required = period − setup) **and
@@ -22,7 +23,7 @@
 //! launch→capture edge relation — and false-path / multicycle **exceptions** drop or
 //! shift paths. Pure std — unit-tested.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use crate::job::{ExcKind, StaJob};
 use crate::liberty::{Arc, Constraint, Dir, Lib};
@@ -519,13 +520,31 @@ pub fn analyze(
                 x
             })
             .collect();
+        // waveform-into-RC: a transient response per net (driver-slew-aware), memoized
+        // so each sink reads the same simulation. Falls back to per-pin Elmore.
+        let tr_net: Vec<Option<BTreeMap<String, (f64, f64)>>> = (0..nn)
+            .map(|i| {
+                let rc = spef?.nets.get(&net_order[i])?;
+                let (di, dp) = net_drv_ip[i].as_ref()?;
+                let dn = rc.pin_node(di, dp)?;
+                rc.transient(dn, net_slew[i], xc[i])
+            })
+            .collect();
         arcs.iter()
             .map(|a| {
                 let i = a.net_idx;
                 let Some(rc) = spef.and_then(|s| s.nets.get(&net_order[i])) else {
                     return 0.0; // no parasitics -> ideal interconnect
                 };
-                // per-pin tree Elmore when the driver + sink map to SPEF nodes
+                // transient (waveform-into-RC) delay to the sink when available
+                if let (Some(map), Some((si, sp))) = (&tr_net[i], &a.sink_ip) {
+                    if let Some(sn) = rc.pin_node(si, sp) {
+                        if let Some(&(delay, _slew)) = map.get(sn) {
+                            return delay;
+                        }
+                    }
+                }
+                // fallback: per-pin tree Elmore when driver + sink map to SPEF nodes
                 if let (Some((di, dp)), Some((si, sp))) = (&net_drv_ip[i], &a.sink_ip) {
                     if let (Some(dt), Some(st)) = (rc.pin_node(di, dp), rc.pin_node(si, sp)) {
                         if let Some(dl) = rc.elmore(dt, xc[i]) {
@@ -535,7 +554,7 @@ pub fn analyze(
                         }
                     }
                 }
-                // fallback: lumped Elmore (R·C) + lumped crosstalk (R·xtalk-cap)
+                // last resort: lumped Elmore (R·C) + lumped crosstalk (R·xtalk-cap)
                 net_res[i] * net_cap[i] * 1e-6 + net_res[i] * xc[i] * 1e-6
             })
             .collect()

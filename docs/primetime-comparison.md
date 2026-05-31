@@ -11,7 +11,7 @@ today.** This doc says exactly where we stand and what is — and isn't — reac
 
 | Capability | PrimeTime / PT-SI | vyges-sta-si | Gap |
 | --- | --- | --- | --- |
-| Delay model | NLDM **+ CCS** (composite current source) | NLDM + **CCS-into-RC** (current-source `output_current` + **effective capacitance** from the SPEF π-model, **iterated Ceff↔slew to convergence**; resistive shielding cuts driver delay below the lumped load — for NLDM too). No full waveform convolution yet | **medium** (accuracy) |
+| Delay model | NLDM **+ CCS** (composite current source) | NLDM + **CCS-into-RC**: current-source `output_current`, **iterated Ceff↔slew** effective cap (driver shielding — for NLDM too), and a **transient waveform-into-RC** interconnect solve (backward-Euler RC tree, 0.69·RC not Elmore). Remaining: CCS **receiver models** (2-segment cap) + driver/receiver-model nuances | **small–medium** (accuracy) |
 | Setup / hold / CK→Q | full | ✅ — OpenSTA-exact on single arcs | small |
 | Unate (rise/fall) propagation | full | ✅ rise/fall lanes | small |
 | SI / crosstalk | coupled-RC **delay + noise/glitch**, multi-aggressor, logical correlation | Miller-cap, slew-windowed **delay only** | medium–large |
@@ -46,8 +46,10 @@ algorithms*, not unknowns:
   **CCS-into-RC** step — an **effective capacitance** (`ceff`) from the SPEF π-model
   (`pi_reduce`): the driver behind a resistive net drives C1 + shielded-C2 instead of
   the lumped total, so its cell delay drops (this corrects NLDM too); Ceff is
-  **iterated Ceff↔slew to convergence**. Remaining CCS depth: full waveform-into-RC
-  convolution for receiver waveforms — the last accuracy increment here.
+  **iterated to convergence**, and the interconnect uses a **transient waveform-into-RC**
+  solve (backward-Euler RC tree → true sink response, 0.69·RC not Elmore's R·C).
+  Remaining CCS depth: **receiver models** (2-segment receiver cap) and driver/receiver
+  model nuances — diminishing returns from here.
 - **Path-based analysis (PBA)** — recompute worst paths with path-specific slews to
   shed graph pessimism. Mostly graph plumbing on top of what we have.
 - **LVF/POCV** (statistical moments), **higher-order RC reduction** (PI/Arnoldi),

@@ -110,6 +110,146 @@ impl NetRc {
         Some(delay)
     }
 
+    /// Transient node response: drive the RC tree with the driver's output edge (a
+    /// saturated ramp 0→1 over `driver_slew_ns`, from t=0) as a forced source,
+    /// integrate with backward Euler over the rooted tree (an O(N) up/down sweep per
+    /// step), and read each node's 50% delay (relative to the driver's 50%) and
+    /// 30→70% slew. `xtalk_cap_ff` adds at the net node. This is the waveform-into-RC
+    /// convolution — more accurate than Elmore (a single RC gives 0.69·RC, not R·C).
+    /// Returns node → (delay_ns, slew_ns), or None if not a tree from `driver`.
+    pub fn transient(
+        &self,
+        driver: &str,
+        driver_slew_ns: f64,
+        xtalk_cap_ff: f64,
+    ) -> Option<BTreeMap<String, (f64, f64)>> {
+        if self.res.is_empty() {
+            return None;
+        }
+        let mut cap: HashMap<&str, f64> = HashMap::new();
+        for (n, c) in &self.ground {
+            *cap.entry(n.as_str()).or_default() += c;
+        }
+        *cap.entry(self.net_node.as_str()).or_default() += xtalk_cap_ff;
+        let mut adj: HashMap<&str, Vec<(&str, f64)>> = HashMap::new();
+        for (a, b, r) in &self.res {
+            adj.entry(a).or_default().push((b, *r));
+            adj.entry(b).or_default().push((a, *r));
+            cap.entry(a.as_str()).or_default();
+            cap.entry(b.as_str()).or_default();
+        }
+        if !adj.contains_key(driver) {
+            return None;
+        }
+        // rooted tree (BFS): parent + parent-edge R
+        let mut parent: HashMap<&str, (&str, f64)> = HashMap::new();
+        let mut order: Vec<&str> = vec![driver];
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        seen.insert(driver);
+        let mut head = 0;
+        while head < order.len() {
+            let u = order[head];
+            head += 1;
+            for &(v, r) in adj.get(u).map(|x| x.as_slice()).unwrap_or(&[]) {
+                if !seen.insert(v) {
+                    if parent.get(u).map(|p| p.0) != Some(v) {
+                        return None; // not a tree
+                    }
+                    continue;
+                }
+                parent.insert(v, (u, r));
+                order.push(v);
+            }
+        }
+        let nn = order.len();
+        let idx: HashMap<&str, usize> = order.iter().enumerate().map(|(i, &n)| (n, i)).collect();
+        let cvec: Vec<f64> = order.iter().map(|&n| cap.get(n).copied().unwrap_or(0.0)).collect();
+        let mut par_idx = vec![usize::MAX; nn];
+        let mut par_r = vec![0.0f64; nn];
+        let mut children: Vec<Vec<usize>> = vec![Vec::new(); nn];
+        for (i, &n) in order.iter().enumerate() {
+            if let Some(&(p, r)) = parent.get(n) {
+                let pi = idx[p];
+                par_idx[i] = pi;
+                par_r[i] = r;
+                children[pi].push(i);
+            }
+        }
+        // time grid: ramp + ~6 lumped time constants, fixed step count
+        let total_c: f64 = cvec.iter().sum();
+        let total_r: f64 = self.res.iter().map(|(_, _, r)| r).sum();
+        let tau_lump = (total_r * total_c * 1e-6).max(1e-6); // ns
+        let tr = driver_slew_ns.max(1e-4); // ramp duration
+        let nsteps = 800usize;
+        let dt = ((tr + 6.0 * tau_lump) / nsteps as f64).max(1e-7);
+        let vdrv = |t: f64| if t <= 0.0 { 0.0 } else if t >= tr { 1.0 } else { t / tr };
+
+        let didx = idx[driver];
+        let mut v = vec![0.0f64; nn];
+        let (mut t30, mut t50, mut t70) =
+            (vec![f64::INFINITY; nn], vec![f64::INFINITY; nn], vec![f64::INFINITY; nn]);
+        let mut a_co = vec![0.0f64; nn];
+        let mut b_co = vec![0.0f64; nn];
+        let mut vnew = vec![0.0f64; nn];
+        let mut t = 0.0;
+        for _ in 0..nsteps {
+            t += dt;
+            let vd = vdrv(t);
+            // up-sweep (leaves->root): V_i = a_co[i]*V_parent + b_co[i]
+            for &n in order.iter().rev() {
+                let i = idx[n];
+                if i == didx {
+                    continue;
+                }
+                let gc = cvec[i] * 1e-6 / dt; // cap conductance (scaled to S)
+                let gpar = 1.0 / par_r[i];
+                let mut diag = gc + gpar;
+                let mut rhs = gc * v[i];
+                for &c in &children[i] {
+                    let gr = 1.0 / par_r[c];
+                    diag += gr - gr * a_co[c];
+                    rhs += gr * b_co[c];
+                }
+                a_co[i] = gpar / diag;
+                b_co[i] = rhs / diag;
+            }
+            // down-sweep (root forced)
+            vnew[didx] = vd;
+            for &n in &order {
+                let i = idx[n];
+                if i != didx {
+                    vnew[i] = a_co[i] * vnew[par_idx[i]] + b_co[i];
+                }
+            }
+            // record threshold crossings (linear interp within the step)
+            for i in 0..nn {
+                let cross = |thr: f64| (t - dt) + (thr - v[i]) / (vnew[i] - v[i]).max(1e-12) * dt;
+                if t30[i].is_infinite() && vnew[i] >= 0.3 && v[i] < 0.3 {
+                    t30[i] = cross(0.3);
+                }
+                if t50[i].is_infinite() && vnew[i] >= 0.5 && v[i] < 0.5 {
+                    t50[i] = cross(0.5);
+                }
+                if t70[i].is_infinite() && vnew[i] >= 0.7 && v[i] < 0.7 {
+                    t70[i] = cross(0.7);
+                }
+            }
+            std::mem::swap(&mut v, &mut vnew);
+        }
+        let td50 = tr * 0.5; // forced ramp midpoint
+        let mut out = BTreeMap::new();
+        for (i, &n) in order.iter().enumerate() {
+            let d = if t50[i].is_finite() { (t50[i] - td50).max(0.0) } else { 0.0 };
+            let s = if t70[i].is_finite() && t30[i].is_finite() {
+                (t70[i] - t30[i]).max(0.0)
+            } else {
+                0.0
+            };
+            out.insert(n.to_string(), (d, s));
+        }
+        Some(out)
+    }
+
     /// Reduce the net to (near cap C1 fF, shielding time constant τ ns) seen from
     /// `driver`, for the effective-capacitance model. C1 = the driver node's own
     /// ground cap (sees ~0 resistance); τ = R·C2 ≈ Σ_k c_k·r_k (resistance-weighted
