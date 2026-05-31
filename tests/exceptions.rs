@@ -1,13 +1,11 @@
-// Multi-clock: a path launched by clk1 (10 ns) and captured by clk2 (4 ns) is
-// constrained not by either period but by the tightest launch→capture edge
-// separation over the beat. For 10 vs 4 ns that worst separation is 2 ns
-// (launch @10 → capture @12), so the cross-domain path is far tighter than the
-// same path analysed in a single 10 ns (or even 4 ns) domain.
+// Timing exceptions: false_path drops a path from analysis; multicycle moves the
+// capture edge out. A reg→reg path that violates at a tight 1-cycle period either
+// disappears (false path) or meets (multicycle 2).
 use vyges_sta_si::engine::analyze_inputs;
-use vyges_sta_si::job::StaJob;
+use vyges_sta_si::job::{ExcKind, Exception, StaJob};
 
 const LIB: &str = r#"
-library (mc) {
+library (ex) {
   cell (INV) {
     pin (A) { direction : input; capacitance : 0.0015; }
     pin (Y) {
@@ -49,22 +47,22 @@ library (mc) {
 }
 "#;
 
-// r1 on clk1, r2 on clk2; cross-domain path r1.Q -> g1 -> r2.D
-const NL: &str = "module mc ( clk1, clk2, din, dout ); input clk1, clk2, din; output dout; wire q1, n1;\n\
-                  DFF r1 ( .CK(clk1), .D(din), .Q(q1) );\n\
-                  INV g1 ( .A(q1),    .Y(n1) );\n\
-                  DFF r2 ( .CK(clk2), .D(n1),  .Q(dout) );\n\
+// din -> r1 -> g1 -> r2 -> dout ; the reg→reg r1->r2 is the tight path
+const NL: &str = "module ex ( clk, din, dout ); input clk, din; output dout; wire q1, n1;\n\
+                  DFF r1 ( .CK(clk), .D(din), .Q(q1) );\n\
+                  INV g1 ( .A(q1),   .Y(n1) );\n\
+                  DFF r2 ( .CK(clk), .D(n1),  .Q(dout) );\n\
                   endmodule";
 
-fn job(clocks: Vec<(String, String, f64)>) -> StaJob {
+fn job(exceptions: Vec<Exception>) -> StaJob {
     StaJob {
-        design: "mc".into(),
+        design: "ex".into(),
         netlist: "x".into(),
         libs: vec!["x".into()],
         spef: None,
-        clock_port: "clk1".into(),
-        period_ns: 10.0,
-        clocks,
+        clock_port: "clk".into(),
+        period_ns: 0.25, // tight: the reg→reg path violates at 1 cycle
+        clocks: vec![],
         input_slew: 0.02,
         output_load: 0.005,
         late_derate: 1.0,
@@ -76,33 +74,37 @@ fn job(clocks: Vec<(String, String, f64)>) -> StaJob {
         miller: 2.0,
         xtalk_window: 0.0,
         scenarios: vec![],
-        exceptions: vec![],
+        exceptions,
         crpr: true,
         base_dir: String::new(),
     }
 }
 
-fn ck(name: &str, period: f64) -> (String, String, f64) {
-    (name.into(), name.into(), period)
+fn exc(kind: ExcKind, from: &str, to: &str) -> Exception {
+    Exception { kind, from: from.into(), to: to.into() }
 }
 
 #[test]
-fn cross_domain_uses_tightest_edge_relation() {
-    // clk1=10, clk2=4 -> r2/D capture window = 2 ns (the worst launch->capture beat)
-    let cross = analyze_inputs(NL, LIB, &job(vec![ck("clk1", 10.0), ck("clk2", 4.0)])).unwrap();
-    assert_eq!(cross.worst_endpoint, "r2/D", "cross worst {}", cross.worst_endpoint);
-    // required = 0 + 2.0 - setup(0.05); arrival ~0.21 -> slack ~1.74, well under 2.0
-    assert!(cross.wns > 1.3 && cross.wns < 1.95, "cross-domain wns={} (expect ~1.74)", cross.wns);
+fn false_path_drops_the_violating_endpoint() {
+    let base = analyze_inputs(NL, LIB, &job(vec![])).unwrap();
+    // at 0.25 ns the reg→reg path violates and is the worst endpoint
+    assert_eq!(base.worst_endpoint, "r2/D", "base worst {}", base.worst_endpoint);
+    assert!(base.wns < 0.0, "base should violate, wns={}", base.wns);
+
+    let fp = analyze_inputs(NL, LIB, &job(vec![exc(ExcKind::FalsePath, "r1", "r2")])).unwrap();
+    // r2/D is excluded -> it's no longer the worst, and timing now meets
+    assert_ne!(fp.worst_endpoint, "r2/D", "false path should drop r2/D");
+    assert!(fp.wns > 0.0, "with r1->r2 false, design meets: wns={}", fp.wns);
+    assert_eq!(fp.endpoints, base.endpoints - 1, "one fewer setup endpoint");
 }
 
 #[test]
-fn cross_domain_is_tighter_than_either_single_domain() {
-    let cross = analyze_inputs(NL, LIB, &job(vec![ck("clk1", 10.0), ck("clk2", 4.0)])).unwrap();
-    // same netlist as one 10 ns domain (clk2 unknown -> falls back to primary 10 ns)
-    let one10 = analyze_inputs(NL, LIB, &job(vec![])).unwrap();
-    // ... and as a single 4 ns domain on both
-    let one4 = analyze_inputs(NL, LIB, &job(vec![ck("clk1", 4.0), ck("clk2", 4.0)])).unwrap();
-    // 2 ns relation is tighter than 10 ns and even tighter than 4 ns
-    assert!(cross.wns < one10.wns - 5.0, "cross {} should be << 10ns-domain {}", cross.wns, one10.wns);
-    assert!(cross.wns < one4.wns, "cross {} should be < 4ns-domain {}", cross.wns, one4.wns);
+fn multicycle_relaxes_the_path() {
+    let base = analyze_inputs(NL, LIB, &job(vec![])).unwrap();
+    assert!(base.wns < 0.0 && base.worst_endpoint == "r2/D", "base violates at r2/D");
+    let mc = analyze_inputs(NL, LIB, &job(vec![exc(ExcKind::Multicycle(2), "r1", "r2")])).unwrap();
+    // a 2-cycle path gets one extra period of capture window -> r2/D meets and is
+    // no longer the binding endpoint, so the design meets.
+    assert!(mc.wns > 0.0, "2-cycle path meets: wns={}", mc.wns);
+    assert_ne!(mc.worst_endpoint, "r2/D", "multicycle should relax r2/D off the critical path");
 }

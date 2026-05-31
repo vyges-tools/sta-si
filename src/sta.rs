@@ -15,12 +15,14 @@
 //! min-delay hold** (a second, min-corner forward pass; earliest data arrival at
 //! each flop D must clear its hold constraint). On-chip variation is flat scalar
 //! derates by default, or **AOCV** (depth-dependent derate table) / **POCV**
-//! (per-stage sigma, N-sigma band growing as sqrt(depth)) when configured. Pure
-//! std — unit-tested.
+//! (per-stage sigma, N-sigma band growing as sqrt(depth)) when configured. Multiple
+//! clocks (incl. generated) are supported — cross-domain paths use the tightest
+//! launch→capture edge relation — and false-path / multicycle **exceptions** drop or
+//! shift paths. Pure std — unit-tested.
 
 use std::collections::HashMap;
 
-use crate::job::StaJob;
+use crate::job::{ExcKind, StaJob};
 use crate::liberty::{Arc, Constraint, Dir, Lib};
 use crate::netlist::Netlist;
 use crate::spef::Spef;
@@ -647,8 +649,18 @@ pub fn analyze(
         cons.iter().map(|c| c.eval(clk_slew, data_slew)).fold(f64::NEG_INFINITY, f64::max)
     };
 
+    // timing exceptions, matched on launch/capture instance (or port) names.
+    let inst_of = |node: usize| labels[node].split('/').next().unwrap_or("").to_string();
+    let match_exc = |ln: &str, cn: &str| {
+        job.exceptions
+            .iter()
+            .find(|e| (e.from == "*" || e.from == ln) && (e.to == "*" || e.to == cn))
+    };
+    let mut excluded_setup = vec![false; n]; // false-path endpoints (skip setup)
+
     // setup capture uses the EARLY clock; CRPR adds back the shared-path pessimism;
-    // the capture window is the launch→capture edge relation (one period intra-domain).
+    // the capture window is the launch→capture edge relation (one period intra-domain),
+    // shifted out by a multicycle exception (false paths drop the endpoint).
     for (idx, setup, ck) in &flop_d {
         let cap = ck_node(ck);
         let lck = launch_ck(*idx, &from);
@@ -661,7 +673,14 @@ pub fn analyze(
         let setup_v = eval_cons(setup, ck_slew, slew[*idx]);
         let pc = cap.map(&clock_period_of).unwrap_or(period);
         let pl = lck.map(&clock_period_of).unwrap_or(pc);
-        let (setup_rel, _) = edge_relation(pl, pc);
+        let (mut setup_rel, _) = edge_relation(pl, pc);
+        let ln = lck.map(&inst_of).unwrap_or_default();
+        if let Some(e) = match_exc(&ln, &inst_of(*idx)) {
+            match e.kind {
+                ExcKind::FalsePath => excluded_setup[*idx] = true,
+                ExcKind::Multicycle(cyc) => setup_rel += cyc.saturating_sub(1) as f64 * pc,
+            }
+        }
         endpoint_req[*idx] = cap_early + setup_rel - setup_v + crpr;
     }
 
@@ -673,8 +692,8 @@ pub fn analyze(
     let mut worst = None;
     let mut endpoints = 0;
     for v in 0..n {
-        if !is_endpoint[v] || arrival[v] == f64::NEG_INFINITY {
-            continue;
+        if !is_endpoint[v] || arrival[v] == f64::NEG_INFINITY || excluded_setup[v] {
+            continue; // unreached or false-path-excluded
         }
         endpoints += 1;
         let slack = endpoint_req[v] - arrival[v];
@@ -723,9 +742,21 @@ pub fn analyze(
         if arr_min[idx] == f64::INFINITY {
             continue; // unreached
         }
-        hold_endpoints += 1;
         let cap = ck_node(ck);
         let lck = launch_ck(idx, &from_min);
+        let pc = cap.map(&clock_period_of).unwrap_or(period);
+        let pl = lck.map(&clock_period_of).unwrap_or(pc);
+        let (_, mut hold_rel) = edge_relation(pl, pc);
+        // apply exceptions: false path drops the endpoint, multicycle shifts the
+        // hold capture back by (cycles − 1).
+        let ln = lck.map(&inst_of).unwrap_or_default();
+        if let Some(e) = match_exc(&ln, &inst_of(idx)) {
+            match e.kind {
+                ExcKind::FalsePath => continue,
+                ExcKind::Multicycle(cyc) => hold_rel += cyc.saturating_sub(1) as f64 * pc,
+            }
+        }
+        hold_endpoints += 1;
         let cap_late = cap.map(|i| arrival[i]).filter(|a| a.is_finite()).unwrap_or(0.0);
         let crpr = match (lck, cap) {
             (Some(l), Some(c)) => crpr_credit(l, c),
@@ -733,9 +764,6 @@ pub fn analyze(
         };
         let ck_slew = cap.map(|i| slew_min[i]).unwrap_or(input_slew);
         let hold_v = eval_cons(hold, ck_slew, slew_min[idx]);
-        let pc = cap.map(&clock_period_of).unwrap_or(period);
-        let pl = lck.map(&clock_period_of).unwrap_or(pc);
-        let (_, hold_rel) = edge_relation(pl, pc);
         // earliest data must arrive after the (late) capture edge + hold relation
         let slack = arr_min[idx] - (cap_late + hold_rel + hold_v) + crpr;
         if slack < 0.0 {

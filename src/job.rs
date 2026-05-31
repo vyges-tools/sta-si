@@ -69,7 +69,24 @@ pub struct StaJob {
     // path to a single-scenario `.sta`; the engine runs all and reports the worst
     // setup and worst hold across them. The fields above are then unused.
     pub scenarios: Vec<String>,
+    pub exceptions: Vec<Exception>, // false-path / multicycle timing exceptions
     pub base_dir: String,
+}
+
+/// A timing exception, matched on the launch and capture endpoints (instance name
+/// or port; `*` = any). FalsePath drops the path from both setup and hold;
+/// Multicycle(n) moves the setup capture n cycles out (hold by n−1).
+#[derive(Debug, Clone)]
+pub enum ExcKind {
+    FalsePath,
+    Multicycle(u32),
+}
+
+#[derive(Debug, Clone)]
+pub struct Exception {
+    pub kind: ExcKind,
+    pub from: String,
+    pub to: String,
 }
 
 #[derive(Debug)]
@@ -106,6 +123,7 @@ impl StaJob {
         let mut kv: BTreeMap<String, String> = BTreeMap::new();
         // clock lines are collected separately — a BTreeMap would dedupe multiple.
         let mut clocks: Vec<(String, String, f64)> = Vec::new();
+        let mut exceptions: Vec<Exception> = Vec::new();
         for raw in text.lines() {
             let line = strip_comment(raw).trim();
             if line.is_empty() {
@@ -126,6 +144,27 @@ impl StaJob {
                 let period: f64 =
                     per.parse().map_err(|_| JobError(format!("bad clock period: {per:?}")))?;
                 clocks.push((name, src, period));
+                continue;
+            }
+            if key == "false_path" || key == "multicycle" {
+                // `false_path: <from> <to>`   `multicycle: <from> <to> <cycles>`
+                let t: Vec<&str> = v.split_whitespace().collect();
+                let exc = match (key.as_str(), t.as_slice()) {
+                    ("false_path", [from, to]) => {
+                        Exception { kind: ExcKind::FalsePath, from: from.to_string(), to: to.to_string() }
+                    }
+                    ("multicycle", [from, to, n]) => {
+                        let cyc: u32 =
+                            n.parse().map_err(|_| JobError(format!("bad multicycle count: {n:?}")))?;
+                        Exception {
+                            kind: ExcKind::Multicycle(cyc),
+                            from: from.to_string(),
+                            to: to.to_string(),
+                        }
+                    }
+                    _ => return Err(JobError(format!("bad exception: {line:?}"))),
+                };
+                exceptions.push(exc);
                 continue;
             }
             kv.insert(key, v.trim().to_string());
@@ -163,6 +202,7 @@ impl StaJob {
             xtalk_window: num("xtalk_window", 0.0), // guard band on top of slew-derived window
             crpr: kv.get("crpr").map(|s| s != "false" && s != "0").unwrap_or(true),
             scenarios,
+            exceptions,
             base_dir: base_dir.to_string(),
         };
         job.validate()?;

@@ -61,6 +61,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         miller: 2.0,
         xtalk_window: 0.0,
         scenarios: vec![],
+        exceptions: vec![],
         crpr: true,
         base_dir: String::new(),
     };

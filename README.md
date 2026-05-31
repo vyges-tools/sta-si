@@ -107,6 +107,8 @@ spef:        top.spef       # optional parasitics -> wire load + net delay
 clock:       clk 1.0        # clock port + period (ns); repeat for multiple clocks:
 #clock:      spiclk spi_clk 4.0       # name source period (source: port or inst/pin)
 #clock:      divclk u_div/Q 2.0       # generated/divided clock off an internal pin
+#false_path:  uart_rx  cfg_reg        # exclude a path (from to; * = any)
+#multicycle:  mac_a    mac_acc  3     # N-cycle path (from to cycles)
 miller:      2.0            # crosstalk Miller factor (1.0 disables SI)
 xtalk_window: 0.0           # ns — guard band added to the slew-derived window
 input_slew:  0.02           # ns
@@ -179,7 +181,9 @@ is credited back, removing reconvergence pessimism; `crpr: false` to disable), a
 **MCMM** (a job can list per-corner scenario `.sta` files; the worst setup and worst
 hold are reported across them), **rise/fall-split unate propagation**, and
 **multi-clock / generated clocks** (cross-domain paths use the tightest launch→capture
-edge relation, not a single period). Fully offline, no external deps, 34 tests green.
+edge relation, not a single period), and **timing exceptions** (false paths and
+multicycle paths, matched on launch/capture instance or port). Fully offline, no
+external deps, 36 tests green.
 It **closes the loop with the other engines**: it reads the
 Liberty `vyges-char` emits and the SPEF (incl. coupling + RC tree) `vyges-extract`
 emits — the SI margin OpenSTA lacks.
@@ -199,6 +203,8 @@ edges rather than taking `max(rise,fall)` per stage, matching how real paths beh
 path agrees within **~3%** (down from ~7% before unate-split), staying slightly
 conservative — the residual is second-order slew propagation.
 
-The road to sign-off grade builds on the same graph: clock phases / waveforms and
-false-path & multicycle exceptions, plus slew-propagation refinement. The SI margin
-it adds over OpenSTA stays.
+The road to sign-off grade builds on the same graph: path-based analysis (PBA) and
+CCS/LVF-grade accuracy, plus clock phases/waveforms. See
+[`docs/primetime-comparison.md`](docs/primetime-comparison.md) for an honest
+feature-by-feature comparison to Synopsys PrimeTime and where this engine can and
+can't reach it. The SI margin it adds over OpenSTA stays.

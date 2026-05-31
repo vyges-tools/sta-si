@@ -42,6 +42,7 @@ fn job(period: f64) -> StaJob {
         miller: 2.0,
         xtalk_window: 0.2,
         scenarios: vec![],
+        exceptions: vec![],
         crpr: true,
         base_dir: String::new(),
     }
