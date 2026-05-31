@@ -186,10 +186,17 @@ pub fn analyze(
             }
         }
     }
-    // net arcs: driver -> each sink, carrying the SPEF Elmore net delay
+    // net arcs: driver -> each sink, carrying the SPEF Elmore net delay plus the
+    // worst-case crosstalk delta-delay from coupling (SI).
     for (netname, net) in &nets {
         if let Some(d) = net.driver {
-            let ndelay = spef.map(|s| s.net_delay_ns(netname)).unwrap_or(0.0);
+            let ndelay = spef
+                .and_then(|s| s.nets.get(netname))
+                .map(|rc| {
+                    rc.res_ohm * rc.cap_ff * 1e-6 // nominal Elmore (Cc counted once, grounded)
+                        + crate::si::xtalk_delta_ns(rc.res_ohm, rc.coupling_ff, job.miller)
+                })
+                .unwrap_or(0.0);
             for &s in &net.sinks {
                 if s != d {
                     out_edges[d].push(Edge { to: s, kind: EdgeKind::Net(ndelay) });

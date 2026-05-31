@@ -10,6 +10,7 @@ const SPEF: &str = r#"
 *R_UNIT 1 OHM
 *NAME_MAP
 *1 n1
+*2 n2
 *3 u1
 *4 u2
 *D_NET *1 20.000000
@@ -18,6 +19,7 @@ const SPEF: &str = r#"
 *CAP
 1 *3:Y 10.000000
 2 *1 10.000000
+3 *1 *2 5.000000
 *RES
 1 *1 *3:Y 500.000000
 2 *1 *4:A 500.000000
@@ -56,6 +58,7 @@ fn job() -> StaJob {
         input_slew: 0.02,
         output_load: 0.005,
         late_derate: 1.0,
+        miller: 2.0,
         base_dir: String::new(),
     }
 }
@@ -69,6 +72,20 @@ fn parses_total_cap_and_summed_res() {
     assert!((s.wire_load_pf("n1") - 0.020).abs() < 1e-9); // fF -> pF
     // Elmore = R*C -> ns : 1000 * 20 * 1e-6 = 0.02 ns
     assert!((s.net_delay_ns("n1") - 0.02).abs() < 1e-9);
+    assert!((n1.coupling_ff - 5.0).abs() < 1e-9); // two-node *CAP entry
+}
+
+#[test]
+fn crosstalk_reduces_slack_vs_quiet() {
+    let nl = netlist::parse(NL).unwrap();
+    let lib = Lib::parse(LIB).unwrap();
+    let spef = Spef::parse(SPEF);
+    let mut j = job();
+    j.miller = 2.0; // worst-case aggressor
+    let with_si = analyze(&nl, &lib, &j, Some(&spef)).unwrap();
+    j.miller = 1.0; // quiet aggressor -> coupling acts as plain ground (no extra)
+    let quiet = analyze(&nl, &lib, &j, Some(&spef)).unwrap();
+    assert!(with_si.wns < quiet.wns, "SI {} !< quiet {}", with_si.wns, quiet.wns);
 }
 
 #[test]

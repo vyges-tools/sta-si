@@ -33,6 +33,7 @@ fn job(period: f64) -> StaJob {
         input_slew: 0.02,
         output_load: 0.005,
         late_derate: 1.0,
+        miller: 2.0,
         base_dir: String::new(),
     }
 }

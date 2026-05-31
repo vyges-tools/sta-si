@@ -35,8 +35,10 @@ input slew × output load) and net arcs (the SPEF interconnect delay) — propag
 arrival and required times, and reports **WNS** (worst negative slack), **TNS**
 (total negative slack), and the **worst path** with per-node arrival and slew.
 With SPEF, the wire capacitance loads the driver and a lumped Elmore (R·C) net
-delay is added to each driver→sink arc; without it the interconnect is ideal. A
-late OCV derate is applied to cell delays.
+delay is added to each driver→sink arc; without it the interconnect is ideal.
+**Coupling** capacitance in the SPEF adds a worst-case **crosstalk delta-delay**
+to victim nets — the Miller-amplified coupling `R·(MCF−1)·Cc` — the SI margin a
+plain STA misses. A late OCV derate is applied to cell delays.
 
 ## When & how to use it in your flow
 
@@ -114,7 +116,7 @@ that foundry's NDA, never in this repository.
         ┌──────────────────────────────┴──────────────────────────────┐
   OPEN reference plugin                          CERTIFIED per-fab plugins
   (in-repo · no NDA)                             (private · one per fab/node 🔒)
-    • unit derates (1.0), no SI                    • vyges-sta-si-tsmc28
+    • unit derates; worst-case SI                  • vyges-sta-si-tsmc28
       ✓ runs out of the box                        • vyges-sta-si-sec28
                                                    AOCV/POCV + SI margins, under NDA
 ```
@@ -122,14 +124,15 @@ that foundry's NDA, never in this repository.
 ## Current state (2026-05-31)
 
 v1 does **combinational max-delay** timing (primary input → primary output) with
-NLDM cell delays interpolated on slew × load, a late OCV derate, and **SPEF-driven
-interconnect** — the wire cap loads the driver and a lumped Elmore (R·C) net delay
-is added per arc. Fully offline, no external deps, 12 tests green. It **closes the
-loop with the other engines**: it reads the Liberty `vyges-char` emits and the
-SPEF `vyges-extract` emits.
+NLDM cell delays interpolated on slew × load, a late OCV derate, **SPEF-driven
+interconnect** (wire-cap load + lumped Elmore net delay), and **crosstalk
+delta-delay** (worst-case Miller margin from the SPEF coupling caps). Fully
+offline, no external deps, 13 tests green. It **closes the loop with the other
+engines**: it reads the Liberty `vyges-char` emits and the SPEF (incl. coupling)
+`vyges-extract` emits — the SI margin OpenSTA lacks.
 
-The road to sign-off grade builds on the same graph: per-pin (path) Elmore from
-the full SPEF RC tree (v1 lumps R·C), register setup/hold (sequential) timing,
-AOCV/POCV statistical derating, and crosstalk delta-delay (the SI layer — the
-engine reserves the `StaError::SiNotModeled` hook). Correlation target: match
-OpenSTA on a routed block, then add the SI margin OpenSTA lacks.
+The road to sign-off grade builds on the same graph: **timing-window-aware
+crosstalk** (v1 is window-free worst-case), per-pin (path) Elmore from the full
+RC tree (v1 lumps R·C), register setup/hold (sequential) timing, and AOCV/POCV
+statistical derating. Correlation target: match OpenSTA on a routed block, then
+keep the SI margin it omits.

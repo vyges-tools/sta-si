@@ -1,22 +1,24 @@
-//! Signal-integrity delta-delay — the SI layer (reserved in v0).
+//! Signal-integrity crosstalk delta-delay.
 //!
-//! Crosstalk-induced delay is the headline of a sign-off STA+SI engine: a
-//! switching aggressor net couples into a victim and shifts its delay, but only
-//! when their switching windows overlap. Doing it right needs coupling
-//! capacitance (from SPEF) plus iterative timing-window overlap analysis.
+//! A coupling capacitance `Cc` between a victim net and a switching aggressor
+//! shifts the victim's delay: when the aggressor switches *against* the victim,
+//! the Miller effect makes `Cc` look like up to `2·Cc` of grounded load, slowing
+//! the victim. v1 is a **worst-case, window-free** bound: the victim's
+//! interconnect delay gains `R · (MCF − 1) · Cc`, where `MCF` (the Miller
+//! coupling factor, ~2 for the worst late case) is set per run. The nominal net
+//! delay already counts `Cc` once as grounded (`MCF = 1`), so only the extra
+//! `(MCF − 1)·Cc` is added here.
 //!
-//! v0 models **no crosstalk** — it returns zero delta-delay so the base STA is
-//! exact and honest. The interface is fixed here so the engine can grow into it
-//! (coupling from SPEF → window overlap → per-arc delta) without a redesign; the
-//! engine surfaces the gap via `StaError::SiNotModeled` when SI is requested.
+//! Timing-window-aware crosstalk (only aggressors whose switching overlaps the
+//! victim's, with real alignment) is the refinement — it requires iterating
+//! arrival windows. Pure std — unit-tested offline.
 
-/// Crosstalk delta-delay (ns) added to a victim net's stage delay.
-/// v0: always 0.0 (no coupling model yet).
-pub fn delta_delay() -> f64 {
-    0.0
+/// Crosstalk delta-delay (ns) for a victim net: `R[Ω] · (MCF−1) · Cc[fF]`.
+pub fn xtalk_delta_ns(res_ohm: f64, coupling_ff: f64, miller: f64) -> f64 {
+    res_ohm * (miller - 1.0).max(0.0) * coupling_ff * 1e-6
 }
 
-/// Whether a real crosstalk model is available. v0: false.
+/// Whether a crosstalk model is applied. v1: true (reduced worst-case).
 pub fn modeled() -> bool {
-    false
+    true
 }

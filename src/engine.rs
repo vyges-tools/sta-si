@@ -52,6 +52,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         input_slew: 0.02,
         output_load: 0.005,
         late_derate: 1.0,
+        miller: 2.0,
         base_dir: String::new(),
     };
     let rep = analyze_inputs(DEMO_NETLIST, DEMO_LIB, &job).unwrap_or(TimingReport {
@@ -87,8 +88,8 @@ pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
     let mut s = String::new();
     s.push_str(&format!("STA report — design {}\n", job.design));
     s.push_str(&format!(
-        "  clock {}  period {:.3} ns   late_derate {:.3}\n",
-        job.clock_port, job.period_ns, job.late_derate
+        "  clock {}  period {:.3} ns   late_derate {:.3}   xtalk_miller {:.2}\n",
+        job.clock_port, job.period_ns, job.late_derate, job.miller
     ));
     s.push_str(&format!("  endpoints: {}\n", rep.endpoints));
     if rep.endpoints == 0 {
@@ -119,6 +120,7 @@ pub fn report_json(job: &StaJob, rep: &TimingReport) -> String {
     s.push_str(&format!("\"design\":{:?},", job.design));
     s.push_str(&format!("\"clock\":{:?},", job.clock_port));
     s.push_str(&format!("\"period_ns\":{:.6},", job.period_ns));
+    s.push_str(&format!("\"xtalk_miller\":{:.2},", job.miller));
     s.push_str(&format!("\"endpoints\":{},", rep.endpoints));
     s.push_str(&format!("\"wns_ns\":{},", num(rep.wns)));
     s.push_str(&format!("\"tns_ns\":{},", num(rep.tns)));

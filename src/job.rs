@@ -26,6 +26,7 @@ pub struct StaJob {
     pub input_slew: f64,
     pub output_load: f64,
     pub late_derate: f64,
+    pub miller: f64, // crosstalk Miller coupling factor (2.0 worst late; 1.0 disables SI)
     pub base_dir: String,
 }
 
@@ -81,6 +82,7 @@ impl StaJob {
             input_slew: num("input_slew", 0.05),
             output_load: num("output_load", 0.005),
             late_derate: num("late_derate", 1.0),
+            miller: num("miller", 2.0),
             base_dir: base_dir.to_string(),
         };
         job.validate()?;

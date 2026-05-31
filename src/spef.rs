@@ -13,8 +13,9 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct NetRc {
-    pub cap_ff: f64,
-    pub res_ohm: f64,
+    pub cap_ff: f64,      // total cap (grounded + coupling), from *D_NET
+    pub res_ohm: f64,     // summed *RES
+    pub coupling_ff: f64, // coupling cap to neighbours (for crosstalk delta)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -35,9 +36,11 @@ impl Spef {
     pub fn parse(text: &str) -> Spef {
         let mut names: BTreeMap<usize, String> = BTreeMap::new();
         let mut nets: BTreeMap<String, NetRc> = BTreeMap::new();
+        let mut coupling: BTreeMap<String, f64> = BTreeMap::new(); // per-net coupling total
         let mut cur: Option<(String, NetRc)> = None;
         let mut in_namemap = false;
         let mut in_res = false;
+        let mut in_cap = false;
 
         let finish = |cur: &mut Option<(String, NetRc)>, nets: &mut BTreeMap<String, NetRc>| {
             if let Some((name, rc)) = cur.take() {
@@ -45,6 +48,14 @@ impl Spef {
                     nets.insert(name, rc);
                 }
             }
+        };
+        let netname = |tok: &str, names: &BTreeMap<usize, String>| -> Option<String> {
+            // a net node ref like `*2` -> net name; pin refs `*3:Y` are not nets
+            let body = tok.trim_start_matches('*');
+            if body.contains(':') {
+                return None;
+            }
+            body.parse::<usize>().ok().and_then(|i| names.get(&i).cloned())
         };
 
         for raw in text.lines() {
@@ -56,25 +67,34 @@ impl Spef {
             if t.starts_with("*D_NET") {
                 in_namemap = false;
                 in_res = false;
+                in_cap = false;
                 finish(&mut cur, &mut nets);
                 let toks: Vec<&str> = t.split_whitespace().collect();
                 let id = toks.get(1).and_then(|s| s.trim_start_matches('*').parse::<usize>().ok());
                 let cap = toks.get(2).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.0);
                 let name = id.and_then(|i| names.get(&i).cloned()).unwrap_or_default();
-                cur = Some((name, NetRc { cap_ff: cap, res_ohm: 0.0 }));
+                cur = Some((name, NetRc { cap_ff: cap, res_ohm: 0.0, coupling_ff: 0.0 }));
                 continue;
             }
             match t {
                 "*RES" => {
                     in_res = true;
+                    in_cap = false;
                     continue;
                 }
-                "*CAP" | "*CONN" => {
+                "*CAP" => {
+                    in_cap = true;
                     in_res = false;
+                    continue;
+                }
+                "*CONN" => {
+                    in_res = false;
+                    in_cap = false;
                     continue;
                 }
                 "*END" => {
                     in_res = false;
+                    in_cap = false;
                     finish(&mut cur, &mut nets);
                     continue;
                 }
@@ -94,9 +114,23 @@ impl Spef {
                         rc.res_ohm += ohm;
                     }
                 }
+            } else if in_cap {
+                // two-node entry `<idx> *A *B <ff>` is a coupling cap between nets
+                let toks: Vec<&str> = t.split_whitespace().collect();
+                if toks.len() >= 4 && toks[1].starts_with('*') && toks[2].starts_with('*') {
+                    if let (Some(a), Some(b), Ok(v)) =
+                        (netname(toks[1], &names), netname(toks[2], &names), toks[3].parse::<f64>())
+                    {
+                        *coupling.entry(a).or_default() += v;
+                        *coupling.entry(b).or_default() += v;
+                    }
+                }
             }
         }
         finish(&mut cur, &mut nets);
+        for (name, rc) in nets.iter_mut() {
+            rc.coupling_ff = coupling.get(name).copied().unwrap_or(0.0);
+        }
         Spef { nets }
     }
 
