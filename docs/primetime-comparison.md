@@ -11,7 +11,7 @@ today.** This doc says exactly where we stand and what is — and isn't — reac
 
 | Capability | PrimeTime / PT-SI | vyges-sta-si | Gap |
 | --- | --- | --- | --- |
-| Delay model | NLDM **+ CCS** (composite current source) | NLDM + **CCS-into-RC** (current-source `output_current` + **effective capacitance** from the SPEF π-model; resistive shielding cuts driver delay below the lumped load — for NLDM too). Ceff is one-pass (not yet iterated) and no full waveform convolution | **medium** (accuracy) |
+| Delay model | NLDM **+ CCS** (composite current source) | NLDM + **CCS-into-RC** (current-source `output_current` + **effective capacitance** from the SPEF π-model, **iterated Ceff↔slew to convergence**; resistive shielding cuts driver delay below the lumped load — for NLDM too). No full waveform convolution yet | **medium** (accuracy) |
 | Setup / hold / CK→Q | full | ✅ — OpenSTA-exact on single arcs | small |
 | Unate (rise/fall) propagation | full | ✅ rise/fall lanes | small |
 | SI / crosstalk | coupled-RC **delay + noise/glitch**, multi-aggressor, logical correlation | Miller-cap, slew-windowed **delay only** | medium–large |
@@ -45,9 +45,9 @@ algorithms*, not unknowns:
   nodes. **Landed:** `ccs.rs` parses `output_current` waveforms and, crucially, the
   **CCS-into-RC** step — an **effective capacitance** (`ceff`) from the SPEF π-model
   (`pi_reduce`): the driver behind a resistive net drives C1 + shielded-C2 instead of
-  the lumped total, so its cell delay drops (this corrects NLDM too). Remaining CCS
-  depth: **iterate Ceff to convergence** (it's one-pass today) and full waveform-into-RC
-  convolution for receiver waveforms — the last accuracy increments here.
+  the lumped total, so its cell delay drops (this corrects NLDM too); Ceff is
+  **iterated Ceff↔slew to convergence**. Remaining CCS depth: full waveform-into-RC
+  convolution for receiver waveforms — the last accuracy increment here.
 - **Path-based analysis (PBA)** — recompute worst paths with path-specific slews to
   shed graph pessimism. Mostly graph plumbing on top of what we have.
 - **LVF/POCV** (statistical moments), **higher-order RC reduction** (PI/Arnoldi),

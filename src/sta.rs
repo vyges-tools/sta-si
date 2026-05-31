@@ -422,13 +422,15 @@ pub fn analyze(
                                 }
                                 let sin = slew[u][il];
                                 // CCS-into-RC: drive the effective capacitance (resistive
-                                // shielding) rather than the lumped load. T estimated from
-                                // the lumped-load transition (one pass).
+                                // shielding), iterating Ceff <-> output transition to a
+                                // self-consistent point rather than a single lumped pass.
                                 let leff = match shield[v] {
-                                    Some((c1, tau)) => {
-                                        let t0 = st.lookup(sin, load);
-                                        crate::ccs::ceff(c1, load - c1, tau, t0)
-                                    }
+                                    Some((c1, tau)) => crate::ccs::ceff_iter(
+                                        c1,
+                                        load - c1,
+                                        tau,
+                                        |c| st.lookup(sin, c),
+                                    ),
                                     None => load,
                                 };
                                 // CCS current-source delay when the arc carries it; else NLDM.

@@ -99,6 +99,24 @@ pub fn ceff(c1: f64, c2: f64, tau_sh: f64, t: f64) -> f64 {
     c1 + c2 * bracket
 }
 
+/// Iterate Ceff ↔ output transition to a self-consistent point. `slew_at(c)`
+/// returns the driver's output transition when it drives capacitance `c`. Starting
+/// from the lumped load, each round shrinks Ceff (resistive shielding), which speeds
+/// the edge, which shrinks Ceff further — a contraction that settles in a few rounds.
+/// One-pass (no iteration) over-estimates Ceff because it uses the slow lumped edge.
+pub fn ceff_iter<F: Fn(f64) -> f64>(c1: f64, c2: f64, tau: f64, slew_at: F) -> f64 {
+    let mut ce = c1 + c2.max(0.0); // start at the lumped total
+    for _ in 0..8 {
+        let t = slew_at(ce);
+        let next = ceff(c1, c2, tau, t);
+        if (next - ce).abs() < 1e-5 {
+            return next;
+        }
+        ce = next;
+    }
+    ce
+}
+
 /// Nearest waveform to (slew, load) by normalized distance on the grid.
 fn nearest(set: &[CcsWaveform], slew: f64, load: f64) -> Option<&CcsWaveform> {
     set.iter().min_by(|a, b| {
@@ -146,6 +164,30 @@ mod tests {
         let a = ceff(c1, c2, 0.02, 0.1);
         let b = ceff(c1, c2, 0.20, 0.1);
         assert!(b < a && a < 0.010 && b > c1, "a={a} b={b}");
+    }
+
+    #[test]
+    fn ceff_iteration_undershoots_one_pass() {
+        // transition grows with load; iterating drives T (hence Ceff) down further
+        // than the one-pass lumped estimate.
+        let (c1, c2, tau) = (0.001, 0.200, 1.0);
+        let slew_at = |c: f64| 0.1 + c; // ns
+        let one_pass = ceff(c1, c2, tau, slew_at(c1 + c2)); // T at lumped load
+        let iterated = ceff_iter(c1, c2, tau, slew_at);
+        assert!(iterated < one_pass, "iterated {iterated} should be < one-pass {one_pass}");
+        assert!(iterated > c1, "iterated {iterated} should still exceed the near cap {c1}");
+        // idempotent / converged: re-running from the iterated point is stable
+        let again = ceff_iter(c1, c2, tau, slew_at);
+        assert!((again - iterated).abs() < 1e-9);
+    }
+
+    #[test]
+    fn constant_slew_iteration_matches_one_pass() {
+        // slew independent of load -> iteration == one-pass (converges immediately)
+        let (c1, c2, tau) = (0.001, 0.05, 0.5);
+        let one = ceff(c1, c2, tau, 0.2);
+        let it = ceff_iter(c1, c2, tau, |_| 0.2);
+        assert!((one - it).abs() < 1e-9, "one={one} it={it}");
     }
 
     #[test]
