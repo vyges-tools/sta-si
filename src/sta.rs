@@ -157,12 +157,15 @@ pub fn analyze(
     };
 
     // primary input ports drive a net of the same name
+    let mut input_ports: Vec<(usize, String)> = Vec::new();
     for p in &nl.inputs {
         let idx = node(port_key(p), p.clone(), &mut key2idx, &mut labels, &mut is_endpoint);
         ensure_net(&mut nets, p);
         nets.get_mut(p).unwrap().driver = Some(idx);
+        input_ports.push((idx, p.clone()));
     }
     // primary output ports are endpoints + sinks of their net
+    let mut output_ports: Vec<(usize, String)> = Vec::new();
     for p in &nl.outputs {
         let idx = node(port_key(p), p.clone(), &mut key2idx, &mut labels, &mut is_endpoint);
         is_endpoint[idx] = true;
@@ -170,6 +173,7 @@ pub fn analyze(
         let net = nets.get_mut(p).unwrap();
         net.sinks.push(idx);
         net.load += job.output_load;
+        output_ports.push((idx, p.clone()));
     }
 
     // instance pins. A sequential cell's data pins (with a setup constraint)
@@ -232,6 +236,23 @@ pub fn analyze(
     // clock arrival at each capture flop — see clock-skew handling below).
     let period = job.period_ns;
     let mut endpoint_req = vec![period; n];
+    // SDC I/O budget + setup uncertainty. Output ports lose the external output
+    // delay and the setup guard band from the period. Input ports (other than
+    // clock sources) seed the forward pass with their external arrival delay.
+    let clock_srcs: std::collections::HashSet<String> = if job.clocks.is_empty() {
+        std::iter::once(job.clock_port.clone()).collect()
+    } else {
+        job.clocks.iter().map(|(_, s, _)| s.clone()).collect()
+    };
+    let mut seed = vec![0.0f64; n];
+    for (idx, name) in &input_ports {
+        if !clock_srcs.contains(name) {
+            seed[*idx] = job.input_delay_for(name);
+        }
+    }
+    for (idx, name) in &output_ports {
+        endpoint_req[*idx] = period - job.output_delay_for(name) - job.setup_uncertainty;
+    }
     let mut node_load = vec![0.0f64; n];
     for (netname, net) in &nets {
         if let Some(d) = net.driver {
@@ -392,7 +413,8 @@ pub fn analyze(
         let mut order: Vec<usize> = Vec::new();
         for v in 0..n {
             if indeg_work[v] == 0 {
-                arr[v] = [0.0; 2];
+                arr[v] = [seed[v]; 2]; // input ports seed with their SDC arrival delay
+                arr_nom[v] = [seed[v]; 2];
                 order.push(v);
             }
         }
@@ -782,7 +804,7 @@ pub fn analyze(
                 ExcKind::Multicycle(cyc) => setup_rel += cyc.saturating_sub(1) as f64 * pc,
             }
         }
-        endpoint_req[*idx] = cap_early + setup_rel - setup_v + crpr;
+        endpoint_req[*idx] = cap_early + setup_rel - setup_v + crpr - job.setup_uncertainty;
     }
 
     // ---- setup slack + worst path ---------------------------------------
@@ -960,7 +982,7 @@ pub fn analyze(
         let ck_slew = cap.map(|i| slew_min[i]).unwrap_or(input_slew);
         let hold_v = eval_cons(hold, ck_slew, slew_min[idx]);
         // earliest data must arrive after the (late) capture edge + hold relation
-        let slack = arr_min[idx] - (cap_late + hold_rel + hold_v) + crpr;
+        let slack = arr_min[idx] - (cap_late + hold_rel + hold_v + job.hold_uncertainty) + crpr;
         if slack < 0.0 {
             ths += slack;
         }

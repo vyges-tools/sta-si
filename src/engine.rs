@@ -52,6 +52,12 @@ pub fn demo() -> (StaJob, TimingReport) {
         clocks: vec![],
         input_slew: 0.02,
         output_load: 0.005,
+        input_delay: 0.0,
+        output_delay: 0.0,
+        io_input_delays: vec![],
+        io_output_delays: vec![],
+        setup_uncertainty: 0.0,
+        hold_uncertainty: 0.0,
         late_derate: 1.0,
         early_derate: 1.0,
         pocv_sigma: 0.0,
@@ -64,6 +70,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         exceptions: vec![],
         crpr: true,
         pba: false,
+        sdc: None,
         base_dir: String::new(),
     };
     let rep = analyze_inputs(DEMO_NETLIST, DEMO_LIB, &job).unwrap_or(TimingReport {

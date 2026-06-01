@@ -77,6 +77,13 @@ fn job(pba: bool) -> StaJob {
         exceptions: vec![],
         crpr: true,
         pba,
+        input_delay: 0.0,
+        output_delay: 0.0,
+        io_input_delays: vec![],
+        io_output_delays: vec![],
+        setup_uncertainty: 0.0,
+        hold_uncertainty: 0.0,
+        sdc: None,
         base_dir: String::new(),
     }
 }

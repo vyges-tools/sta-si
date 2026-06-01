@@ -19,6 +19,7 @@
 
 pub mod job;
 pub mod liberty;
+pub mod sdc;
 pub mod netlist;
 pub mod spef;
 pub mod sta;

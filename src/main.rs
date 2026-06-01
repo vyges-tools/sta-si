@@ -188,6 +188,24 @@ fn main() {
             }
             if cli.verbose {
                 eprintln!("loaded {} ({} lib(s))", job.netlist, job.libs.len());
+                if let Some(sdc_path) = &job.sdc {
+                    eprintln!(
+                        "  sdc: {} -> {} clock(s), {} exception(s)",
+                        sdc_path,
+                        job.clocks.len(),
+                        job.exceptions.len()
+                    );
+                    // surface SDC commands we recognised but do not model — never
+                    // silently drop constraints (re-parse; cheap, verbose-only).
+                    if let Ok(sdc) = vyges_sta_si::sdc::Sdc::load(&job.resolve(sdc_path)) {
+                        if !sdc.ignored.is_empty() {
+                            let mut u = sdc.ignored.clone();
+                            u.sort();
+                            u.dedup();
+                            eprintln!("  sdc: unsupported (ignored): {}", u.join(", "));
+                        }
+                    }
+                }
             }
             match engine::analyze_job(&job) {
                 Ok(rep) => emit(&job, &rep, &cli),

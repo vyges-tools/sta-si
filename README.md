@@ -170,6 +170,39 @@ pocv_n:     3.0             # POCV: number of sigmas for the bound (default 3.0)
 #pba: true                  # path-based analysis: re-time critical paths (default false)
 ```
 
+### Constraints from SDC
+
+Real flows (synthesis, OpenROAD/LibreLane) emit their timing intent as **SDC**.
+Point the job at one with `sdc:` and the constraints are read straight from it —
+the netlist, libraries, and parasitics still come from the job (they are not in
+SDC). The SDC is **authoritative** for what it sets; explicit `.sta` values fill
+anything it leaves unspecified.
+
+```text
+design:  top
+netlist: top.v
+lib:     cells.lib
+spef:    top.spef
+sdc:     top.sdc        # clocks, I/O delays, uncertainty, derates, exceptions
+```
+
+Supported SDC (a Tcl-subset reader — `set var`, `$var`, `[get_ports …]`,
+`[all_inputs]`, `{…}` lists, `set_units` scaling, `\`-continuations):
+
+| command | effect |
+|---|---|
+| `create_clock` / `create_generated_clock` | clock(s); a generated clock's period is resolved from its master × `divide_by` / `multiply_by` |
+| `set_input_delay` / `set_output_delay` | I/O timing budget — default (`all_inputs`/`all_outputs`) plus per-port overrides; seeds input arrival / eats the period at outputs |
+| `set_clock_uncertainty [-setup|-hold]` | guard band — tightens setup required, relaxes hold required |
+| `set_clock_latency` | source/network latency, applied to the I/O budget |
+| `set_input_transition` / `set_load` | boundary slew / load |
+| `set_timing_derate -late|-early` | flat OCV derate |
+| `set_false_path` / `set_multicycle_path` | timing exceptions (`-from`/`-to`, pin → instance) |
+
+Anything not modelled (`set_driving_cell`, `set_max_fanout`, …) is **never
+silently dropped** — `run -v` lists every ignored command so you know exactly
+what was and wasn't applied.
+
 For **MCMM**, a job instead lists scenario files and the engine reports the worst
 setup/hold across them:
 
@@ -180,6 +213,8 @@ scenarios: corner_ss.sta, corner_tt.sta, corner_ff.sta   # each a full single-co
 
 A complete, runnable example is in [`examples/top/`](examples/top/);
 `vyges-sta-si run examples/top/top.sta` reports the slack on a 3-inverter chain.
+`run examples/top/top_sdc.sta -v` runs the same design with its clock, I/O delays,
+uncertainty, and derate read from [`top.sdc`](examples/top/top.sdc) instead.
 See [`examples/icsprout55/`](examples/icsprout55/) for a 55nm reg-to-reg path with
 flat / POCV / multi-corner (`mcmm.sta`) runs.
 

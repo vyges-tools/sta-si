@@ -54,6 +54,17 @@ pub struct StaJob {
     pub clocks: Vec<(String, String, f64)>,
     pub input_slew: f64,
     pub output_load: f64,
+    // I/O timing budget (from SDC set_input_delay / set_output_delay). `input_delay`
+    // is the default arrival at primary inputs; `output_delay` the external delay
+    // that eats into the period at primary outputs. Per-port entries override.
+    pub input_delay: f64,
+    pub output_delay: f64,
+    pub io_input_delays: Vec<(String, f64)>,
+    pub io_output_delays: Vec<(String, f64)>,
+    // clock uncertainty (SDC set_clock_uncertainty): tightens setup required time,
+    // relaxes hold required time.
+    pub setup_uncertainty: f64,
+    pub hold_uncertainty: f64,
     pub late_derate: f64,
     pub early_derate: f64, // OCV early derate on cell delays for the hold (min) path
     // OCV mode (resolved at analysis time): POCV if pocv_sigma > 0, else AOCV if an
@@ -71,7 +82,29 @@ pub struct StaJob {
     // setup and worst hold across them. The fields above are then unused.
     pub scenarios: Vec<String>,
     pub exceptions: Vec<Exception>, // false-path / multicycle timing exceptions
+    pub sdc: Option<String>, // optional SDC constraints file (merged at load)
     pub base_dir: String,
+}
+
+impl StaJob {
+    /// Resolve the input arrival for a primary input port (per-port override,
+    /// else the default `input_delay`).
+    pub fn input_delay_for(&self, port: &str) -> f64 {
+        self.io_input_delays
+            .iter()
+            .find(|(p, _)| p == port)
+            .map(|(_, d)| *d)
+            .unwrap_or(self.input_delay)
+    }
+
+    /// Resolve the external output delay for a primary output port.
+    pub fn output_delay_for(&self, port: &str) -> f64 {
+        self.io_output_delays
+            .iter()
+            .find(|(p, _)| p == port)
+            .map(|(_, d)| *d)
+            .unwrap_or(self.output_delay)
+    }
 }
 
 /// A timing exception, matched on the launch and capture endpoints (instance name
@@ -176,10 +209,12 @@ impl StaJob {
         };
         let scenarios = kv.get("scenarios").map(|s| split_list(s)).unwrap_or_default();
         let mcmm = !scenarios.is_empty();
-        // clock/netlist/lib are required for a single run, optional for an MCMM job.
+        let sdc = kv.get("sdc").filter(|s| !s.is_empty()).cloned();
+        // clock/netlist/lib are required for a single run, optional for an MCMM job
+        // or when an SDC supplies the clock (merged in `load`).
         let (clock_port, period_ns) = match clocks.first() {
             Some((_, src, per)) => (src.clone(), *per),
-            None if mcmm => (String::new(), 0.0),
+            None if mcmm || sdc.is_some() => (String::new(), 0.0),
             None => return Err(JobError("missing key: clock".into())),
         };
         let num = |k: &str, d: f64| kv.get(k).and_then(|s| s.parse().ok()).unwrap_or(d);
@@ -193,6 +228,12 @@ impl StaJob {
             clocks,
             input_slew: num("input_slew", 0.05),
             output_load: num("output_load", 0.005),
+            input_delay: num("input_delay", 0.0),
+            output_delay: num("output_delay", 0.0),
+            io_input_delays: Vec::new(),
+            io_output_delays: Vec::new(),
+            setup_uncertainty: num("setup_uncertainty", 0.0),
+            hold_uncertainty: num("hold_uncertainty", 0.0),
             late_derate: num("late_derate", 1.0),
             early_derate: num("early_derate", 1.0),
             pocv_sigma: num("pocv_sigma", 0.0),
@@ -205,16 +246,28 @@ impl StaJob {
             pba: kv.get("pba").map(|s| s == "true" || s == "1").unwrap_or(false),
             scenarios,
             exceptions,
+            sdc,
             base_dir: base_dir.to_string(),
         };
-        job.validate()?;
+        // When an SDC supplies the clock, defer the final validation until after
+        // it is merged in `load`; a bare clockless job (no SDC) still fails here.
+        if job.sdc.is_none() {
+            job.validate()?;
+        }
         Ok(job)
     }
 
     pub fn load(path: &str) -> Result<StaJob, JobError> {
         let text = std::fs::read_to_string(path).map_err(|e| JobError(format!("{path}: {e}")))?;
         let base = Path::new(path).parent().and_then(|p| p.to_str()).unwrap_or(".");
-        StaJob::parse(&text, base)
+        let mut job = StaJob::parse(&text, base)?;
+        if let Some(sdc_path) = job.sdc.clone() {
+            let resolved = job.resolve(&sdc_path);
+            let sdc = crate::sdc::Sdc::load(&resolved).map_err(|e| JobError(e.to_string()))?;
+            sdc.merge_into(&mut job);
+            job.validate()?; // now that SDC has supplied the clock
+        }
+        Ok(job)
     }
 
     pub fn resolve(&self, rel: &str) -> String {

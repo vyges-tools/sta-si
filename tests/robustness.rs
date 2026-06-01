@@ -84,6 +84,8 @@ fn job() -> StaJob {
         clock_port: "clk".into(), period_ns: 10.0, clocks: vec![], input_slew: 0.02,
         output_load: 0.005, late_derate: 1.0, early_derate: 1.0, pocv_sigma: 0.0, pocv_n: 3.0,
         aocv_late: vec![], aocv_early: vec![], miller: 2.0, xtalk_window: 0.0,
+        input_delay: 0.0, output_delay: 0.0, io_input_delays: vec![], io_output_delays: vec![],
+        setup_uncertainty: 0.0, hold_uncertainty: 0.0, sdc: None,
         scenarios: vec![], exceptions: vec![], crpr: true, pba: false, base_dir: String::new(),
     }
 }
