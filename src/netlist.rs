@@ -109,17 +109,37 @@ pub fn parse(text: &str) -> Result<Netlist, NetlistError> {
         }
     }
 
+    // Read a declaration's net names, **expanding bus ranges**: `output [7:0] count`
+    // yields count[7]..count[0] as individual ports, so each bit matches the
+    // bit-nets the gates drive (and SDC `set_output_delay [get_ports count[3]]`
+    // resolves). A range stays in effect for every name in the same declaration
+    // (`output [3:0] a, b;` -> a and b both expand). Scalars (no range) pass through.
     let read_names = |i: &mut usize| -> Vec<String> {
         let mut names = Vec::new();
+        let mut range: Option<(i64, i64)> = None;
         while *i < n && t[*i] != ";" {
             match t[*i].as_str() {
                 "," => {}
                 "[" => {
+                    *i += 1;
+                    let mut spec = String::new();
                     while *i < n && t[*i] != "]" {
+                        spec.push_str(&t[*i]);
                         *i += 1;
                     }
+                    range = spec.split_once(':').and_then(|(h, l)| {
+                        Some((h.trim().parse::<i64>().ok()?, l.trim().parse::<i64>().ok()?))
+                    });
                 }
-                tok => names.push(tok.to_string()),
+                tok => match range {
+                    Some((h, l)) => {
+                        let (hi, lo) = if h >= l { (h, l) } else { (l, h) };
+                        for b in (lo..=hi).rev() {
+                            names.push(format!("{tok}[{b}]"));
+                        }
+                    }
+                    None => names.push(tok.to_string()),
+                },
             }
             *i += 1;
         }
@@ -163,10 +183,20 @@ pub fn parse(text: &str) -> Result<Netlist, NetlistError> {
                                 i += 1;
                             }
                             "." => {
-                                // .PIN ( NET )
+                                // .PIN ( NET )   — NET may be a bit-select `count[7]`,
+                                // which the tokenizer splits into `count [ 7 ]`; reassemble
+                                // it so the connection net matches the bus-expanded port /
+                                // the bit-nets other gates drive (else the node dangles).
                                 let pin = t.get(i + 1).cloned().unwrap_or_default();
                                 // expect '(' at i+2
-                                let net = t.get(i + 3).cloned().unwrap_or_default();
+                                let mut net = t.get(i + 3).cloned().unwrap_or_default();
+                                if t.get(i + 4).map(|s| s.as_str()) == Some("[") {
+                                    if let (Some(idx), Some("]")) =
+                                        (t.get(i + 5), t.get(i + 6).map(|s| s.as_str()))
+                                    {
+                                        net = format!("{net}[{idx}]");
+                                    }
+                                }
                                 if net != ")" && !is_const(&net) {
                                     conns.push((pin, net));
                                 }

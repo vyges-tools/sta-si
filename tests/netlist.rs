@@ -33,8 +33,21 @@ fn drops_constant_nets() {
 }
 
 #[test]
-fn tolerates_bus_ranges_and_comments() {
+fn expands_bus_ranges_and_tolerates_comments() {
     let v = "module m ( y );\n output [1:0] y; // a bus output\n wire w;\n endmodule";
     let nl = parse(v).unwrap();
-    assert_eq!(nl.outputs, vec!["y"]); // range skipped
+    // a bus port expands to one node per bit (so bit-nets + per-bit SDC match)
+    assert_eq!(nl.outputs, vec!["y[1]", "y[0]"]);
+}
+
+#[test]
+fn reassembles_bit_select_connection_nets() {
+    // a gate driving a bus output bit: the connection net must be "count[1]",
+    // matching the bus-expanded port, so the path connects (no dangling output).
+    let v = "module m ( count ); output [1:0] count;\n\
+             BUF g0 ( .A(d0), .X(count[0]) ); BUF g1 ( .A(d1), .X(count[1]) ); endmodule";
+    let nl = parse(v).unwrap();
+    assert_eq!(nl.outputs, vec!["count[1]", "count[0]"]);
+    assert!(nl.insts[1].conns.contains(&("X".into(), "count[1]".into())),
+        "bit-select net reassembled to count[1], got {:?}", nl.insts[1].conns);
 }
