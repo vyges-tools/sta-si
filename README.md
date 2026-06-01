@@ -26,6 +26,14 @@ and advanced OCV are where it stops short of advanced-node sign-off.
 `vyges-sta-si` is an open engine in that space, behind the standard file formats
 (Verilog, Liberty, SPEF, SDC), and correlated against OpenSTA as its baseline.
 
+**Describe the job, not the script.** Every incumbent here — PrimeTime, Tempus,
+OpenSTA — is driven by hand-written **Tcl**, a recurring source of silent typos,
+copy-paste drift across corners and blocks, and brittle maintenance. `vyges-sta-si`
+takes a small **declarative job file** (`.sta`) instead: readable, diffable,
+schema-checkable, with no control flow to get wrong. And the one constraint artifact
+people *do* author — the **SDC** — is read directly (`sdc:`), not re-scripted. This
+is a toolchain-wide property: char, extract, and em-ir are configured the same way.
+
 ## The problem it solves
 
 Given a **gate-level netlist** (`*.v`), one or more **Liberty** libraries
