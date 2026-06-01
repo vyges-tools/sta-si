@@ -34,6 +34,14 @@ schema-checkable, with no control flow to get wrong. And the one constraint arti
 people *do* author — the **SDC** — is read directly (`sdc:`), not re-scripted. This
 is a toolchain-wide property: char, extract, and em-ir are configured the same way.
 
+**Validate fast, sign off with your tool.** `vyges-sta-si` reads the **standard
+formats** (Verilog, Liberty, SPEF, SDC), so you iterate timing in the fast Vyges loop
+and hand the *same files* to OpenSTA or PrimeTime for final sign-off — no flow change,
+just a different timer on identical inputs. That interop is demonstrated, not promised:
+on a real routed block, sta-si and OpenSTA agree on WNS within **0.5%** from the same
+library/SPEF/SDC. Adopt it for the fast inner loop where licenses are scarce and runs
+are slow; keep your sign-off tool for tape-out.
+
 ## The problem it solves
 
 Given a **gate-level netlist** (`*.v`), one or more **Liberty** libraries
