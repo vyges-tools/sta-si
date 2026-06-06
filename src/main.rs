@@ -33,7 +33,26 @@ flags:
   -v, --verbose         extra detail on stderr
   -h, --help            show this help
   -V, --version         show version
+  --bug-report     file a bug (central: vyges/community)
+  --feature-request request a feature (central)
+  --sponsor        sponsor Vyges (github.com/sponsors/vyges-ip)
 ";
+
+const BUG_URL: &str =
+    "https://github.com/vyges/community/issues/new?template=bug_report_template.yaml";
+const FEATURE_URL: &str = "https://github.com/vyges/community/issues/new?labels=enhancement";
+const SPONSOR_URL: &str = "https://github.com/sponsors/vyges-ip";
+
+/// Print a labelled URL; if stdout is a terminal, also try to open it in a browser.
+/// In headless / agent contexts (not a TTY) it just prints the URL.
+fn link(label: &str, url: &str) {
+    use std::io::IsTerminal;
+    println!("{label}:\n  {url}");
+    if std::io::stdout().is_terminal() {
+        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        let _ = std::process::Command::new(opener).arg(url).status();
+    }
+}
 
 #[derive(Default)]
 struct Cli {
@@ -45,6 +64,9 @@ struct Cli {
     fail_on_violation: bool,
     help: bool,
     version: bool,
+    bug_report: bool,
+    feature_request: bool,
+    sponsor: bool,
 }
 
 fn parse_cli(args: &[String]) -> Cli {
@@ -62,6 +84,9 @@ fn parse_cli(args: &[String]) -> Cli {
             "-v" | "--verbose" => c.verbose = true,
             "-h" | "--help" => c.help = true,
             "-V" | "--version" => c.version = true,
+            "--bug-report" => c.bug_report = true,
+            "--feature-request" => c.feature_request = true,
+            "--sponsor" => c.sponsor = true,
             other => c.positionals.push(other.to_string()),
         }
         i += 1;
@@ -131,8 +156,17 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cli = parse_cli(&args);
 
+    if cli.bug_report {
+        return link("Report a bug (central — vyges/community)", BUG_URL);
+    }
+    if cli.feature_request {
+        return link("Request a feature (central — vyges/community)", FEATURE_URL);
+    }
+    if cli.sponsor {
+        return link("Sponsor Vyges", SPONSOR_URL);
+    }
     if cli.version {
-        println!("vyges-sta-si {}", vyges_sta_si::VERSION);
+        println!("vyges-sta-si {} ({})", vyges_sta_si::VERSION, env!("VYGES_GIT_SHA"));
         println!("{}", vyges_sta_si::COPYRIGHT);
         return;
     }
