@@ -2,7 +2,11 @@
 name = "vyges-sta-si"
 version = "0.0.1"
 edition = "2021"
-description = "Vyges tools"
+description = "Static timing analysis with signal integrity: WNS/TNS sign-off with a CI gate."
+license = "Apache-2.0"
+authors = ["Vyges <https://vyges.com/contact>"]
+homepage = "https://vyges.com"
+repository = "https://github.com/vyges-tools/sta-si"
 
 # std-only (no external dependencies) so the core builds/tests offline.
 
