@@ -133,6 +133,7 @@ fn main() {
 
     if cli.version {
         println!("vyges-sta-si {}", vyges_sta_si::VERSION);
+        println!("{}", vyges_sta_si::COPYRIGHT);
         return;
     }
     let cmd = cli.positionals.first().cloned().unwrap_or_default();
