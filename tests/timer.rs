@@ -194,6 +194,170 @@ fn timer_resize_updates_and_matches_rebuild() {
     assert!(!t.is_dirty());
 }
 
+// ---- Phase 2b: cone-localized incremental update, shadow-checked on a sequential design ----
+
+const SEQ_LIB: &str = r#"
+library (seq) {
+  cell (INV) {
+    pin (A) { direction : input; capacitance : 0.0015; }
+    pin (Y) {
+      direction : output;
+      timing () {
+        related_pin : "A";
+        cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.08, 0.20", "0.12, 0.28" ); }
+        cell_fall (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.07, 0.18", "0.11, 0.26" ); }
+        rise_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.09", "0.04, 0.11" ); }
+        fall_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.08", "0.04, 0.10" ); }
+      }
+    }
+  }
+  cell (INV2) {
+    pin (A) { direction : input; capacitance : 0.0010; }
+    pin (Y) {
+      direction : output;
+      timing () {
+        related_pin : "A";
+        cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.04, 0.10", "0.06, 0.14" ); }
+        cell_fall (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.035, 0.09", "0.055, 0.13" ); }
+        rise_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.015, 0.045", "0.02, 0.055" ); }
+        fall_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.015, 0.04", "0.02, 0.05" ); }
+      }
+    }
+  }
+  cell (DFF) {
+    ff (IQ, IQN) { clocked_on : "CK"; next_state : "D"; }
+    pin (CK) { direction : input; clock : true; capacitance : 0.001; }
+    pin (D) {
+      direction : input; capacitance : 0.001;
+      timing () { related_pin : "CK"; timing_type : setup_rising;
+        rise_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.05" ); }
+        fall_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.05" ); } }
+      timing () { related_pin : "CK"; timing_type : hold_rising;
+        rise_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.02" ); }
+        fall_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.02" ); } }
+    }
+    pin (Q) {
+      direction : output;
+      timing () { related_pin : "CK"; timing_type : rising_edge;
+        cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.10, 0.22", "0.14, 0.30" ); }
+        cell_fall (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.10, 0.22", "0.14, 0.30" ); }
+        rise_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.09", "0.04, 0.11" ); }
+        fall_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.09", "0.04, 0.11" ); } }
+    }
+  }
+}
+"#;
+
+// reg-to-reg with a 3-stage combinational cone between the flops (and feedback r2.Q -> r1.D),
+// so there are both setup and hold endpoints and a multi-node cone to resize within.
+const SEQ_NL: &str = "module seq ( clk, y ); input clk; output y; wire q1, a, b, n;\n\
+                      DFF r1 ( .CK(clk), .D(y), .Q(q1) );\n\
+                      INV g1 ( .A(q1), .Y(a) );\n\
+                      INV g2 ( .A(a),  .Y(b) );\n\
+                      INV g3 ( .A(b),  .Y(n) );\n\
+                      DFF r2 ( .CK(clk), .D(n), .Q(y) );\n\
+                      endmodule";
+
+fn seq_job(period: f64) -> StaJob {
+    let mut j = job(period);
+    j.design = "seq".into();
+    j.clock_port = "clk".into();
+    j
+}
+
+/// Assert two timers agree field-for-field, bit-for-bit: aggregates, worst endpoints, the
+/// worst setup/hold paths, and every pin's arrival / earliest-arrival / slew.
+fn assert_timers_identical(a: &Timer, b: &Timer) {
+    let ra = a.report();
+    let rb = b.report();
+    assert_eq!(ra.wns, rb.wns, "wns");
+    assert_eq!(ra.tns, rb.tns, "tns");
+    assert_eq!(ra.whs, rb.whs, "whs");
+    assert_eq!(ra.ths, rb.ths, "ths");
+    assert_eq!(ra.endpoints, rb.endpoints, "endpoints");
+    assert_eq!(ra.hold_endpoints, rb.hold_endpoints, "hold_endpoints");
+    assert_eq!(ra.worst_endpoint, rb.worst_endpoint, "worst_endpoint");
+    assert_eq!(ra.worst_hold_endpoint, rb.worst_hold_endpoint, "worst_hold_endpoint");
+    assert_eq!(ra.worst_path.len(), rb.worst_path.len(), "worst_path len");
+    for (x, y) in ra.worst_path.iter().zip(&rb.worst_path) {
+        assert_eq!(x.label, y.label);
+        assert_eq!(x.arrival, y.arrival, "setup path arrival at {}", x.label);
+        assert_eq!(x.slew, y.slew, "setup path slew at {}", x.label);
+    }
+    for (x, y) in ra.worst_hold_path.iter().zip(&rb.worst_hold_path) {
+        assert_eq!(x.arrival, y.arrival, "hold path arrival at {}", x.label);
+    }
+    // every pin, matched by label (node ids are deterministic but compare by label anyway).
+    assert_eq!(a.num_pins(), b.num_pins(), "pin count");
+    for i in 0..a.num_pins() {
+        let label = a.pin_label(i);
+        let j = b.pin(label).expect("same labels");
+        assert_eq!(a.arrival(i), b.arrival(j), "arrival at {label}");
+        assert_eq!(a.arrival_min(i), b.arrival_min(j), "arrival_min at {label}");
+        assert_eq!(a.slew(i), b.slew(j), "slew at {label}");
+    }
+}
+
+/// The core Phase-2b gate: drive a randomized sequence of resizes through the incremental
+/// `update()` and assert it stays byte-identical to a fresh full build at every step — on a
+/// sequential design with setup + hold endpoints, across both violating and met periods.
+#[test]
+fn incremental_update_matches_full_rebuild_under_random_resizes() {
+    let lib = Lib::parse(SEQ_LIB).unwrap();
+    let gates = ["g1", "g2", "g3"];
+    let cells = ["INV", "INV2"];
+
+    for &period in &[0.6_f64, 0.25] {
+        let nl = netlist::parse(SEQ_NL).unwrap();
+        let j = seq_job(period);
+        let mut t = Timer::build(&nl, &lib, &j, None).unwrap();
+        // sanity: this is the simple context, so the fast path is live and the baseline matches.
+        assert_timers_identical(&t, &Timer::build(t.netlist(), &lib, &j, None).unwrap());
+
+        let mut rng: u64 = 0x9e3779b97f4a7c15 ^ period.to_bits();
+        for _ in 0..40 {
+            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let gate = gates[((rng >> 33) as usize) % gates.len()];
+            let cell = cells[((rng >> 29) as usize) % cells.len()];
+            t.resize(gate, cell);
+            t.update().unwrap();
+            let fresh = Timer::build(t.netlist(), &lib, &j, None).unwrap();
+            assert_timers_identical(&t, &fresh);
+        }
+        // the fast path must have actually carried these updates (else the test is vacuous).
+        let (inc, full) = t.update_stats();
+        assert!(inc >= 35, "expected mostly incremental updates, got {inc} inc / {full} full");
+    }
+}
+
+/// Speculation must roll back exactly: checkpoint, apply a tentative resize, update, then
+/// restore — and the restored timer (and a subsequent real update) match a fresh build.
+#[test]
+fn incremental_checkpoint_restore_is_exact_then_resumes() {
+    let lib = Lib::parse(SEQ_LIB).unwrap();
+    let nl = netlist::parse(SEQ_NL).unwrap();
+    let j = seq_job(0.3);
+    let mut t = Timer::build(&nl, &lib, &j, None).unwrap();
+
+    // commit one move so the cached state is non-trivial, then snapshot.
+    t.resize("g2", "INV2");
+    t.update().unwrap();
+    let ckpt = t.checkpoint();
+    let committed = Timer::build(t.netlist(), &lib, &j, None).unwrap();
+
+    // speculate, update, then roll back — must equal the committed state exactly.
+    t.resize("g1", "INV2");
+    t.resize("g3", "INV2");
+    t.update().unwrap();
+    t.restore(ckpt);
+    assert_timers_identical(&t, &committed);
+
+    // the incremental path still works after a restore.
+    t.resize("g3", "INV2");
+    t.update().unwrap();
+    assert_timers_identical(&t, &Timer::build(t.netlist(), &lib, &j, None).unwrap());
+}
+
 /// Phase-2: checkpoint → mutate → update → restore returns to the exact prior state, no recompute.
 #[test]
 fn timer_checkpoint_restore_round_trips() {

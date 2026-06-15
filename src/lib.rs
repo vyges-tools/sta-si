@@ -23,6 +23,7 @@ pub mod job;
 // root so `crate::liberty` / `crate::sdc` / … keep resolving across the engine.
 pub use vyges_loom::{ccs, liberty, netlist, sdc, spef};
 pub mod sta;
+mod inc;
 pub mod si;
 pub mod engine;
 pub mod tcl; // experimental: OpenSTA-TCL-subset adapter (Layer 1)

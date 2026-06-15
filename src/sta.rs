@@ -28,6 +28,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use crate::inc::{HoldRec, InEdge, IncGraph, IncState, IncTopo, Lanes, SetupRec};
 use crate::job::{ExcKind, StaJob};
 use crate::liberty::{Arc, Constraint, Dir, Lib};
 use crate::netlist::Netlist;
@@ -132,7 +133,7 @@ pub type PinId = usize;
 /// indexed by [`PinId`]. (A later phase grows this into a mutable graph for dirty-cone
 /// incremental recompute.)
 #[derive(Clone)]
-struct Timing {
+pub(crate) struct Timing {
     labels: Vec<String>,
     label2idx: HashMap<String, usize>,
     is_endpoint: Vec<bool>,
@@ -144,6 +145,34 @@ struct Timing {
     endpoint_req: Vec<f64>,    // required time (meaningful at setup endpoints)
 }
 
+impl Timing {
+    /// Assemble the query snapshot from the propagated arrays — shared by the full builder
+    /// and the incremental fast path so both produce an identical snapshot.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        labels: &[String],
+        is_endpoint: &[bool],
+        excluded_setup: &[bool],
+        arrival: &[f64],
+        slew: &[f64],
+        arr_min: &[f64],
+        node_load: &[f64],
+        endpoint_req: &[f64],
+    ) -> Timing {
+        Timing {
+            label2idx: labels.iter().enumerate().map(|(i, l)| (l.clone(), i)).collect(),
+            labels: labels.to_vec(),
+            is_endpoint: is_endpoint.to_vec(),
+            excluded_setup: excluded_setup.to_vec(),
+            arrival: arrival.to_vec(),
+            slew: slew.to_vec(),
+            arr_min: arr_min.to_vec(),
+            node_load: node_load.to_vec(),
+            endpoint_req: endpoint_req.to_vec(),
+        }
+    }
+}
+
 /// A netlist edit an optimizer stages on a [`Timer`]. (v0: cell swap — resize / Vt-swap;
 /// buffer insertion and removal land with the topology-aware recompute.)
 pub enum Move {
@@ -153,12 +182,15 @@ pub enum Move {
 }
 
 /// An opaque saved state for speculative apply/undo: `checkpoint()` captures it, `restore()`
-/// rolls back to it (`O(1)` swap of the cached state + working netlist).
+/// rolls back to it (a swap of the cached state + working netlist; the incremental graph
+/// state, when present, rolls back with it so speculation stays cheap).
 pub struct Checkpoint {
     nl: Netlist,
     report: TimingReport,
     timing: Timing,
     dirty: bool,
+    inc_state: Option<IncState>,
+    pending: HashMap<String, (String, String)>,
 }
 
 /// A persistent timing session.
@@ -178,6 +210,13 @@ pub struct Timer {
     job: StaJob,
     spef: Option<Spef>,
     dirty: bool, // a mutation is staged but not yet folded into the cached report
+    // incremental fast path (Some only in the simple timing context — see `inc`).
+    inc: Option<IncGraph>,
+    // cell swaps staged since the last `update`: inst → (original cell, current cell). The
+    // original is the cell as of the last update, so a re-staged instance keeps one delta.
+    pending: HashMap<String, (String, String)>,
+    n_inc: u64,  // updates served by the cone-localized fast path
+    n_full: u64, // updates that fell back to a full re-analysis
 }
 
 impl Timer {
@@ -188,7 +227,7 @@ impl Timer {
         job: &StaJob,
         spef: Option<&Spef>,
     ) -> Result<Timer, StaError> {
-        let (report, timing) = build_report(nl, lib, job, spef)?;
+        let (report, timing, inc) = build_report(nl, lib, job, spef, true)?;
         Ok(Timer {
             report,
             timing,
@@ -197,6 +236,10 @@ impl Timer {
             job: job.clone(),
             spef: spef.cloned(),
             dirty: false,
+            inc,
+            pending: HashMap::new(),
+            n_inc: 0,
+            n_full: 0,
         })
     }
 
@@ -296,7 +339,14 @@ impl Timer {
         match m {
             Move::Resize { inst, cell } => match self.nl.insts.iter_mut().find(|i| i.name == inst) {
                 Some(i) => {
-                    i.cell = cell;
+                    let old = i.cell.clone();
+                    i.cell = cell.clone();
+                    // record the move for the incremental path, preserving the cell as of the
+                    // last update as the "original" so repeated stages of one instance coalesce.
+                    self.pending
+                        .entry(inst)
+                        .and_modify(|e| e.1 = cell.clone())
+                        .or_insert((old, cell));
                     self.dirty = true;
                     true
                 }
@@ -318,17 +368,50 @@ impl Timer {
     /// Recompute the timing after staged mutations and refresh the cached report + query
     /// snapshot.
     ///
-    /// v0 does a **full re-analysis of the mutated netlist** (always correct — and the
-    /// reference the dirty-cone fast path is shadow-checked against). The cone-localized
-    /// recompute that makes this `O(cone)` lands behind this same call; callers don't change.
+    /// Takes the **cone-localized fast path** when an [`IncGraph`] is present and the staged
+    /// moves are localizable (combinational cell swaps in the simple timing context) —
+    /// recomputing only the forward cone, `O(cone)`. Otherwise (SPEF/SI, AOCV/POCV, a
+    /// clock-network or footprint-changing edit, or a launch-flop change) it falls back to a
+    /// full re-analysis, which is always correct and re-captures a fresh graph.
     pub fn update(&mut self) -> Result<&TimingReport, StaError> {
-        if self.dirty {
-            let (report, timing) = build_report(&self.nl, &self.lib, &self.job, self.spef.as_ref())?;
-            self.report = report;
-            self.timing = timing;
-            self.dirty = false;
+        if !self.dirty {
+            return Ok(&self.report);
         }
+        // fast path: try the incremental cone recompute.
+        if self.inc.is_some() {
+            let moves: Vec<(String, String, String)> = self
+                .pending
+                .iter()
+                .map(|(inst, (old, new))| (inst.clone(), old.clone(), new.clone()))
+                .collect();
+            let inc = self.inc.as_mut().unwrap();
+            if let Some((report, timing)) = inc.try_update(&self.nl, &self.lib, &moves) {
+                self.report = report;
+                self.timing = timing;
+                self.dirty = false;
+                self.pending.clear();
+                self.n_inc += 1;
+                return Ok(&self.report);
+            }
+            // not localizable — drop the stale graph; the full rebuild re-captures it.
+            self.inc = None;
+        }
+        // full re-analysis (and re-capture the incremental graph when eligible).
+        let (report, timing, inc) =
+            build_report(&self.nl, &self.lib, &self.job, self.spef.as_ref(), true)?;
+        self.report = report;
+        self.timing = timing;
+        self.inc = inc;
+        self.dirty = false;
+        self.pending.clear();
+        self.n_full += 1;
         Ok(&self.report)
+    }
+
+    /// How many `update()` calls were served by the cone-localized fast path vs a full
+    /// re-analysis: `(incremental, full)`. Lets an optimizer report its incremental hit rate.
+    pub fn update_stats(&self) -> (u64, u64) {
+        (self.n_inc, self.n_full)
     }
 
     /// Capture the current state for speculative apply/undo (the optimizer's keep-best loop:
@@ -339,6 +422,11 @@ impl Timer {
             report: self.report.clone(),
             timing: self.timing.clone(),
             dirty: self.dirty,
+            // snapshot only the mutable incremental state (the immutable topology is shared
+            // and never changes), so a rejected speculative move rolls back in `O(N)` array
+            // copies rather than a graph rebuild.
+            inc_state: self.inc.as_ref().map(|g| g.state.clone()),
+            pending: self.pending.clone(),
         }
     }
 
@@ -349,6 +437,10 @@ impl Timer {
         self.report = c.report;
         self.timing = c.timing;
         self.dirty = c.dirty;
+        self.pending = c.pending;
+        if let (Some(g), Some(state)) = (self.inc.as_mut(), c.inc_state) {
+            g.state = state;
+        }
     }
 }
 
@@ -362,7 +454,7 @@ pub fn analyze(
     job: &StaJob,
     spef: Option<&Spef>,
 ) -> Result<TimingReport, StaError> {
-    Ok(build_report(nl, lib, job, spef)?.0)
+    Ok(build_report(nl, lib, job, spef, false)?.0)
 }
 
 /// Build the timing graph, propagate arrival/required, and return the report.
@@ -374,7 +466,8 @@ fn build_report(
     lib: &Lib,
     job: &StaJob,
     spef: Option<&Spef>,
-) -> Result<(TimingReport, Timing), StaError> {
+    capture: bool,
+) -> Result<(TimingReport, Timing, Option<IncGraph>), StaError> {
     let mut labels: Vec<String> = Vec::new();
     let mut key2idx: HashMap<String, usize> = HashMap::new();
     let mut is_endpoint: Vec<bool> = Vec::new();
@@ -618,6 +711,12 @@ fn build_report(
     });
     let pocv = job.pocv_sigma > 0.0 || has_lvf;
     let aocv = !pocv && (!job.aocv_late.is_empty() || !job.aocv_early.is_empty());
+    // The incremental fast path ([`Timer::update`]) is eligible only in the simple timing
+    // context: ideal interconnect (no SPEF/SI), flat derate (no AOCV/POCV bands), and no
+    // path-based pass. Outside it we don't capture the graph and `update` does a full pass.
+    let simple_ctx = capture && spef.is_none() && !pocv && !aocv && !job.pba;
+    let mut inc_setup: Vec<SetupRec> = Vec::new();
+    let mut inc_hold: Vec<HoldRec> = Vec::new();
     let pocv_sigma = job.pocv_sigma;
     let n_sigma = job.pocv_n;
     // per-cell-stage derate on the nominal delay (1.0 for POCV — it uses sigma)
@@ -645,7 +744,8 @@ fn build_report(
     // each node to its worst lane so every downstream consumer is unchanged.
     let input_slew = job.input_slew;
     // `nd` = per-arc net delay, `ns` = per-arc degraded sink slew (0 = keep driver slew).
-    let relax = |nd: &[f64], ns: &[f64], late: bool| -> (Vec<f64>, Vec<f64>, Vec<Option<usize>>, Vec<usize>) {
+    #[allow(clippy::type_complexity)]
+    let relax = |nd: &[f64], ns: &[f64], late: bool| -> (Vec<f64>, Vec<f64>, Vec<Option<usize>>, Vec<usize>, Vec<[f64; 2]>, Vec<[f64; 2]>, Vec<[Option<usize>; 2]>) {
         let init = if late { f64::NEG_INFINITY } else { f64::INFINITY };
         let mut arr = vec![[init; 2]; n]; // per-lane metric (derated / +-N*sigma)
         let mut arr_nom = vec![[0.0f64; 2]; n];
@@ -798,7 +898,9 @@ fn build_report(
             slew_c[v] = slew[v][l];
             from_c[v] = from[v][l];
         }
-        (arrival, slew_c, from_c, order)
+        // also hand back the per-lane arrays so the incremental fast path can seed a cone
+        // recompute from the committed state (only captured by the final passes when asked).
+        (arrival, slew_c, from_c, order, arr, slew, from)
     };
 
     // Per-arc interconnect delay, iterated to convergence. Each net's switching
@@ -876,7 +978,7 @@ fn build_report(
     let mut arc_s = nom_s.clone();
     let mut cycle_checked = false;
     for _ in 0..MAX_SI_ITERS {
-        let (arr, slw, _f, ord) = relax(&arc_d, &arc_s, true);
+        let (arr, slw, _f, ord, _, _, _) = relax(&arc_d, &arc_s, true);
         if !cycle_checked {
             if ord.len() != n {
                 return Err(StaError::CombinationalLoop);
@@ -897,8 +999,10 @@ fn build_report(
     }
     // final late propagation consistent with the converged per-arc delays, and the
     // early (min-delay) propagation used for hold and for early clock arrivals.
-    let (arrival, slew, from, _order) = relax(&arc_d, &arc_s, true);
-    let (arr_min, slew_min, from_min, _ord_min) = relax(&nom_d, &nom_s, false);
+    let (arrival, slew, from, order_late, late_arr, late_slew, late_from) =
+        relax(&arc_d, &arc_s, true);
+    let (arr_min, slew_min, from_min, _ord_min, early_arr, early_slew, early_from) =
+        relax(&nom_d, &nom_s, false);
 
     // ---- clock paths + CRPR ---------------------------------------------
     // Proper OCV uses opposite clock corners on launch vs capture (setup: late
@@ -1048,7 +1152,13 @@ fn build_report(
                 ExcKind::Multicycle(cyc) => setup_rel += cyc.saturating_sub(1) as f64 * pc,
             }
         }
-        endpoint_req[*idx] = cap_early + setup_rel - setup_v + crpr - job.setup_uncertainty;
+        let base = cap_early + setup_rel + crpr - job.setup_uncertainty;
+        endpoint_req[*idx] = base - setup_v;
+        // capture the clock-side constants so the fast path can re-derive required time
+        // from the (possibly changed) data slew without re-walking the clock network.
+        if simple_ctx && !excluded_setup[*idx] {
+            inc_setup.push(SetupRec { idx: *idx, base, cons: setup.clone(), ck_slew, launch_ck: lck });
+        }
     }
 
     // ---- setup slack + worst path ---------------------------------------
@@ -1225,8 +1335,12 @@ fn build_report(
         };
         let ck_slew = cap.map(|i| slew_min[i]).unwrap_or(input_slew);
         let hold_v = eval_cons(hold, ck_slew, slew_min[idx]);
+        let base = crpr - cap_late - hold_rel - job.hold_uncertainty;
         // earliest data must arrive after the (late) capture edge + hold relation
-        let slack = arr_min[idx] - (cap_late + hold_rel + hold_v + job.hold_uncertainty) + crpr;
+        let slack = arr_min[idx] + base - hold_v;
+        if simple_ctx {
+            inc_hold.push(HoldRec { idx, base, cons: hold.clone(), ck_slew, launch_ck: lck });
+        }
         if slack < 0.0 {
             ths += slack;
         }
@@ -1272,16 +1386,74 @@ fn build_report(
     };
     // Retain a per-pin snapshot for the Timer's query API (Phase 1). Cloned, not moved:
     // closures above still hold immutable borrows of these arrays through the return.
-    let timing = Timing {
-        label2idx: labels.iter().enumerate().map(|(i, l)| (l.clone(), i)).collect(),
-        labels: labels.clone(),
-        is_endpoint: is_endpoint.clone(),
-        excluded_setup: excluded_setup.clone(),
-        arrival: arrival.clone(),
-        slew: slew.clone(),
-        arr_min: arr_min.clone(),
-        node_load: node_load.clone(),
-        endpoint_req: endpoint_req.clone(),
+    let timing = Timing::new(
+        &labels,
+        &is_endpoint,
+        &excluded_setup,
+        &arrival,
+        &slew,
+        &arr_min,
+        &node_load,
+        &endpoint_req,
+    );
+
+    // Capture the persistent incremental graph (simple context only). Built once here; the
+    // optimizer's `update()` then recomputes only the cone of a cell swap against it.
+    let inc = if simple_ctx {
+        let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
+        let mut in_edges: Vec<Vec<InEdge>> = (0..n).map(|_| Vec::new()).collect();
+        for (u, edges) in out_edges.iter().enumerate() {
+            for e in edges {
+                succ[u].push(e.to);
+                in_edges[e.to].push(match &e.kind {
+                    EdgeKind::Net(_) => InEdge::Net { from: u },
+                    EdgeKind::Cell(arc) => InEdge::Cell { from: u, arc: arc.clone() },
+                });
+            }
+        }
+        let mut topo_pos = vec![0usize; n];
+        for (pos, &node) in order_late.iter().enumerate() {
+            topo_pos[node] = pos;
+        }
+        let mut net_driver: HashMap<String, usize> = HashMap::new();
+        for (name, net) in &nets {
+            if let Some(d) = net.driver {
+                net_driver.insert(name.clone(), d);
+            }
+        }
+        let topo = IncTopo {
+            n,
+            label2idx: labels.iter().enumerate().map(|(i, l)| (l.clone(), i)).collect(),
+            labels: labels.clone(),
+            succ,
+            in_edges,
+            topo_pos,
+            is_ck: is_ck.clone(),
+            is_endpoint: is_endpoint.clone(),
+            excluded_setup: excluded_setup.clone(),
+            net_driver,
+            setup_recs: inc_setup,
+            hold_recs: inc_hold,
+            late_derate,
+            early_derate,
+            input_slew,
+        };
+        let state = IncState {
+            node_load: node_load.clone(),
+            late: Lanes { arr: late_arr, slew: late_slew, from: late_from },
+            early: Lanes { arr: early_arr, slew: early_slew, from: early_from },
+            arrival: arrival.clone(),
+            slew: slew.clone(),
+            from: from.clone(),
+            arr_min: arr_min.clone(),
+            slew_min: slew_min.clone(),
+            from_min: from_min.clone(),
+            endpoint_req: endpoint_req.clone(),
+            overrides: HashMap::new(),
+        };
+        Some(IncGraph { topo, state })
+    } else {
+        None
     };
-    Ok((report, timing))
+    Ok((report, timing, inc))
 }
