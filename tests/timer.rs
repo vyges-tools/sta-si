@@ -1,0 +1,109 @@
+//! Phase-0 gate for the persistent `Timer`: building a `Timer` and reading its report must
+//! be bit-identical to the one-shot `analyze` (they share the same code path now). This
+//! locks the refactor as behavior-preserving before later phases add incremental update.
+#![allow(clippy::float_cmp)] // exact equality is the point — same computation, same bits
+
+use vyges_sta_si::job::StaJob;
+use vyges_sta_si::liberty::Lib;
+use vyges_sta_si::netlist;
+use vyges_sta_si::sta::{analyze, Timer};
+
+const LIB: &str = r#"
+library (d) {
+  cell (INV) {
+    pin (A) { direction : input; capacitance : 0.0015; }
+    pin (Y) {
+      direction : output;
+      timing () {
+        related_pin : "A";
+        cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.08, 0.20", "0.12, 0.28" ); }
+        cell_fall (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.07, 0.18", "0.11, 0.26" ); }
+        rise_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.09", "0.04, 0.11" ); }
+        fall_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.08", "0.04, 0.10" ); }
+      }
+    }
+  }
+}
+"#;
+
+const NL: &str = "module top ( a, y ); input a; output y; wire n1;\n\
+                  INV u1 ( .A(a), .Y(n1) ); INV u2 ( .A(n1), .Y(y) ); endmodule";
+
+fn job(period: f64) -> StaJob {
+    StaJob {
+        design: "top".into(),
+        netlist: "x".into(),
+        libs: vec!["x".into()],
+        spef: None,
+        clock_port: "clk".into(),
+        period_ns: period,
+        clocks: vec![],
+        input_slew: 0.02,
+        output_load: 0.005,
+        late_derate: 1.0,
+        early_derate: 1.0,
+        pocv_sigma: 0.0,
+        pocv_n: 3.0,
+        aocv_late: vec![],
+        aocv_early: vec![],
+        miller: 2.0,
+        xtalk_window: 0.2,
+        scenarios: vec![],
+        exceptions: vec![],
+        crpr: true,
+        pba: false,
+        input_delay: 0.0,
+        output_delay: 0.0,
+        io_input_delays: vec![],
+        io_output_delays: vec![],
+        setup_uncertainty: 0.0,
+        hold_uncertainty: 0.0,
+        sdc: None,
+        base_dir: String::new(),
+    }
+}
+
+/// `Timer::build(..).report()` == `analyze(..)`, field for field, on a met design.
+#[test]
+fn timer_report_is_identical_to_analyze() {
+    let nl = netlist::parse(NL).unwrap();
+    let lib = Lib::parse(LIB).unwrap();
+    let j = job(1.0);
+
+    let direct = analyze(&nl, &lib, &j, None).unwrap();
+    let timer = Timer::build(&nl, &lib, &j, None).unwrap();
+    let r = timer.report();
+
+    // aggregates via the accessors and via report()
+    assert_eq!(timer.wns(), direct.wns);
+    assert_eq!(timer.tns(), direct.tns);
+    assert_eq!(timer.whs(), direct.whs);
+    assert_eq!(timer.ths(), direct.ths);
+    assert_eq!(r.wns, direct.wns);
+    assert_eq!(r.tns, direct.tns);
+    assert_eq!(r.endpoints, direct.endpoints);
+    assert_eq!(r.worst_endpoint, direct.worst_endpoint);
+
+    // the worst path, node for node (label + arrival + slew bit-identical)
+    assert_eq!(r.worst_path.len(), direct.worst_path.len());
+    for (a, b) in r.worst_path.iter().zip(&direct.worst_path) {
+        assert_eq!(a.label, b.label);
+        assert_eq!(a.arrival, b.arrival);
+        assert_eq!(a.slew, b.slew);
+    }
+}
+
+/// Same equivalence on a violating (tight-period) design — wns/tns negative, still identical.
+#[test]
+fn timer_matches_analyze_on_violation() {
+    let nl = netlist::parse(NL).unwrap();
+    let lib = Lib::parse(LIB).unwrap();
+    let j = job(0.1);
+
+    let direct = analyze(&nl, &lib, &j, None).unwrap();
+    let timer = Timer::build(&nl, &lib, &j, None).unwrap();
+
+    assert!(timer.wns() < 0.0, "expected a violation");
+    assert_eq!(timer.wns(), direct.wns);
+    assert_eq!(timer.tns(), direct.tns);
+}

@@ -124,8 +124,70 @@ struct Net {
     load: f64,
 }
 
+/// A persistent timing session.
+///
+/// **Phase 0 scaffold** (see the incremental-timing design): today it builds the timing
+/// graph once and caches the completed [`TimingReport`], exposing the sign-off aggregates.
+/// Later phases grow it into a queryable, incrementally-updatable graph — per-pin
+/// arrival/required/slack, a dirty-cone `update()` after a netlist edit, and a parallel
+/// speculative `evaluate()` for optimizer candidate scoring — without changing this entry
+/// point. `analyze` delegates here, so the one-shot report stays byte-identical.
+pub struct Timer {
+    report: TimingReport,
+}
+
+impl Timer {
+    /// Build the timing state and run the analysis once. `O(N)`.
+    pub fn build(
+        nl: &Netlist,
+        lib: &Lib,
+        job: &StaJob,
+        spef: Option<&Spef>,
+    ) -> Result<Timer, StaError> {
+        Ok(Timer { report: build_report(nl, lib, job, spef)? })
+    }
+
+    /// The cached sign-off report (WNS/TNS/WHS/THS + worst paths).
+    pub fn report(&self) -> &TimingReport {
+        &self.report
+    }
+
+    /// Setup worst negative slack (ns); `> 0` means met.
+    pub fn wns(&self) -> f64 {
+        self.report.wns
+    }
+    /// Setup total negative slack over endpoints (ns).
+    pub fn tns(&self) -> f64 {
+        self.report.tns
+    }
+    /// Hold worst slack (ns); `> 0` means met.
+    pub fn whs(&self) -> f64 {
+        self.report.whs
+    }
+    /// Hold total negative slack (ns).
+    pub fn ths(&self) -> f64 {
+        self.report.ths
+    }
+}
+
 /// Run combinational max-delay STA and return the slack report.
+///
+/// Thin wrapper over [`Timer::build`] — kept for one-shot callers; the report is identical
+/// to building a [`Timer`] and reading [`Timer::report`].
 pub fn analyze(
+    nl: &Netlist,
+    lib: &Lib,
+    job: &StaJob,
+    spef: Option<&Spef>,
+) -> Result<TimingReport, StaError> {
+    Ok(Timer::build(nl, lib, job, spef)?.report)
+}
+
+/// Build the timing graph, propagate arrival/required, and return the report.
+///
+/// (Phase 1+ splits this into persistent graph construction + propagation that the
+/// [`Timer`] retains for per-pin queries and incremental dirty-cone updates.)
+fn build_report(
     nl: &Netlist,
     lib: &Lib,
     job: &StaJob,

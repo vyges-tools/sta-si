@@ -452,7 +452,7 @@ fn path_delay(toks: &[String]) -> (bool, bool) {
         match toks.get(i + 1).map(|s| s.as_str()) {
             Some("min") => return (true, false),
             Some("min_max") => return (true, true),
-            Some("max") | _ => return (false, true),
+            _ => return (false, true), // "max" (the default) or anything else
         }
     }
     (false, true) // OpenSTA default
