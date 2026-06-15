@@ -23,6 +23,19 @@ library (d) {
       }
     }
   }
+  cell (INV2) {
+    pin (A) { direction : input; capacitance : 0.0010; }
+    pin (Y) {
+      direction : output;
+      timing () {
+        related_pin : "A";
+        cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.04, 0.10", "0.06, 0.14" ); }
+        cell_fall (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.035, 0.09", "0.055, 0.13" ); }
+        rise_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.015, 0.045", "0.02, 0.055" ); }
+        fall_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.015, 0.04", "0.02, 0.05" ); }
+      }
+    }
+  }
 }
 "#;
 
@@ -143,4 +156,60 @@ fn timer_query_api() {
     assert!(t.arrival(a).is_finite());
     assert_eq!(t.required(a), None);
     assert_eq!(t.slack(a), None);
+}
+
+use vyges_sta_si::sta::Move;
+
+/// Phase-2: a resize is staged, `update()` recomputes, timing changes, and the result equals
+/// a fresh build of the mutated netlist (the shadow-check). Unknown instances are no-ops.
+#[test]
+fn timer_resize_updates_and_matches_rebuild() {
+    let nl = netlist::parse(NL).unwrap();
+    let lib = Lib::parse(LIB).unwrap();
+    let j = job(1.0);
+    let mut t = Timer::build(&nl, &lib, &j, None).unwrap();
+    let before = t.wns();
+
+    // swap u1 from INV to the faster INV2 (also via the explicit Move form once)
+    assert!(t.stage(Move::Resize { inst: "u1".into(), cell: "INV2".into() }));
+    assert!(t.is_dirty());
+    t.update().unwrap();
+    assert!(!t.is_dirty());
+    let after = t.wns();
+    assert!(after > before, "faster cell should improve slack: {before} -> {after}");
+    assert_eq!(
+        t.netlist().insts.iter().find(|i| i.name == "u1").unwrap().cell,
+        "INV2"
+    );
+
+    // shadow-check: update() == a fresh build of the mutated netlist (it IS a rebuild).
+    let fresh = Timer::build(t.netlist(), &lib, &j, None).unwrap();
+    assert_eq!(t.wns(), fresh.wns());
+    assert_eq!(t.tns(), fresh.tns());
+    let y = t.pin("y").unwrap();
+    assert_eq!(t.arrival(y), fresh.arrival(fresh.pin("y").unwrap()));
+
+    // unknown instance -> no-op, stays clean.
+    assert!(!t.resize("does_not_exist", "INV2"));
+    assert!(!t.is_dirty());
+}
+
+/// Phase-2: checkpoint → mutate → update → restore returns to the exact prior state, no recompute.
+#[test]
+fn timer_checkpoint_restore_round_trips() {
+    let nl = netlist::parse(NL).unwrap();
+    let lib = Lib::parse(LIB).unwrap();
+    let j = job(1.0);
+    let mut t = Timer::build(&nl, &lib, &j, None).unwrap();
+    let base = t.wns();
+    let ckpt = t.checkpoint();
+
+    t.resize("u1", "INV2");
+    t.update().unwrap();
+    assert!(t.wns() != base, "mutation should change wns");
+
+    t.restore(ckpt);
+    assert_eq!(t.wns(), base); // back to baseline (cached, no recompute)
+    assert_eq!(t.netlist().insts.iter().find(|i| i.name == "u1").unwrap().cell, "INV");
+    assert!(!t.is_dirty());
 }

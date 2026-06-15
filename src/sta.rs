@@ -128,9 +128,10 @@ struct Net {
 /// by the query API (e.g. [`Timer::endpoint_slacks`]) and accepted by the per-pin queries.
 pub type PinId = usize;
 
-/// Per-pin snapshot the [`Timer`] retains for its query API (Phase 1). Captured at the end
-/// of a build and read-only; indexed by [`PinId`]. (Phase 2 grows this into a mutable graph
-/// for dirty-cone incremental update.)
+/// Per-pin snapshot the [`Timer`] retains for its query API. Captured at the end of a build;
+/// indexed by [`PinId`]. (A later phase grows this into a mutable graph for dirty-cone
+/// incremental recompute.)
+#[derive(Clone)]
 struct Timing {
     labels: Vec<String>,
     label2idx: HashMap<String, usize>,
@@ -143,21 +144,44 @@ struct Timing {
     endpoint_req: Vec<f64>,    // required time (meaningful at setup endpoints)
 }
 
+/// A netlist edit an optimizer stages on a [`Timer`]. (v0: cell swap — resize / Vt-swap;
+/// buffer insertion and removal land with the topology-aware recompute.)
+pub enum Move {
+    /// Replace an instance's library cell with another (same logic function): the resize /
+    /// Vt-swap move. `inst` is the instance name; `cell` the new library cell name.
+    Resize { inst: String, cell: String },
+}
+
+/// An opaque saved state for speculative apply/undo: `checkpoint()` captures it, `restore()`
+/// rolls back to it (`O(1)` swap of the cached state + working netlist).
+pub struct Checkpoint {
+    nl: Netlist,
+    report: TimingReport,
+    timing: Timing,
+    dirty: bool,
+}
+
 /// A persistent timing session.
 ///
-/// Built once from a netlist + Liberty (+ SPEF), it caches the [`TimingReport`] and a
-/// per-pin snapshot, exposing both the sign-off aggregates and a **query API** (per-pin
-/// arrival/slew/load, endpoint required/slack, the endpoint-slack ranking, the critical
-/// path). `analyze` delegates here, so the one-shot report stays byte-identical. Later
-/// phases add mutation + dirty-cone incremental `update()` and parallel speculative
-/// `evaluate()` for optimizer candidate scoring — without changing this entry point.
+/// Built once from a netlist + Liberty (+ SPEF), it caches the [`TimingReport`] + a per-pin
+/// snapshot (the **query API**: per-pin arrival/slew/load, endpoint required/slack, the
+/// endpoint-slack ranking, the critical path) and **retains the inputs** so an optimizer can
+/// stage netlist mutations ([`Timer::stage`] / [`Timer::resize`]), recompute ([`Timer::update`]),
+/// and speculate ([`Timer::checkpoint`] / [`Timer::restore`]). `analyze` does not use the
+/// `Timer` (it calls the builder directly), so the one-shot report stays byte-identical.
 pub struct Timer {
     report: TimingReport,
     timing: Timing,
+    // retained inputs — the working design the optimizer mutates and the Timer recomputes from.
+    nl: Netlist,
+    lib: Lib,
+    job: StaJob,
+    spef: Option<Spef>,
+    dirty: bool, // a mutation is staged but not yet folded into the cached report
 }
 
 impl Timer {
-    /// Build the timing state and run the analysis once. `O(N)`.
+    /// Build the timing state, run the analysis once, and retain the inputs for mutation. `O(N)`.
     pub fn build(
         nl: &Netlist,
         lib: &Lib,
@@ -165,7 +189,15 @@ impl Timer {
         spef: Option<&Spef>,
     ) -> Result<Timer, StaError> {
         let (report, timing) = build_report(nl, lib, job, spef)?;
-        Ok(Timer { report, timing })
+        Ok(Timer {
+            report,
+            timing,
+            nl: nl.clone(),
+            lib: lib.clone(),
+            job: job.clone(),
+            spef: spef.cloned(),
+            dirty: false,
+        })
     }
 
     /// The cached sign-off report (WNS/TNS/WHS/THS + worst paths).
@@ -249,6 +281,75 @@ impl Timer {
     pub fn worst_path(&self) -> &[PathNode] {
         &self.report.worst_path
     }
+
+    // ---- mutation + update (Phase 2) ----
+
+    /// The current (possibly mutated) working netlist — materialize the resized design.
+    pub fn netlist(&self) -> &Netlist {
+        &self.nl
+    }
+
+    /// Stage a netlist mutation. Returns `false` if it doesn't apply (e.g. unknown instance).
+    /// Nothing is recomputed until [`update`](Self::update); the cached report/queries reflect
+    /// the *last updated* state until then.
+    pub fn stage(&mut self, m: Move) -> bool {
+        match m {
+            Move::Resize { inst, cell } => match self.nl.insts.iter_mut().find(|i| i.name == inst) {
+                Some(i) => {
+                    i.cell = cell;
+                    self.dirty = true;
+                    true
+                }
+                None => false,
+            },
+        }
+    }
+
+    /// Convenience for the common move: swap `inst`'s library cell (resize / Vt-swap).
+    pub fn resize(&mut self, inst: &str, cell: &str) -> bool {
+        self.stage(Move::Resize { inst: inst.to_string(), cell: cell.to_string() })
+    }
+
+    /// Whether a staged mutation is pending an [`update`](Self::update).
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Recompute the timing after staged mutations and refresh the cached report + query
+    /// snapshot.
+    ///
+    /// v0 does a **full re-analysis of the mutated netlist** (always correct — and the
+    /// reference the dirty-cone fast path is shadow-checked against). The cone-localized
+    /// recompute that makes this `O(cone)` lands behind this same call; callers don't change.
+    pub fn update(&mut self) -> Result<&TimingReport, StaError> {
+        if self.dirty {
+            let (report, timing) = build_report(&self.nl, &self.lib, &self.job, self.spef.as_ref())?;
+            self.report = report;
+            self.timing = timing;
+            self.dirty = false;
+        }
+        Ok(&self.report)
+    }
+
+    /// Capture the current state for speculative apply/undo (the optimizer's keep-best loop:
+    /// checkpoint → stage candidate → update → read → [`restore`](Self::restore) if rejected).
+    pub fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            nl: self.nl.clone(),
+            report: self.report.clone(),
+            timing: self.timing.clone(),
+            dirty: self.dirty,
+        }
+    }
+
+    /// Roll back to a [`Checkpoint`] — restores the working netlist and cached timing with no
+    /// recompute.
+    pub fn restore(&mut self, c: Checkpoint) {
+        self.nl = c.nl;
+        self.report = c.report;
+        self.timing = c.timing;
+        self.dirty = c.dirty;
+    }
 }
 
 /// Run combinational max-delay STA and return the slack report.
@@ -261,7 +362,7 @@ pub fn analyze(
     job: &StaJob,
     spef: Option<&Spef>,
 ) -> Result<TimingReport, StaError> {
-    Ok(Timer::build(nl, lib, job, spef)?.report)
+    Ok(build_report(nl, lib, job, spef)?.0)
 }
 
 /// Build the timing graph, propagate arrival/required, and return the report.
