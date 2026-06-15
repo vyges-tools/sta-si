@@ -1,0 +1,7 @@
+design:      top
+netlist:     top.v
+lib:         cells.lib
+spef:        top.spef     # parasitics -> wire load + Elmore net delay
+sdc:         top.sdc      # clock + I/O delays + uncertainty + derate, read from SDC
+input_slew:  0.02         # ns (SDC may override via set_input_transition)
+output_load: 0.005        # pF at the primary output

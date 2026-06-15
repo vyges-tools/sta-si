@@ -1,0 +1,11 @@
+# Same design as seq.sta with AOCV (advanced OCV): a depth-dependent derate
+# table instead of one flat number. Shallow paths derate hard (1.10 at depth 1),
+# deep paths relax toward 1.0 (1.02 by depth 8) as variation averages out.
+design:      seq
+netlist:     seq.v
+lib:         seq.lib
+clock:       clk 1.0
+aocv_late:   1:1.10, 4:1.05, 8:1.02
+aocv_early:  1:0.90, 4:0.95, 8:0.98
+input_slew:  0.02
+output_load: 0.005

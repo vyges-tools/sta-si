@@ -1,0 +1,13 @@
+Vyges Static Timing + Signal Integrity Engine (vyges-sta-si)
+Copyright 2026 Vyges. All Rights Reserved.
+
+This product is authored by Vyges (https://vyges.com) and licensed under the
+Apache License, Version 2.0 (the "License"). You may obtain a copy of the
+License in the accompanying LICENSE file or at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+vyges-sta-si performs static timing analysis with signal integrity (WNS/TNS), with a CI gate.
+
+Per-foundry calibration data and plugins, where applicable, are distributed
+separately under their own terms and are not part of this repository.

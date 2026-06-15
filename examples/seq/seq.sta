@@ -1,0 +1,6 @@
+design:      seq
+netlist:     seq.v
+lib:         seq.lib
+clock:       clk 1.0      # port + period (ns)
+input_slew:  0.02
+output_load: 0.005

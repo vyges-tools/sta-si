@@ -1,0 +1,11 @@
+# Same reg-to-reg design as seq.sta, with POCV statistical OCV instead of a flat
+# derate: each cell stage adds 8% 1-sigma, reported at a 3-sigma band. The band
+# lengthens the setup path and shortens the hold path (grows as sqrt(depth)).
+design:      seq
+netlist:     seq.v
+lib:         seq.lib
+clock:       clk 1.0
+pocv_sigma:  0.08      # per-stage 1-sigma as a fraction of nominal delay
+pocv_n:      3.0       # sigmas for the bound
+input_slew:  0.02
+output_load: 0.005
