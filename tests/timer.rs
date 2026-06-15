@@ -107,3 +107,40 @@ fn timer_matches_analyze_on_violation() {
     assert_eq!(timer.wns(), direct.wns);
     assert_eq!(timer.tns(), direct.tns);
 }
+
+/// Phase-1 query API: labels resolve, per-pin arrival matches the path, endpoint slacks
+/// are consistent with the report, and non-endpoints have no slack/required.
+#[test]
+fn timer_query_api() {
+    let nl = netlist::parse(NL).unwrap();
+    let lib = Lib::parse(LIB).unwrap();
+    let j = job(1.0);
+    let t = Timer::build(&nl, &lib, &j, None).unwrap();
+    let r = t.report();
+
+    assert!(t.num_pins() > 0);
+
+    // output `y` is the lone setup endpoint; label round-trips to its handle.
+    let y = t.pin("y").expect("output y is a pin");
+    assert_eq!(t.pin_label(y), "y");
+    assert!(t.is_endpoint(y));
+
+    // per-pin arrival at y equals the worst path's final node (same committed array).
+    assert_eq!(t.arrival(y), r.worst_path.last().unwrap().arrival);
+
+    // single endpoint -> its slack is the WNS; slack == required − arrival (definitional).
+    let eps = t.endpoint_slacks();
+    assert_eq!(eps.len(), 1);
+    assert_eq!(eps[0].0, y);
+    assert_eq!(eps[0].1, r.wns);
+    assert_eq!(t.slack(y), Some(r.wns));
+    assert!(t.required(y).is_some());
+    assert_eq!(t.slack(y), t.required(y).map(|req| req - t.arrival(y)));
+
+    // a primary input is reached but is not an endpoint -> no required/slack.
+    let a = t.pin("a").expect("input a");
+    assert!(!t.is_endpoint(a));
+    assert!(t.arrival(a).is_finite());
+    assert_eq!(t.required(a), None);
+    assert_eq!(t.slack(a), None);
+}

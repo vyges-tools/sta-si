@@ -124,16 +124,36 @@ struct Net {
     load: f64,
 }
 
+/// Opaque handle to a timing-graph pin/node — an index into the committed graph. Returned
+/// by the query API (e.g. [`Timer::endpoint_slacks`]) and accepted by the per-pin queries.
+pub type PinId = usize;
+
+/// Per-pin snapshot the [`Timer`] retains for its query API (Phase 1). Captured at the end
+/// of a build and read-only; indexed by [`PinId`]. (Phase 2 grows this into a mutable graph
+/// for dirty-cone incremental update.)
+struct Timing {
+    labels: Vec<String>,
+    label2idx: HashMap<String, usize>,
+    is_endpoint: Vec<bool>,
+    excluded_setup: Vec<bool>, // false-path endpoints (no setup check)
+    arrival: Vec<f64>,         // latest (setup) arrival, ns
+    slew: Vec<f64>,            // setup-corner output slew, ns
+    arr_min: Vec<f64>,         // earliest (hold) arrival, ns
+    node_load: Vec<f64>,       // driver-node capacitive load, pF
+    endpoint_req: Vec<f64>,    // required time (meaningful at setup endpoints)
+}
+
 /// A persistent timing session.
 ///
-/// **Phase 0 scaffold** (see the incremental-timing design): today it builds the timing
-/// graph once and caches the completed [`TimingReport`], exposing the sign-off aggregates.
-/// Later phases grow it into a queryable, incrementally-updatable graph — per-pin
-/// arrival/required/slack, a dirty-cone `update()` after a netlist edit, and a parallel
-/// speculative `evaluate()` for optimizer candidate scoring — without changing this entry
-/// point. `analyze` delegates here, so the one-shot report stays byte-identical.
+/// Built once from a netlist + Liberty (+ SPEF), it caches the [`TimingReport`] and a
+/// per-pin snapshot, exposing both the sign-off aggregates and a **query API** (per-pin
+/// arrival/slew/load, endpoint required/slack, the endpoint-slack ranking, the critical
+/// path). `analyze` delegates here, so the one-shot report stays byte-identical. Later
+/// phases add mutation + dirty-cone incremental `update()` and parallel speculative
+/// `evaluate()` for optimizer candidate scoring — without changing this entry point.
 pub struct Timer {
     report: TimingReport,
+    timing: Timing,
 }
 
 impl Timer {
@@ -144,7 +164,8 @@ impl Timer {
         job: &StaJob,
         spef: Option<&Spef>,
     ) -> Result<Timer, StaError> {
-        Ok(Timer { report: build_report(nl, lib, job, spef)? })
+        let (report, timing) = build_report(nl, lib, job, spef)?;
+        Ok(Timer { report, timing })
     }
 
     /// The cached sign-off report (WNS/TNS/WHS/THS + worst paths).
@@ -167,6 +188,66 @@ impl Timer {
     /// Hold total negative slack (ns).
     pub fn ths(&self) -> f64 {
         self.report.ths
+    }
+
+    // ---- Phase 1 query API (reads of the committed snapshot) ----
+
+    /// Number of pins (timing-graph nodes).
+    pub fn num_pins(&self) -> usize {
+        self.timing.labels.len()
+    }
+    /// Resolve a human label (`"port"` or `"inst/pin"`) to its handle.
+    pub fn pin(&self, label: &str) -> Option<PinId> {
+        self.timing.label2idx.get(label).copied()
+    }
+    /// The label of a pin.
+    pub fn pin_label(&self, p: PinId) -> &str {
+        self.timing.labels.get(p).map(String::as_str).unwrap_or("")
+    }
+    /// Whether `p` is a setup capture endpoint (a primary output or a flop data pin).
+    pub fn is_endpoint(&self, p: PinId) -> bool {
+        self.timing.is_endpoint.get(p).copied().unwrap_or(false)
+    }
+    /// Latest (setup / late) arrival time at `p`, ns.
+    pub fn arrival(&self, p: PinId) -> f64 {
+        self.timing.arrival.get(p).copied().unwrap_or(f64::NEG_INFINITY)
+    }
+    /// Earliest (hold / early) arrival time at `p`, ns.
+    pub fn arrival_min(&self, p: PinId) -> f64 {
+        self.timing.arr_min.get(p).copied().unwrap_or(f64::INFINITY)
+    }
+    /// Setup-corner output slew at `p`, ns.
+    pub fn slew(&self, p: PinId) -> f64 {
+        self.timing.slew.get(p).copied().unwrap_or(0.0)
+    }
+    /// Capacitive load on `p` when it drives a net, pF (0 if `p` is not a net driver).
+    pub fn load(&self, p: PinId) -> f64 {
+        self.timing.node_load.get(p).copied().unwrap_or(0.0)
+    }
+    /// Required time at `p` — `Some` only at a reached, non-false-path setup endpoint.
+    pub fn required(&self, p: PinId) -> Option<f64> {
+        let excluded = self.timing.excluded_setup.get(p).copied().unwrap_or(false);
+        (self.is_endpoint(p) && self.arrival(p).is_finite() && !excluded)
+            .then(|| self.timing.endpoint_req[p])
+    }
+    /// Setup slack at `p` (`required − arrival`) — `Some` only at a setup endpoint.
+    pub fn slack(&self, p: PinId) -> Option<f64> {
+        self.required(p).map(|r| r - self.arrival(p))
+    }
+    /// Every setup endpoint and its slack, worst (most negative) first — the list an
+    /// optimizer ranks candidate moves from. Consistent with `wns`/`tns`.
+    pub fn endpoint_slacks(&self) -> Vec<(PinId, f64)> {
+        let t = &self.timing;
+        let mut v: Vec<(PinId, f64)> = (0..t.labels.len())
+            .filter(|&p| t.is_endpoint[p] && t.arrival[p].is_finite() && !t.excluded_setup[p])
+            .map(|p| (p, t.endpoint_req[p] - t.arrival[p]))
+            .collect();
+        v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        v
+    }
+    /// The worst (critical) setup path.
+    pub fn worst_path(&self) -> &[PathNode] {
+        &self.report.worst_path
     }
 }
 
@@ -192,7 +273,7 @@ fn build_report(
     lib: &Lib,
     job: &StaJob,
     spef: Option<&Spef>,
-) -> Result<TimingReport, StaError> {
+) -> Result<(TimingReport, Timing), StaError> {
     let mut labels: Vec<String> = Vec::new();
     let mut key2idx: HashMap<String, usize> = HashMap::new();
     let mut is_endpoint: Vec<bool> = Vec::new();
@@ -1075,7 +1156,7 @@ fn build_report(
         None => String::new(),
     };
 
-    Ok(TimingReport {
+    let report = TimingReport {
         wns: if endpoints == 0 { f64::INFINITY } else { wns },
         tns,
         endpoints,
@@ -1087,5 +1168,19 @@ fn build_report(
         worst_hold_endpoint,
         worst_hold_path,
         pba_wns,
-    })
+    };
+    // Retain a per-pin snapshot for the Timer's query API (Phase 1). Cloned, not moved:
+    // closures above still hold immutable borrows of these arrays through the return.
+    let timing = Timing {
+        label2idx: labels.iter().enumerate().map(|(i, l)| (l.clone(), i)).collect(),
+        labels: labels.clone(),
+        is_endpoint: is_endpoint.clone(),
+        excluded_setup: excluded_setup.clone(),
+        arrival: arrival.clone(),
+        slew: slew.clone(),
+        arr_min: arr_min.clone(),
+        node_load: node_load.clone(),
+        endpoint_req: endpoint_req.clone(),
+    };
+    Ok((report, timing))
 }
