@@ -14,6 +14,7 @@ fn main() {
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/logs/HEAD");
     println!("cargo:rerun-if-env-changed=VYGES_GIT_SHA");
+    println!("cargo:rerun-if-env-changed=GITHUB_SHA");
     println!("cargo:rustc-env=VYGES_GIT_SHA={}", build_sha());
 }
 
@@ -22,6 +23,15 @@ fn build_sha() -> String {
         let s = s.trim();
         if !s.is_empty() {
             return s.to_string();
+        }
+    }
+    // GitHub Actions: use the clean built commit. Release CI leaves untracked/
+    // regenerated files in the tree, so the git status check below would falsely
+    // stamp -dirty on release binaries. GITHUB_SHA is the authoritative commit.
+    if let Ok(s) = std::env::var("GITHUB_SHA") {
+        let s = s.trim();
+        if s.len() >= 7 {
+            return s[..7].to_string();
         }
     }
     match git(&["rev-parse", "--short", "HEAD"]) {
