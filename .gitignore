@@ -1,3 +1,4 @@
 /target
 *.rpt
 dist/
+.cargo/config.toml
