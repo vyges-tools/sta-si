@@ -30,6 +30,11 @@ jobs:
           - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
     steps:
       - uses: actions/checkout@v4
+      - name: Tag matches crate version
+        run: |
+          want="${{ inputs.tag || github.ref_name }}"; want="${want#v}"
+          have="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          [ "$want" = "$have" ] || { echo "::error::tag v$want != Cargo.toml version $have — bump [package] version"; exit 1; }
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
