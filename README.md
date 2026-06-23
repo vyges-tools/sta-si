@@ -284,6 +284,19 @@ uncertainty, and derate read from [`top.sdc`](examples/top/top.sdc) instead.
 See [`examples/icsprout55/`](examples/icsprout55/) for a 55nm reg-to-reg path with
 flat / POCV / multi-corner (`mcmm.sta`) runs.
 
+## Domain coverage
+
+`vyges-sta-si` operates on the **standard-cell digital abstraction** — it builds a timing
+graph over **Liberty cell arcs** on a clocked gate-level netlist (NLDM/CCS delay tables,
+setup/hold constraints, OCV derates). That makes it a **digital timing sign-off** engine: it
+applies wherever a design reduces to characterized standard cells and a clock. It does **not**
+apply to analog / mixed-signal blocks — their timing and behavior have no standard-cell or
+Liberty-arc analogue, so there is nothing for the timing graph to traverse. For analog /
+mixed-signal physical and integrity coverage, reach for the analog-capable Vyges engines —
+[`lvs`](https://github.com/vyges-tools/lvs), [`layout`](https://github.com/vyges-tools/layout),
+[`em-ir`](https://github.com/vyges-tools/em-ir), [`thermal`](https://github.com/vyges-tools/thermal),
+and [`extract`](https://github.com/vyges-tools/extract).
+
 ## Open core, certified fab plugins
 
 `vyges-sta-si` is open and contains **no foundry-confidential data**. The bulk of
