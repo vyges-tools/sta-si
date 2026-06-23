@@ -12,7 +12,7 @@ repository = "https://github.com/vyges-tools/sta-si"
 # come from the vyges-loom foundation — sibling-checkout path dep in dev; release
 # pins a git/version dep. (sta-si is loom's seed: these readers originated here.)
 [dependencies]
-vyges-loom = { git = "https://github.com/vyges-tools/loom", tag = "v0.1.0" }
+vyges-loom = { git = "https://github.com/vyges-tools/loom", branch = "main" }
 
 [[bin]]
 name = "vyges-sta-si"

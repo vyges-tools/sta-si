@@ -13,18 +13,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # dep-mode: this engine depends on the shared vyges-tools/loom foundation via a
-      # path dep (`../vyges-tools-loom`) for sibling-checkout dev. In CI we fetch the
-      # foundation and repoint the path at it. (loom is public at launch -> anonymous
-      # checkout; pre-launch add `token:` with a PAT that can read the private repo.)
-      - name: Fetch the vyges-tools/loom foundation
-        uses: actions/checkout@v4
-        with:
-          repository: vyges-tools/loom
-          path: .deps/vyges-tools-loom
-      - name: Repoint the path dependency at the CI checkout
-        shell: bash
-        run: sed -i.bak 's#\.\./vyges-tools-loom#.deps/vyges-tools-loom#' Cargo.toml && rm -f Cargo.toml.bak
       - uses: dtolnay/rust-toolchain@stable
       - name: Build
         run: cargo build --locked --verbose
