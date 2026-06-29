@@ -206,10 +206,31 @@ vyges-sta-si run  top.sta -o top.rpt           # analyze -> timing report
 vyges-sta-si run  top.sta --json               # machine-readable WNS/TNS/path
 vyges-sta-si run  top.sta --fail-on-violation  # exit 3 if WNS < 0 (CI gate)
 vyges-sta-si run  top.sta --sdf top.sdf        # also write SDF back-annotation
+vyges-sta-si sdc-lint top.sta                  # check the SDC for completeness/consistency
 vyges-sta-si check top.sta                     # validate the job + inputs
 vyges-sta-si demo                              # analyze a built-in 2-gate design
 # common flags: -o FILE · --json · --sdf FILE · -q/--quiet · -v/--verbose · -h/--help · -V/--version
 ```
+
+### SDC constraint lint (`sdc-lint`)
+
+A correct slack report is worthless if the constraints are wrong — an unconstrained input
+has no path to check, a missing clock leaves registers untimed, a clock on a port the design
+doesn't have silently does nothing. `vyges-sta-si sdc-lint job.sta` checks the constraints
+themselves, independent of the timing run, against the same netlist + Liberty:
+
+```text
+vyges-sta-si sdc-lint — 1 error(s), 2 warning(s)
+  error   [no-clock]              design has registers but the SDC defines no clocks
+  warning [unconstrained-input]   input `din` has no set_input_delay
+  warning [unconstrained-output]  output `dout` has no set_output_delay
+```
+
+It flags only what is structurally certain — a non-positive clock period, a duplicate clock
+name, a clock whose source isn't a port/net in the design, an I/O delay on a port that doesn't
+exist, and uncovered primary inputs/outputs — so a clean lint means something. Exit 3 on any
+**error** (or, with `--fail-on-violation`, on warnings too). Clock-tree tracing and exception
+reachability are the depth passes (and partly the job of `vyges-cdc`).
 
 ### SDF back-annotation output (`--sdf`)
 

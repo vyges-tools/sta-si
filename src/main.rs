@@ -21,10 +21,14 @@ const USAGE: &str = "\
 vyges-sta-si — sign-off static timing analysis with signal integrity
 
 usage:
-  vyges-sta-si run   JOB    [-o OUT] [--json] [--fail-on-violation] [--sdf FILE]
-  vyges-sta-si check JOB
-  vyges-sta-si demo         [-o OUT] [--json]
-  vyges-sta-si tcl   SCRIPT [-o OUT] [--json] [--fail-on-violation]   (experimental)
+  vyges-sta-si run      JOB    [-o OUT] [--json] [--fail-on-violation] [--sdf FILE]
+  vyges-sta-si sdc-lint JOB    [-o OUT] [--json] [--fail-on-violation]
+  vyges-sta-si check    JOB
+  vyges-sta-si demo            [-o OUT] [--json]
+  vyges-sta-si tcl      SCRIPT [-o OUT] [--json] [--fail-on-violation]   (experimental)
+
+`sdc-lint` checks the SDC for completeness/consistency (unconstrained I/O, a clock with
+no period, duplicate clocks, a clock on a port the design lacks) — independent of timing.
 
 `tcl` runs an OpenSTA-style TCL *subset* (read_liberty/verilog/spef/sdc + inline SDC +
 report_checks/report_wns/report_tns) through the Vyges engine — EXPERIMENTAL; not a TCL
@@ -125,6 +129,42 @@ fn write_out(text: &str, cli: &Cli) {
         },
         None => print!("{text}"),
     }
+}
+
+fn render_lint(r: &vyges_sta_si::sdclint::LintReport) -> String {
+    let mut s = String::new();
+    if r.findings.is_empty() {
+        s.push_str("vyges-sta-si sdc-lint — CLEAN ✓  (no constraint issues)\n");
+        return s;
+    }
+    s.push_str(&format!(
+        "vyges-sta-si sdc-lint — {} error(s), {} warning(s)\n",
+        r.errors(),
+        r.warnings()
+    ));
+    for f in &r.findings {
+        s.push_str(&format!("  {:7} [{}] {}\n", f.severity.tag(), f.code, f.message));
+    }
+    s
+}
+
+fn render_lint_json(r: &vyges_sta_si::sdclint::LintReport) -> String {
+    let mut s = String::from("{\n");
+    s.push_str(&format!("  \"errors\": {},\n", r.errors()));
+    s.push_str(&format!("  \"warnings\": {},\n", r.warnings()));
+    s.push_str("  \"findings\": [\n");
+    for (i, f) in r.findings.iter().enumerate() {
+        let comma = if i + 1 < r.findings.len() { "," } else { "" };
+        s.push_str(&format!(
+            "    {{\"severity\": \"{}\", \"code\": \"{}\", \"message\": {:?}}}{}\n",
+            f.severity.tag(),
+            f.code,
+            f.message,
+            comma
+        ));
+    }
+    s.push_str("  ]\n}\n");
+    s
 }
 
 fn emit(job: &StaJob, rep: &TimingReport, cli: &Cli) -> ! {
@@ -316,6 +356,33 @@ fn main() {
                     eprintln!("error: {e}");
                     exit(1);
                 }
+            }
+        }
+        "sdc-lint" => {
+            let Some(path) = cli.positionals.get(1) else {
+                eprintln!("usage: vyges-sta-si sdc-lint JOB [-o OUT]");
+                exit(2);
+            };
+            let job = match StaJob::load(path) {
+                Ok(j) => j,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    exit(2);
+                }
+            };
+            let report = match engine::lint_job(&job) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    exit(1);
+                }
+            };
+            let text = if cli.json { render_lint_json(&report) } else { render_lint(&report) };
+            write_out(&text, &cli);
+            // gate: errors always fail; --fail-on-violation also fails on warnings.
+            let fail = report.errors() > 0 || (cli.fail_on_violation && report.warnings() > 0);
+            if fail {
+                exit(3);
             }
         }
         "tcl" => {

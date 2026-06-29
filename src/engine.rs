@@ -126,6 +126,37 @@ pub fn sdf_for_job(job: &StaJob) -> Result<String, StaError> {
     Ok(crate::sdf::emit(&job.design, &nl, &lib, spef.as_ref()))
 }
 
+/// Lint a job's SDC constraints (completeness + consistency) against its netlist.
+/// Uses the job's SDC file if present, else the inline `.sta` clock definitions.
+pub fn lint_job(job: &StaJob) -> Result<crate::sdclint::LintReport, StaError> {
+    let nl = netlist::load(&job.resolve(&job.netlist)).map_err(|e| StaError::Parse(e.to_string()))?;
+    let mut lib = Lib::default();
+    for l in &job.libs {
+        let one = Lib::load(&job.resolve(l)).map_err(|e| StaError::Parse(e.to_string()))?;
+        lib.cells.extend(one.cells);
+    }
+    if lib.cells.is_empty() {
+        return Err(StaError::Parse("no cells in any .lib".into()));
+    }
+    let sdc = match &job.sdc {
+        Some(p) => crate::sdc::Sdc::load(&job.resolve(p)).map_err(|e| StaError::Parse(e.to_string()))?,
+        None => {
+            // no SDC file — lint the inline `.sta` clocks (still catches a bad period,
+            // a duplicate, a registered design with no clock at all).
+            let mut s = crate::sdc::Sdc::default();
+            for (name, source, period) in &job.clocks {
+                s.clocks.push(crate::sdc::SdcClock {
+                    name: name.clone(),
+                    source: source.clone(),
+                    period: *period,
+                });
+            }
+            s
+        }
+    };
+    Ok(crate::sdclint::lint(&nl, &sdc, &lib))
+}
+
 /// Render a human-readable timing report.
 pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
     let mut s = String::new();

@@ -24,6 +24,7 @@ pub mod job;
 pub use vyges_loom::{ccs, liberty, netlist, sdc, spef};
 pub mod sta;
 pub mod sdf; // SDF (Standard Delay Format) back-annotation writer
+pub mod sdclint; // SDC constraint linter (completeness + consistency)
 mod inc;
 pub mod si;
 pub mod engine;
