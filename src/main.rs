@@ -1,6 +1,6 @@
 //! vyges-sta-si CLI.
 //!
-//!   vyges-sta-si run   JOB [-o OUT] [--json] [--fail-on-violation]   analyze -> report
+//!   vyges-sta-si run   JOB [-o OUT] [--json] [--fail-on-violation] [--sdf FILE]  analyze -> report
 //!   vyges-sta-si check JOB                                          validate the job
 //!   vyges-sta-si demo  [-o OUT] [--json]                            built-in design
 //!
@@ -21,7 +21,7 @@ const USAGE: &str = "\
 vyges-sta-si — sign-off static timing analysis with signal integrity
 
 usage:
-  vyges-sta-si run   JOB    [-o OUT] [--json] [--fail-on-violation]
+  vyges-sta-si run   JOB    [-o OUT] [--json] [--fail-on-violation] [--sdf FILE]
   vyges-sta-si check JOB
   vyges-sta-si demo         [-o OUT] [--json]
   vyges-sta-si tcl   SCRIPT [-o OUT] [--json] [--fail-on-violation]   (experimental)
@@ -34,6 +34,8 @@ flags:
   -o FILE               write output to FILE (default: stdout)
   --json                machine-readable JSON instead of the text report
   --fail-on-violation   exit 3 if WNS < 0 (CI timing gate)
+  --sdf FILE            also write an SDF back-annotation file (IOPATH + setup/hold,
+                        + INTERCONNECT from SPEF) — feeds gate-level / back-annotated sim
   -q, --quiet           suppress non-essential output
   -v, --verbose         extra detail on stderr
   -h, --help            show this help
@@ -69,6 +71,7 @@ struct Cli {
     quiet: bool,
     verbose: bool,
     fail_on_violation: bool,
+    sdf: Option<String>,
     help: bool,
     version: bool,
     bug_report: bool,
@@ -88,6 +91,10 @@ fn parse_cli(args: &[String]) -> Cli {
             }
             "--json" => c.json = true,
             "--fail-on-violation" => c.fail_on_violation = true,
+            "--sdf" => {
+                c.sdf = args.get(i + 1).cloned();
+                i += 1;
+            }
             "-q" | "--quiet" => c.quiet = true,
             "-v" | "--verbose" => c.verbose = true,
             "-h" | "--help" => c.help = true,
@@ -283,6 +290,23 @@ fn main() {
                             u.dedup();
                             eprintln!("  sdc: unsupported (ignored): {}", u.join(", "));
                         }
+                    }
+                }
+            }
+            if let Some(sdf_out) = &cli.sdf {
+                match engine::sdf_for_job(&job) {
+                    Ok(text) => {
+                        if let Err(e) = std::fs::write(sdf_out, &text) {
+                            eprintln!("error: {sdf_out}: {e}");
+                            exit(1);
+                        }
+                        if !cli.quiet {
+                            eprintln!("wrote SDF: {sdf_out}");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        exit(1);
                     }
                 }
             }

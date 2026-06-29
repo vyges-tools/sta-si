@@ -107,6 +107,25 @@ pub fn analyze_job(job: &StaJob) -> Result<TimingReport, StaError> {
     sta::analyze(&nl, &lib, job, spef.as_ref())
 }
 
+/// Emit an SDF back-annotation file for the job's design (loads the same Liberty
+/// + netlist + SPEF as [`analyze_job`]).
+pub fn sdf_for_job(job: &StaJob) -> Result<String, StaError> {
+    let nl = netlist::load(&job.resolve(&job.netlist)).map_err(|e| StaError::Parse(e.to_string()))?;
+    let mut lib = Lib::default();
+    for l in &job.libs {
+        let one = Lib::load(&job.resolve(l)).map_err(|e| StaError::Parse(e.to_string()))?;
+        lib.cells.extend(one.cells);
+    }
+    if lib.cells.is_empty() {
+        return Err(StaError::Parse("no cells in any .lib".into()));
+    }
+    let spef = match &job.spef {
+        Some(p) => Some(Spef::load(&job.resolve(p)).map_err(|e| StaError::Parse(e.to_string()))?),
+        None => None,
+    };
+    Ok(crate::sdf::emit(&job.design, &nl, &lib, spef.as_ref()))
+}
+
 /// Render a human-readable timing report.
 pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
     let mut s = String::new();

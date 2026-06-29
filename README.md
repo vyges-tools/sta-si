@@ -1,7 +1,7 @@
 # vyges-sta-si
 
-Sign-off **static timing analysis with signal integrity**: a gate-level netlist
-+ timing libraries + a clock in, a slack report out.
+Sign-off **static timing analysis with signal integrity**: a gate-level netlist,
+timing libraries, and a clock in — a slack report out.
 
 > **Vyges open EDA tools.** Commercial-grade silicon sign-off capability, built
 > on open standards and plain file formats — and meant to be accessible to
@@ -205,10 +205,22 @@ cargo build --release            # std-only, no external deps
 vyges-sta-si run  top.sta -o top.rpt           # analyze -> timing report
 vyges-sta-si run  top.sta --json               # machine-readable WNS/TNS/path
 vyges-sta-si run  top.sta --fail-on-violation  # exit 3 if WNS < 0 (CI gate)
+vyges-sta-si run  top.sta --sdf top.sdf        # also write SDF back-annotation
 vyges-sta-si check top.sta                     # validate the job + inputs
 vyges-sta-si demo                              # analyze a built-in 2-gate design
-# common flags: -o FILE · --json · -q/--quiet · -v/--verbose · -h/--help · -V/--version
+# common flags: -o FILE · --json · --sdf FILE · -q/--quiet · -v/--verbose · -h/--help · -V/--version
 ```
+
+### SDF back-annotation output (`--sdf`)
+
+`vyges-sta-si run job.sta --sdf out.sdf` also writes a standard **SDF** (`DELAYFILE`): per-cell
+**IOPATH** delays (rise/fall from the Liberty arcs at the net load), **TIMINGCHECK** SETUP/HOLD
+on sequential cells, and top-level **INTERCONNECT** net delays from the SPEF parasitics (Elmore).
+That is the standard hand-off a **gate-level / back-annotated simulator** consumes — produced
+from the same Liberty + SPEF the rest of the flow already has, with no Tcl and no external STA.
+Scope: single-corner today; IOPATH uses a nominal slew + the real net load (full
+timer-propagated slew is the planned accuracy upgrade), and INTERCONNECT needs a SPEF (omitted
+without one).
 
 A job (`*.sta`) is a few `key: value` lines:
 
@@ -256,13 +268,13 @@ Supported SDC (a Tcl-subset reader — `set var`, `$var`, `[get_ports …]`,
 `[all_inputs]`, `{…}` lists, `set_units` scaling, `\`-continuations):
 
 | command | effect |
-|---|---|
+| --- | --- |
 | `create_clock` / `create_generated_clock` | clock(s); a generated clock's period is resolved from its master × `divide_by` / `multiply_by` |
 | `set_input_delay` / `set_output_delay` | I/O timing budget — default (`all_inputs`/`all_outputs`) plus per-port overrides; seeds input arrival / eats the period at outputs |
-| `set_clock_uncertainty [-setup|-hold]` | guard band — tightens setup required, relaxes hold required |
+| `set_clock_uncertainty [-setup | -hold]` | guard band — tightens setup required, relaxes hold required |
 | `set_clock_latency` | source/network latency, applied to the I/O budget |
 | `set_input_transition` / `set_load` | boundary slew / load |
-| `set_timing_derate -late|-early` | flat OCV derate |
+| `set_timing_derate -late | -early` | flat OCV derate |
 | `set_false_path` / `set_multicycle_path` | timing exceptions (`-from`/`-to`, pin → instance) |
 
 Anything not modelled (`set_driving_cell`, `set_max_fanout`, …) is **never
