@@ -355,7 +355,7 @@ that foundry's NDA, never in this repository.
                                                    AOCV/POCV + SI margins, under NDA
 ```
 
-## Current state (2026-05-31)
+## Current state (2026-06-29)
 
 v1 does **setup *and* hold** timing. Setup is the max-delay path — combinational
 (input → output) **and register-to-register** (flop Q launches via its CK→Q arc;
@@ -388,8 +388,11 @@ RC, not Elmore's pessimistic R·C — and the **degraded sink slew** it computes
 propagated downstream (a resistive net hands the next stage a slower edge, raising
 its delay). With `pba: true` it adds **path-based analysis** — re-timing the
 critical path and its fan-in alternatives with strictly path-local slews, catching
-a non-greedy worst path that the graph-based max can miss. Fully offline, no external
-deps, 50 tests green.
+a non-greedy worst path that the graph-based max can miss. It also writes **SDF
+back-annotation** (`--sdf`: IOPATH + setup/hold TIMINGCHECK + SPEF INTERCONNECT, for
+gate-level sim) and lints constraints with **`sdc-lint`** (completeness/consistency
+of the SDC, independent of the timing run). Fully offline, no external deps, 71 tests
+green.
 It **closes the loop with the other engines**: it reads the
 Liberty `vyges-char` emits and the SPEF (incl. coupling + RC tree) `vyges-extract`
 emits — the SI margin OpenSTA lacks.
