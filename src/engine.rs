@@ -84,6 +84,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         hold_endpoints: 0,
         worst_hold_endpoint: String::new(),
         worst_hold_path: Vec::new(),
+        hold_slacks: Vec::new(),
         pba_wns: None,
     });
     (job, rep)

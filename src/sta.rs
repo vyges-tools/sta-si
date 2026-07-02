@@ -132,6 +132,9 @@ pub struct TimingReport {
     pub hold_endpoints: usize,
     pub worst_hold_endpoint: String,
     pub worst_hold_path: Vec<PathNode>,
+    // every hold endpoint and its hold slack (node index, slack ns) — the per-endpoint
+    // list a hold-fix ECO ranks candidate delay insertions from. Consistent with whs/ths.
+    pub hold_slacks: Vec<(PinId, f64)>,
     // path-based analysis: worst setup slack after re-timing critical paths with
     // path-local slews (Some only when `pba` is enabled). Catches non-greedy worst
     // paths the graph-based max misses.
@@ -352,6 +355,13 @@ impl Timer {
     /// The worst (critical) setup path.
     pub fn worst_path(&self) -> &[PathNode] {
         &self.report.worst_path
+    }
+    /// Every hold endpoint and its hold slack, worst (most negative) first — the list a
+    /// hold-fix ECO ranks candidate delay insertions from. Consistent with `whs`/`ths`.
+    pub fn hold_endpoint_slacks(&self) -> Vec<(PinId, f64)> {
+        let mut v = self.report.hold_slacks.clone();
+        v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        v
     }
 
     // ---- mutation + update (Phase 2) ----
@@ -1345,6 +1355,7 @@ fn build_report(
     let mut ths = 0.0;
     let mut worst_hold = None;
     let mut hold_endpoints = 0;
+    let mut hold_slacks: Vec<(usize, f64)> = Vec::new();
     for (idx, hold, ck) in &flop_hold {
         let idx = *idx;
         if arr_min[idx] == f64::INFINITY {
@@ -1375,6 +1386,7 @@ fn build_report(
         let base = crpr - cap_late - hold_rel - job.hold_uncertainty;
         // earliest data must arrive after the (late) capture edge + hold relation
         let slack = arr_min[idx] + base - hold_v;
+        hold_slacks.push((idx, slack));
         if simple_ctx {
             inc_hold.push(HoldRec { idx, base, cons: hold.clone(), ck_slew, launch_ck: lck });
         }
@@ -1419,6 +1431,7 @@ fn build_report(
         hold_endpoints,
         worst_hold_endpoint,
         worst_hold_path,
+        hold_slacks,
         pba_wns,
     };
     // Retain a per-pin snapshot for the Timer's query API (Phase 1). Cloned, not moved:

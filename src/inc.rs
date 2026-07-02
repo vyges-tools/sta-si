@@ -381,6 +381,7 @@ impl IncGraph {
         let mut ths = 0.0;
         let mut worst_hold = None;
         let mut hold_endpoints = 0;
+        let mut hold_slacks: Vec<(usize, f64)> = Vec::new();
         for r in &self.topo.hold_recs {
             if arr_min[r.idx] == f64::INFINITY {
                 continue;
@@ -388,6 +389,7 @@ impl IncGraph {
             hold_endpoints += 1;
             let hold_v = eval_cons(&r.cons, r.ck_slew, slew_min[r.idx]);
             let slack = arr_min[r.idx] + r.base - hold_v;
+            hold_slacks.push((r.idx, slack));
             if slack < 0.0 {
                 ths += slack;
             }
@@ -410,6 +412,7 @@ impl IncGraph {
             hold_endpoints,
             worst_hold_endpoint,
             worst_hold_path,
+            hold_slacks,
             pba_wns: None, // pba disqualifies the fast path at build time
         };
         let timing = Timing::new(
