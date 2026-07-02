@@ -59,6 +59,35 @@ impl std::fmt::Display for StaError {
 }
 impl std::error::Error for StaError {}
 
+/// A pin carrying only power / ground / well-bias (no signal). Used to recognise
+/// physical-only cells (fill / tap / decap / antenna diode / endcap) in a
+/// post-route netlist: they are absent from every timing `.lib` and connect
+/// nothing, or only these rails, so they are skipped during linking rather than
+/// erroring as an unknown cell.
+///
+/// PDK-agnostic: the exact list covers sky130 (VPWR/VGND/VPB/VNB), gf180 wells
+/// (VNW/VPW), body-bias (VBP/VBN/VBB) and analog (AVDD/AVSS); the `starts_with`
+/// fallbacks catch VDD*/VSS*/VPWR*/VGND* variants (VDD_CORE, VSSIO2, …) in any
+/// PDK. Logic cells always carry signal pins (A/B/Y/Q/…), so broadening the rail
+/// set cannot mask a genuinely missing logic library.
+fn is_power_pin(pin: &str) -> bool {
+    let p = pin.trim_start_matches('\\').to_ascii_uppercase();
+    const RAILS: &[&str] = &[
+        "VPWR", "VGND", "VPB", "VNB", // sky130 std cell
+        "VDD", "VSS", "VDDA", "VSSA", "VCC", "VEE", "VPP", "GND", "VNEG",
+        "VCCD", "VCCD1", "VCCD2", "VSSD", "VSSD1", "VSSD2",
+        "VDDIO", "VSSIO", "VDDPST", "VSSPST", "KAPWR", "VSWITCH", "VCCHIB",
+        "VNW", "VPW", "VNWELL", "VPWELL", "VWELL", "VSUBS", // wells / substrate
+        "VBP", "VBN", "VBB", "VBG", "VB", "VBODY",          // body bias
+        "AVDD", "AVSS", "DVDD", "DVSS", "VPWRIN",
+    ];
+    RAILS.contains(&p.as_str())
+        || p.starts_with("VDD")
+        || p.starts_with("VSS")
+        || p.starts_with("VPWR")
+        || p.starts_with("VGND")
+}
+
 /// Interpolate an AOCV derate from a `(stages, derate)` table at `depth`, clamping
 /// past the table ends. Empty table -> 1.0 (no derate).
 fn aocv_lookup(tbl: &[(f64, f64)], depth: f64) -> f64 {
@@ -526,7 +555,15 @@ fn build_report(
         // timing view — skip them rather than erroring on a missing lib cell.
         let cell = match lib.cell(&inst.cell) {
             Some(c) => c,
-            None if inst.conns.is_empty() => continue,
+            // physical-only cells (fill/decap/tap/antenna diode) have no timing
+            // view: they connect nothing, or only power/ground pins. Skip them
+            // rather than erroring on a missing lib cell — matches OpenSTA's
+            // tolerance of physical fill in a post-route netlist.
+            None if inst.conns.is_empty()
+                || inst.conns.iter().all(|(pin, _)| is_power_pin(pin)) =>
+            {
+                continue
+            }
             None => return Err(StaError::UnknownCell(inst.cell.clone())),
         };
         let ck_key = cell.clock_pin.as_ref().map(|cp| pin_key(&inst.name, cp));
