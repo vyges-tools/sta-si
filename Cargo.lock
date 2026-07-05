@@ -5,10 +5,11 @@ version = 4
 [[package]]
 name = "vyges-loom"
 version = "0.0.3"
+source = "git+https://github.com/vyges-tools/loom?branch=main#dac35a1fb39a29db2e17d13c9a937e43929f6c2d"
 
 [[package]]
 name = "vyges-sta-si"
-version = "0.1.2"
+version = "0.1.6"
 dependencies = [
  "vyges-loom",
 ]
