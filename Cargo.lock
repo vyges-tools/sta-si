@@ -9,7 +9,7 @@ source = "git+https://github.com/vyges-tools/loom?branch=main#dac35a1fb39a29db2e
 
 [[package]]
 name = "vyges-sta-si"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "vyges-loom",
 ]
