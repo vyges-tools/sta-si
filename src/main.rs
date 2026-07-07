@@ -242,6 +242,30 @@ fn emit_tcl(
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "--describe") {
+        // Machine-readable description of `run` for tooling that drives it.
+        const DESCRIBE: &str = r#"{
+  "name": "sta-si",
+  "summary": "static timing analysis with signal integrity (job → report)",
+  "invocation": {
+    "args_template": ["run", "{job}"],
+    "optional": [ { "arg": "sdf", "flag": "--sdf" } ],
+    "emits_json": true
+  },
+  "inputs": {
+    "type": "object",
+    "required": ["job"],
+    "properties": {
+      "job": { "type": "string", "description": "the timing job file" },
+      "sdf": { "type": "string", "description": "optional SDF delays file" }
+    }
+  },
+  "artifacts": []
+}
+"#;
+        print!("{DESCRIBE}");
+        return;
+    }
     let cli = parse_cli(&args);
 
     if cli.bug_report {
