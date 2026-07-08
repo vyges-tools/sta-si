@@ -68,6 +68,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         xtalk_window: 0.0,
         scenarios: vec![],
         exceptions: vec![],
+        async_groups: vec![],
         crpr: true,
         pba: false,
         sdc: None,

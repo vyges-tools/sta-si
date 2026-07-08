@@ -75,6 +75,7 @@ fn job(pba: bool) -> StaJob {
         xtalk_window: 0.0,
         scenarios: vec![],
         exceptions: vec![],
+        async_groups: vec![],
         crpr: true,
         pba,
         input_delay: 0.0,

@@ -86,7 +86,7 @@ fn job() -> StaJob {
         aocv_late: vec![], aocv_early: vec![], miller: 2.0, xtalk_window: 0.0,
         input_delay: 0.0, output_delay: 0.0, io_input_delays: vec![], io_output_delays: vec![],
         setup_uncertainty: 0.0, hold_uncertainty: 0.0, sdc: None,
-        scenarios: vec![], exceptions: vec![], crpr: true, pba: false, base_dir: String::new(),
+        scenarios: vec![], exceptions: vec![], async_groups: vec![], crpr: true, pba: false, base_dir: String::new(),
     }
 }
 

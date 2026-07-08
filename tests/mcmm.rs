@@ -14,6 +14,7 @@ fn rep(wns: f64, whs: f64) -> TimingReport {
         worst_path: vec![],
         whs,
         ths: 0.0,
+        hold_slacks: vec![],
         hold_endpoints: 1,
         worst_hold_endpoint: "d".into(),
         worst_hold_path: vec![],

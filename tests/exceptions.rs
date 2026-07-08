@@ -75,6 +75,7 @@ fn job(exceptions: Vec<Exception>) -> StaJob {
         xtalk_window: 0.0,
         scenarios: vec![],
         exceptions,
+        async_groups: Vec::new(),
         crpr: true,
         pba: false,
         input_delay: 0.0,

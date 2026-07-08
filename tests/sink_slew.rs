@@ -70,6 +70,7 @@ fn job() -> StaJob {
         xtalk_window: 0.0,
         scenarios: vec![],
         exceptions: vec![],
+        async_groups: vec![],
         crpr: true,
         pba: false,
         input_delay: 0.0,

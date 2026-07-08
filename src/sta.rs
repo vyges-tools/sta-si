@@ -1132,6 +1132,38 @@ fn build_report(
         }
         period // fallback: the primary period
     };
+    // asynchronous clock groups (set_clock_groups -asynchronous): map each clock
+    // SOURCE node to its group index; a path whose launch and capture resolve to
+    // different groups is cut — no setup OR hold check. CDC synchronizer paths are
+    // intentionally unrelated, so they must not show cross-domain violations.
+    let group_of_name: HashMap<&str, usize> = job
+        .async_groups
+        .iter()
+        .enumerate()
+        .flat_map(|(gi, g)| g.iter().map(move |n| (n.as_str(), gi)))
+        .collect();
+    let mut clock_group_node: HashMap<usize, usize> = HashMap::new();
+    if !group_of_name.is_empty() {
+        for (name, src, _per) in job.clocks.iter() {
+            let Some(&gi) = group_of_name.get(name.as_str()) else { continue };
+            let node = match src.split_once('/') {
+                Some((inst, pin)) => key2idx.get(&pin_key(inst, pin)).copied(),
+                None => key2idx.get(&port_key(src)).copied(),
+            };
+            if let Some(nd) = node {
+                clock_group_node.insert(nd, gi);
+            }
+        }
+    }
+    let clock_group_of = |ck: usize| -> Option<usize> {
+        path_to_root(ck).into_iter().find_map(|n| clock_group_node.get(&n).copied())
+    };
+    let is_async = |lck: Option<usize>, cap: Option<usize>| -> bool {
+        match (lck.and_then(|n| clock_group_of(n)), cap.and_then(|n| clock_group_of(n))) {
+            (Some(a), Some(b)) => a != b,
+            _ => false,
+        }
+    };
     // (setup, hold) launch→capture edge relation between launch period `pl` and
     // capture period `pc`. Same clock → (pc, 0) (the common case). Else scan launch
     // edges over a common multiple: setup = tightest positive capture-after-launch,
@@ -1198,6 +1230,9 @@ fn build_report(
                 ExcKind::FalsePath => excluded_setup[*idx] = true,
                 ExcKind::Multicycle(cyc) => setup_rel += cyc.saturating_sub(1) as f64 * pc,
             }
+        }
+        if is_async(lck, cap) {
+            excluded_setup[*idx] = true; // async clock groups: no setup check
         }
         let base = cap_early + setup_rel + crpr - job.setup_uncertainty;
         endpoint_req[*idx] = base - setup_v;
@@ -1374,6 +1409,9 @@ fn build_report(
                 ExcKind::FalsePath => continue,
                 ExcKind::Multicycle(cyc) => hold_rel += cyc.saturating_sub(1) as f64 * pc,
             }
+        }
+        if is_async(lck, cap) {
+            continue; // async clock groups: no hold check
         }
         hold_endpoints += 1;
         let cap_late = cap.map(|i| arrival[i]).filter(|a| a.is_finite()).unwrap_or(0.0);

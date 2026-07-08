@@ -82,6 +82,9 @@ pub struct StaJob {
     // setup and worst hold across them. The fields above are then unused.
     pub scenarios: Vec<String>,
     pub exceptions: Vec<Exception>, // false-path / multicycle timing exceptions
+    /// `set_clock_groups -asynchronous` groups (clock names). Launch<->capture
+    /// paths crossing two different groups are cut (setup and hold).
+    pub async_groups: Vec<Vec<String>>,
     pub sdc: Option<String>, // optional SDC constraints file (merged at load)
     pub base_dir: String,
 }
@@ -236,6 +239,7 @@ impl StaJob {
             pba: kv.get("pba").map(|s| s == "true" || s == "1").unwrap_or(false),
             scenarios,
             exceptions,
+            async_groups: Vec::new(),
             sdc,
             base_dir: base_dir.to_string(),
         };
@@ -294,6 +298,10 @@ impl StaJob {
 /// The job keeps its design / netlist / lib / spef; SDC supplies the timing
 /// intent. Explicit `.sta` values are kept where SDC is silent.
 pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
+    // asynchronous clock groups: cut cross-group paths (setup + hold).
+    if !sdc.async_groups.is_empty() {
+        job.async_groups = sdc.async_groups.clone();
+    }
     // clocks: SDC is authoritative when present.
     if !sdc.clocks.is_empty() {
         job.clocks =

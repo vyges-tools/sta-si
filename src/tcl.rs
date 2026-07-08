@@ -253,6 +253,7 @@ fn base_job(
         pba: false,
         scenarios: Vec::new(),
         exceptions: Vec::new(),
+        async_groups: Vec::new(),
         sdc: None,
         base_dir: base_dir.to_string(),
     }
