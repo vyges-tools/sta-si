@@ -38,6 +38,8 @@ flags:
   -o FILE               write output to FILE (default: stdout)
   --json                machine-readable JSON instead of the text report
   --fail-on-violation   exit 3 if WNS < 0 (CI timing gate)
+  --pdk NAME           resolve liberty from pdk-store (lib) when the job has none
+  --corner C           PDK corner for --pdk (default: the PDK's default corner)
   --sdf FILE            also write an SDF back-annotation file (IOPATH + setup/hold,
                         + INTERCONNECT from SPEF) — feeds gate-level / back-annotated sim
   -q, --quiet           suppress non-essential output
@@ -82,6 +84,37 @@ struct Cli {
     feature_request: bool,
     sponsor: bool,
     star: bool,
+    pdk: Option<String>,
+    corner: Option<String>,
+}
+
+/// Resolve a PDK collateral key (e.g. `lib`) to a concrete path via the installed
+/// `vyges-pdk-store` resolver — the PDK adapter. Prefers the sibling binary next
+/// to this one, else falls back to PATH. On failure returns the resolver's own
+/// message (e.g. `"foo": not a known PDK — run list…`) so the caller can surface it.
+fn pdk_resolve(pdk: &str, key: &str, corner: Option<&str>) -> Result<String, String> {
+    let sibling = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("vyges-pdk-store")))
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned());
+    let prog = sibling.unwrap_or_else(|| "vyges-pdk-store".into());
+    let mut cmd = std::process::Command::new(prog);
+    cmd.args(["resolve", pdk, key]);
+    if let Some(c) = corner {
+        cmd.args(["--corner", c]);
+    }
+    let out = cmd.output().map_err(|e| format!("vyges-pdk-store not runnable: {e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim().trim_start_matches("error:").trim().to_string();
+        return Err(if err.is_empty() { format!("could not resolve {key} for PDK {pdk:?}") } else { err });
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() {
+        Err(format!("pdk-store returned no path for {key} of PDK {pdk:?}"))
+    } else {
+        Ok(s)
+    }
 }
 
 fn parse_cli(args: &[String]) -> Cli {
@@ -97,6 +130,14 @@ fn parse_cli(args: &[String]) -> Cli {
             "--fail-on-violation" => c.fail_on_violation = true,
             "--sdf" => {
                 c.sdf = args.get(i + 1).cloned();
+                i += 1;
+            }
+            "--pdk" => {
+                c.pdk = args.get(i + 1).cloned();
+                i += 1;
+            }
+            "--corner" => {
+                c.corner = args.get(i + 1).cloned();
                 i += 1;
             }
             "-q" | "--quiet" => c.quiet = true,
@@ -317,13 +358,26 @@ fn main() {
                 eprintln!("usage: vyges-sta-si run JOB [-o OUT]");
                 exit(2);
             };
-            let job = match StaJob::load(path) {
+            let mut job = match StaJob::load(path) {
                 Ok(j) => j,
                 Err(e) => {
                     eprintln!("error: {e}");
                     exit(2);
                 }
             };
+            // no liberty in the job? resolve it from --pdk via pdk-store (`lib`,
+            // for --corner or the PDK default corner).
+            if job.libs.is_empty() {
+                if let Some(p) = &cli.pdk {
+                    match pdk_resolve(p, "lib", cli.corner.as_deref()) {
+                        Ok(path) => job.libs.push(path),
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                            exit(2);
+                        }
+                    }
+                }
+            }
             if job.is_mcmm() {
                 if cli.verbose {
                     eprintln!("MCMM: {} scenario(s)", job.scenarios.len());
