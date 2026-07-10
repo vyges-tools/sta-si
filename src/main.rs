@@ -301,7 +301,8 @@ fn main() {
       "sdf": { "type": "string", "description": "optional SDF delays file" }
     }
   },
-  "artifacts": [ { "role": "timing_report" }, { "role": "sdf", "from_arg": "sdf" } ]
+  "artifacts": [ { "role": "timing_report" }, { "role": "sdf", "from_arg": "sdf" } ],
+  "consumes": ["netlist", "liberty", "spef"]
 }
 "#;
         print!("{DESCRIBE}");
