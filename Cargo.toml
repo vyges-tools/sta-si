@@ -13,6 +13,7 @@ repository = "https://github.com/vyges-tools/sta-si"
 # pins a git/version dep. (sta-si is loom's seed: these readers originated here.)
 [dependencies]
 vyges-loom = { git = "https://github.com/vyges-tools/loom", branch = "main" }
+vyges-events = { git = "https://github.com/vyges-tools/events", branch = "main", default-features = false }
 
 [[bin]]
 name = "vyges-sta-si"
