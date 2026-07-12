@@ -209,7 +209,66 @@ fn render_lint_json(r: &vyges_sta_si::sdclint::LintReport) -> String {
     s
 }
 
+/// Emit the vyges-events causal trail for the timing verdict — one event per timing
+/// violation (setup / hold) + a completion event. Written to stderr (the default sink)
+/// so it never mixes with the report (stdout / -o). code=STA-* is the clustering key;
+/// objects (the violating endpoint net + the clock) are the cross-stage co-reference keys.
+fn emit_sta_si_events(job: &StaJob, rep: &TimingReport) {
+    use vyges_events::{Event, Severity};
+    // shared objects: the endpoint net + the clock (when the job names one).
+    let objs = |endpoint: &str| -> Vec<String> {
+        let mut v = vec![format!("net:{endpoint}")];
+        if !job.clock_port.is_empty() {
+            v.push(format!("clock:{}", job.clock_port));
+        }
+        v
+    };
+    let setup_bad = rep.endpoints > 0 && rep.wns < 0.0;
+    let hold_bad = rep.hold_endpoints > 0 && rep.whs < 0.0;
+    if setup_bad {
+        vyges_events::emit(
+            &Event::new(
+                "vyges-sta-si",
+                Severity::Warn,
+                format!(
+                    "setup violation at {}: WNS {:.4} ns (TNS {:.4} ns over {} endpoint(s))",
+                    rep.worst_endpoint, rep.wns, rep.tns, rep.endpoints
+                ),
+            )
+            .with_code("STA-SETUP")
+            .with_objects(objs(&rep.worst_endpoint)),
+        );
+    }
+    if hold_bad {
+        vyges_events::emit(
+            &Event::new(
+                "vyges-sta-si",
+                Severity::Warn,
+                format!(
+                    "hold violation at {}: WHS {:.4} ns (THS {:.4} ns over {} endpoint(s))",
+                    rep.worst_hold_endpoint, rep.whs, rep.ths, rep.hold_endpoints
+                ),
+            )
+            .with_code("STA-HOLD")
+            .with_objects(objs(&rep.worst_hold_endpoint)),
+        );
+    }
+    let viol = (setup_bad as usize) + (hold_bad as usize);
+    vyges_events::emit(
+        &Event::new(
+            "vyges-sta-si",
+            if viol == 0 { Severity::Info } else { Severity::Warn },
+            format!(
+                "sta complete: WNS {:.4} ns, TNS {:.4} ns, WHS {:.4} ns — {viol} violation(s)",
+                rep.wns, rep.tns, rep.whs
+            ),
+        )
+        .with_code("STA-DONE"),
+    );
+}
+
 fn emit(job: &StaJob, rep: &TimingReport, cli: &Cli) -> ! {
+    emit_sta_si_events(job, rep); // vyges-events causal trail on stderr; report goes to stdout / -o
     let text = if cli.json {
         engine::report_json(job, rep)
     } else {
@@ -235,6 +294,10 @@ fn emit(job: &StaJob, rep: &TimingReport, cli: &Cli) -> ! {
 }
 
 fn emit_mcmm(job: &StaJob, rep: &engine::McmmReport, cli: &Cli) -> ! {
+    // one causal trail per scenario (each is a full, independent STA / corner).
+    for s in &rep.scenarios {
+        emit_sta_si_events(job, &s.report);
+    }
     let text = if cli.json { engine::mcmm_json(job, rep) } else { engine::render_mcmm(job, rep) };
     write_out(&text, cli);
     if cli.fail_on_violation {
@@ -258,6 +321,7 @@ fn emit_tcl(
     reports: &vyges_sta_si::tcl::Reports,
     cli: &Cli,
 ) -> ! {
+    emit_sta_si_events(job, rep); // vyges-events causal trail on stderr
     let text = if cli.json {
         engine::report_json(job, rep)
     } else {
