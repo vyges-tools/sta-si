@@ -253,6 +253,33 @@ fn emit_sta_si_events(job: &StaJob, rep: &TimingReport) {
             .with_objects(objs(&rep.worst_hold_endpoint)),
         );
     }
+    // over-margin / hold-flood advisory (#10): a Warn event so the causal trail surfaces
+    // the harden risk — an over-margined clock manufacturing a hold flood — even when
+    // setup/hold both formally MET.
+    if let Some(adv) = crate::engine::MarginAdvisory::compute(job.period_ns, rep) {
+        if adv.warn {
+            let freq = adv
+                .max_freq_mhz
+                .map(|f| format!("~{f:.1} MHz"))
+                .unwrap_or_else(|| "a higher frequency".to_string());
+            vyges_events::emit(
+                &Event::new(
+                    "vyges-sta-si",
+                    Severity::Warn,
+                    format!(
+                        "over-margin: closes at {:.3} ns ({freq}) vs {:.3} ns target; {} of {} hold endpoints hold-critical — expect heavy hold-fix / buffer-budget burden",
+                        adv.achievable_ns, job.period_ns, adv.hold_critical, rep.hold_endpoints
+                    ),
+                )
+                .with_code("STA-OVERMARGIN")
+                .with_objects(if job.clock_port.is_empty() {
+                    vec![]
+                } else {
+                    vec![format!("clock:{}", job.clock_port)]
+                }),
+            );
+        }
+    }
     let viol = (setup_bad as usize) + (hold_bad as usize);
     vyges_events::emit(
         &Event::new(
