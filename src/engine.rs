@@ -148,6 +148,26 @@ pub fn sdf_for_job_opts(
     Ok(crate::sdf::emit(&job.design, &nl, &lib, spef.as_ref()))
 }
 
+/// Emit the shared Liberty IR (merged across the job's libs) as JSON — the
+/// structured intermediate for inspection / MCP (`--emit-liberty-json`). Uses the
+/// same loom `Lib` that both the timer and vyges-power consume, so the dump reflects
+/// exactly what the analysis sees. `lib_opts` honours `--liberty-nldm-only`.
+pub fn liberty_json_for_job(
+    job: &StaJob,
+    lib_opts: crate::liberty::LibOpts,
+) -> Result<String, StaError> {
+    let mut lib = Lib::default();
+    for l in &job.libs {
+        let one = Lib::load_opts(&job.resolve(l), lib_opts)
+            .map_err(|e| StaError::Parse(e.to_string()))?;
+        lib.cells.extend(one.cells);
+    }
+    if lib.cells.is_empty() {
+        return Err(StaError::Parse("no cells in any .lib".into()));
+    }
+    Ok(lib.to_json())
+}
+
 /// Lint a job's SDC constraints (completeness + consistency) against its netlist.
 /// Uses the job's SDC file if present, else the inline `.sta` clock definitions.
 pub fn lint_job(job: &StaJob) -> Result<crate::sdclint::LintReport, StaError> {

@@ -1,6 +1,8 @@
 //! End-to-end: the example design runs offline (v0 is pure-std, no subprocess).
 
-use vyges_sta_si::engine::{analyze_job, analyze_job_opts, render_report, MarginAdvisory};
+use vyges_sta_si::engine::{
+    analyze_job, analyze_job_opts, liberty_json_for_job, render_report, MarginAdvisory,
+};
 use vyges_sta_si::job::StaJob;
 use vyges_sta_si::liberty::LibOpts;
 use vyges_sta_si::sta::TimingReport;
@@ -113,4 +115,17 @@ fn nldm_only_is_bit_identical_on_a_nldm_lib() {
     assert_eq!(full.tns.to_bits(), nldm.tns.to_bits());
     assert_eq!(full.endpoints, nldm.endpoints);
     assert_eq!(full.worst_endpoint, nldm.worst_endpoint);
+}
+
+// ---- shared Liberty IR JSON dump / --emit-liberty-json (#34) -------------
+
+#[test]
+fn liberty_json_dumps_the_shared_ir() {
+    let p = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/top/top.sta");
+    let job = StaJob::load(p).unwrap();
+    let js = liberty_json_for_job(&job, LibOpts::default()).unwrap();
+    assert!(js.starts_with('{') && js.trim_end().ends_with('}'));
+    assert!(js.contains("\"cell_count\":"));
+    assert!(js.contains("\"cells\":{"));
+    assert!(js.contains("\"direction\":")); // at least one pin serialized
 }

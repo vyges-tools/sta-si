@@ -42,6 +42,8 @@ flags:
   --corner C           PDK corner for --pdk (default: the PDK's default corner)
   --liberty-nldm-only   skip CCS (receiver_capacitance + output_current) at Liberty
                         load — faster/smaller for NLDM-only runs; forces the NLDM delay path
+  --emit-liberty-json FILE  dump the merged Liberty IR (the shared model the timer +
+                        vyges-power consume) as JSON for inspection / MCP, then run
   --sdf FILE            also write an SDF back-annotation file (IOPATH + setup/hold,
                         + INTERCONNECT from SPEF) — feeds gate-level / back-annotated sim
   -q, --quiet           suppress non-essential output
@@ -90,6 +92,7 @@ struct Cli {
     pdk: Option<String>,
     corner: Option<String>,
     nldm_only: bool,
+    emit_liberty_json: Option<String>,
 }
 
 /// Resolve a PDK collateral key (e.g. `lib`) to a concrete path via the installed
@@ -145,6 +148,10 @@ fn parse_cli(args: &[String]) -> Cli {
                 i += 1;
             }
             "--liberty-nldm-only" => c.nldm_only = true,
+            "--emit-liberty-json" => {
+                c.emit_liberty_json = args.get(i + 1).cloned();
+                i += 1;
+            }
             "-q" | "--quiet" => c.quiet = true,
             "-v" | "--verbose" => c.verbose = true,
             "-h" | "--help" => c.help = true,
@@ -386,7 +393,7 @@ fn main() {
   "summary": "static timing analysis with signal integrity (job → report)",
   "invocation": {
     "args_template": ["run", "{job}"],
-    "optional": [ { "arg": "sdf", "flag": "--sdf" }, { "arg": "nldm_only", "flag": "--liberty-nldm-only" } ],
+    "optional": [ { "arg": "sdf", "flag": "--sdf" }, { "arg": "nldm_only", "flag": "--liberty-nldm-only" }, { "arg": "emit_liberty_json", "flag": "--emit-liberty-json" } ],
     "emits_json": true
   },
   "inputs": {
@@ -520,6 +527,23 @@ fn main() {
                         }
                         if !cli.quiet {
                             eprintln!("wrote SDF: {sdf_out}");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        exit(1);
+                    }
+                }
+            }
+            if let Some(json_out) = &cli.emit_liberty_json {
+                match engine::liberty_json_for_job(&job, lib_opts) {
+                    Ok(text) => {
+                        if let Err(e) = std::fs::write(json_out, &text) {
+                            eprintln!("error: {json_out}: {e}");
+                            exit(1);
+                        }
+                        if !cli.quiet {
+                            eprintln!("wrote liberty JSON: {json_out}");
                         }
                     }
                     Err(e) => {
