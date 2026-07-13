@@ -159,6 +159,75 @@ pub fn lint_job(job: &StaJob) -> Result<crate::sdclint::LintReport, StaError> {
     Ok(crate::sdclint::lint(&nl, &sdc, &lib))
 }
 
+/// Design could close at least this many× faster than clocked → "over-margined".
+const OVER_MARGIN_RATIO: f64 = 1.5;
+/// Hold slack (ns) at/below which an endpoint is "hold-critical" — a hold-fixer will pad it.
+const HOLD_CRIT_MARGIN_NS: f64 = 0.05;
+/// Ignore hold floods below this absolute count (tiny designs are not a burden).
+const HOLD_FLOOD_MIN: usize = 8;
+/// …and require at least this fraction of hold endpoints to be hold-critical.
+const HOLD_FLOOD_FRAC: f64 = 0.10;
+
+/// Timing-health advisory derived from the setup/hold report: the clock the design can
+/// actually close at (from the worst setup path), plus an over-margin / hold-flood warning.
+///
+/// Over-margining a clock (running much slower than the design can close) manufactures
+/// hold-critical paths: a post-layout resizer / hold-fixer then floods the design with
+/// delay buffers and can hit its buffer budget (e.g. OpenROAD `RSZ-0060`), failing the
+/// harden. sta-si can see this at sign-off and warn *before* the harden fails, turning a
+/// pass/fail timer into a design-feedback tool (issue #10).
+pub struct MarginAdvisory {
+    /// Minimum clock period the worst setup path can close at (ns): `period − WNS`.
+    pub achievable_ns: f64,
+    /// Max frequency at `achievable_ns` (MHz); `None` when the path is ~combinational
+    /// (`achievable ≤ 0`) so a finite frequency is not meaningful.
+    pub max_freq_mhz: Option<f64>,
+    /// Frequency at the target (clocked) period (MHz).
+    pub target_freq_mhz: f64,
+    /// How many× faster the design could close than it is clocked (`period / achievable`);
+    /// `None` when `achievable ≤ 0` (effectively unbounded).
+    pub over_margin_ratio: Option<f64>,
+    /// Hold endpoints at or below the hold-critical margin (flood risk for a hold-fixer).
+    pub hold_critical: usize,
+    /// True when the clock is over-margined AND a hold flood is present — the harden-risk case.
+    pub warn: bool,
+}
+
+impl MarginAdvisory {
+    /// Derive the advisory from the target period and a completed report. Returns `None`
+    /// when there is no setup timing to reason about (no endpoints, non-finite WNS, or a
+    /// non-positive period).
+    pub fn compute(period_ns: f64, rep: &TimingReport) -> Option<MarginAdvisory> {
+        if rep.endpoints == 0 || !rep.wns.is_finite() || period_ns <= 0.0 {
+            return None;
+        }
+        // Minimum period the worst setup path needs. WNS>0 (margin) shrinks it; WNS<0
+        // (violated) grows it beyond the target — i.e. the clock is too fast.
+        let achievable = period_ns - rep.wns;
+        let (max_freq_mhz, over_margin_ratio) = if achievable > 1e-3 {
+            (Some(1000.0 / achievable), Some(period_ns / achievable))
+        } else {
+            (None, None) // critical path ≈ 0 at this clock — finite freq not meaningful
+        };
+        // Over-margined when the design can close ≥ OVER_MARGIN_RATIO× faster than clocked
+        // (achievable ≤ 0 satisfies this too).
+        let over_margin = achievable <= period_ns / OVER_MARGIN_RATIO;
+        let hold_critical =
+            rep.hold_slacks.iter().filter(|&&(_, sl)| sl <= HOLD_CRIT_MARGIN_NS).count();
+        let hold_flood = rep.hold_endpoints > 0
+            && hold_critical >= HOLD_FLOOD_MIN
+            && (hold_critical as f64) >= HOLD_FLOOD_FRAC * rep.hold_endpoints as f64;
+        Some(MarginAdvisory {
+            achievable_ns: achievable,
+            max_freq_mhz,
+            target_freq_mhz: 1000.0 / period_ns,
+            over_margin_ratio,
+            hold_critical,
+            warn: over_margin && hold_flood,
+        })
+    }
+}
+
 /// Render a human-readable timing report.
 pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
     let mut s = String::new();
@@ -218,6 +287,33 @@ pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
             s.push_str(&format!("    {:9.4}  {:7.4}   {}\n", p.arrival, p.slew, p.label));
         }
     }
+    // Timing-health advisory: achievable clock + over-margin / hold-flood warning (#10).
+    if let Some(adv) = MarginAdvisory::compute(job.period_ns, rep) {
+        match adv.max_freq_mhz {
+            Some(f) => s.push_str(&format!(
+                "\n  achievable: ~{:.3} ns → ~{:.1} MHz   (target {:.3} ns → ~{:.1} MHz)\n",
+                adv.achievable_ns, f, job.period_ns, adv.target_freq_mhz
+            )),
+            None => s.push_str(&format!(
+                "\n  achievable: critical path ≈ 0 at this clock   (target {:.3} ns → ~{:.1} MHz)\n",
+                job.period_ns, adv.target_freq_mhz
+            )),
+        }
+        if adv.warn {
+            let ratio = adv
+                .over_margin_ratio
+                .map(|r| format!("~{r:.1}× faster than clocked"))
+                .unwrap_or_else(|| "far faster than clocked".to_string());
+            let freq = adv
+                .max_freq_mhz
+                .map(|f| format!("~{f:.1} MHz"))
+                .unwrap_or_else(|| "a higher frequency".to_string());
+            s.push_str(&format!(
+                "  WARNING: over-margin — design closes {ratio} ({:.3} ns achievable vs {:.3} ns target);\n           {} of {} hold endpoints are hold-critical (≤ {:.2} ns) → expect a heavy hold-fix / buffer-budget burden.\n           Consider a faster clock ({freq} achievable) or accept the hold-fix cost.\n",
+                adv.achievable_ns, job.period_ns, adv.hold_critical, rep.hold_endpoints, HOLD_CRIT_MARGIN_NS
+            ));
+        }
+    }
     s
 }
 
@@ -239,6 +335,21 @@ pub fn report_json(job: &StaJob, rep: &TimingReport) -> String {
     s.push_str(&format!("\"whs_ns\":{},", num(rep.whs)));
     s.push_str(&format!("\"ths_ns\":{},", num(rep.ths)));
     s.push_str(&format!("\"hold_met\":{},", rep.hold_endpoints > 0 && rep.whs >= 0.0));
+    // Timing-health advisory (#10): achievable clock + over-margin / hold-flood warning.
+    if let Some(adv) = MarginAdvisory::compute(job.period_ns, rep) {
+        s.push_str(&format!("\"achievable_period_ns\":{:.6},", adv.achievable_ns));
+        s.push_str(&format!(
+            "\"max_freq_mhz\":{},",
+            adv.max_freq_mhz.map(|f| format!("{f:.3}")).unwrap_or_else(|| "null".into())
+        ));
+        s.push_str(&format!("\"target_freq_mhz\":{:.3},", adv.target_freq_mhz));
+        s.push_str(&format!(
+            "\"over_margin_ratio\":{},",
+            adv.over_margin_ratio.map(|r| format!("{r:.3}")).unwrap_or_else(|| "null".into())
+        ));
+        s.push_str(&format!("\"hold_critical_endpoints\":{},", adv.hold_critical));
+        s.push_str(&format!("\"over_margin_warning\":{},", adv.warn));
+    }
     s.push_str(&format!("\"worst_hold_endpoint\":{:?},", rep.worst_hold_endpoint));
     s.push_str(&format!("\"worst_endpoint\":{:?},", rep.worst_endpoint));
     s.push_str("\"worst_path\":[");
