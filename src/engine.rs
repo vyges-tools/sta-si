@@ -93,10 +93,21 @@ pub fn demo() -> (StaJob, TimingReport) {
 
 /// Load the job's netlist + (merged) Liberty and run STA.
 pub fn analyze_job(job: &StaJob) -> Result<TimingReport, StaError> {
+    analyze_job_opts(job, crate::liberty::LibOpts::default())
+}
+
+/// Like [`analyze_job`] but with explicit Liberty load options — e.g. `skip_ccs`
+/// for `--liberty-nldm-only`. CCS pruning is a load-time choice (not job state), so
+/// it is a parameter here rather than a field on [`StaJob`].
+pub fn analyze_job_opts(
+    job: &StaJob,
+    lib_opts: crate::liberty::LibOpts,
+) -> Result<TimingReport, StaError> {
     let nl = netlist::load(&job.resolve(&job.netlist)).map_err(|e| StaError::Parse(e.to_string()))?;
     let mut lib = Lib::default();
     for l in &job.libs {
-        let one = Lib::load(&job.resolve(l)).map_err(|e| StaError::Parse(e.to_string()))?;
+        let one = Lib::load_opts(&job.resolve(l), lib_opts)
+            .map_err(|e| StaError::Parse(e.to_string()))?;
         lib.cells.extend(one.cells); // later libs override earlier on name clash
     }
     if lib.cells.is_empty() {
@@ -112,10 +123,19 @@ pub fn analyze_job(job: &StaJob) -> Result<TimingReport, StaError> {
 /// Emit an SDF back-annotation file for the job's design (loads the same Liberty
 /// + netlist + SPEF as [`analyze_job`]).
 pub fn sdf_for_job(job: &StaJob) -> Result<String, StaError> {
+    sdf_for_job_opts(job, crate::liberty::LibOpts::default())
+}
+
+/// Like [`sdf_for_job`] but with explicit Liberty load options (`skip_ccs`).
+pub fn sdf_for_job_opts(
+    job: &StaJob,
+    lib_opts: crate::liberty::LibOpts,
+) -> Result<String, StaError> {
     let nl = netlist::load(&job.resolve(&job.netlist)).map_err(|e| StaError::Parse(e.to_string()))?;
     let mut lib = Lib::default();
     for l in &job.libs {
-        let one = Lib::load(&job.resolve(l)).map_err(|e| StaError::Parse(e.to_string()))?;
+        let one = Lib::load_opts(&job.resolve(l), lib_opts)
+            .map_err(|e| StaError::Parse(e.to_string()))?;
         lib.cells.extend(one.cells);
     }
     if lib.cells.is_empty() {
@@ -402,11 +422,11 @@ impl McmmReport {
 
 /// Run every scenario `.sta` listed in the MCMM job and collect the results.
 /// Each scenario is a full, independent STA (own corner libs, derates, clock).
-pub fn analyze_mcmm(job: &StaJob) -> Result<McmmReport, StaError> {
+pub fn analyze_mcmm(job: &StaJob, lib_opts: crate::liberty::LibOpts) -> Result<McmmReport, StaError> {
     let mut scenarios = Vec::new();
     for s in &job.scenarios {
         let sub = StaJob::load(&job.resolve(s)).map_err(|e| StaError::Parse(e.to_string()))?;
-        let report = analyze_job(&sub)?;
+        let report = analyze_job_opts(&sub, lib_opts)?; // CLI knob propagates to every corner
         // Label the row by the scenario file (the corner identity, e.g. `ss_n40C_1v60`),
         // not the design name — every scenario shares the same design.
         scenarios.push(ScenarioResult { name: scenario_label(s), period_ns: sub.period_ns, report });

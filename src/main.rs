@@ -40,6 +40,8 @@ flags:
   --fail-on-violation   exit 3 if WNS < 0 (CI timing gate)
   --pdk NAME           resolve liberty from pdk-store (lib) when the job has none
   --corner C           PDK corner for --pdk (default: the PDK's default corner)
+  --liberty-nldm-only   skip CCS (receiver_capacitance + output_current) at Liberty
+                        load — faster/smaller for NLDM-only runs; forces the NLDM delay path
   --sdf FILE            also write an SDF back-annotation file (IOPATH + setup/hold,
                         + INTERCONNECT from SPEF) — feeds gate-level / back-annotated sim
   -q, --quiet           suppress non-essential output
@@ -87,6 +89,7 @@ struct Cli {
     star: bool,
     pdk: Option<String>,
     corner: Option<String>,
+    nldm_only: bool,
 }
 
 /// Resolve a PDK collateral key (e.g. `lib`) to a concrete path via the installed
@@ -141,6 +144,7 @@ fn parse_cli(args: &[String]) -> Cli {
                 c.corner = args.get(i + 1).cloned();
                 i += 1;
             }
+            "--liberty-nldm-only" => c.nldm_only = true,
             "-q" | "--quiet" => c.quiet = true,
             "-v" | "--verbose" => c.verbose = true,
             "-h" | "--help" => c.help = true,
@@ -382,7 +386,7 @@ fn main() {
   "summary": "static timing analysis with signal integrity (job → report)",
   "invocation": {
     "args_template": ["run", "{job}"],
-    "optional": [ { "arg": "sdf", "flag": "--sdf" } ],
+    "optional": [ { "arg": "sdf", "flag": "--sdf" }, { "arg": "nldm_only", "flag": "--liberty-nldm-only" } ],
     "emits_json": true
   },
   "inputs": {
@@ -458,6 +462,9 @@ fn main() {
                     exit(2);
                 }
             };
+            // --liberty-nldm-only: skip CCS at Liberty load (parse-time). Load-time
+            // option, threaded to the analysis rather than stored on the job.
+            let lib_opts = vyges_sta_si::liberty::LibOpts { skip_ccs: cli.nldm_only };
             // no liberty in the job? resolve it from --pdk via pdk-store (`lib`,
             // for --corner or the PDK default corner).
             if job.libs.is_empty() {
@@ -475,7 +482,7 @@ fn main() {
                 if cli.verbose {
                     eprintln!("MCMM: {} scenario(s)", job.scenarios.len());
                 }
-                match engine::analyze_mcmm(&job) {
+                match engine::analyze_mcmm(&job, lib_opts) {
                     Ok(rep) => emit_mcmm(&job, &rep, &cli),
                     Err(e) => {
                         eprintln!("error: {e}");
@@ -505,7 +512,7 @@ fn main() {
                 }
             }
             if let Some(sdf_out) = &cli.sdf {
-                match engine::sdf_for_job(&job) {
+                match engine::sdf_for_job_opts(&job, lib_opts) {
                     Ok(text) => {
                         if let Err(e) = std::fs::write(sdf_out, &text) {
                             eprintln!("error: {sdf_out}: {e}");
@@ -521,7 +528,7 @@ fn main() {
                     }
                 }
             }
-            match engine::analyze_job(&job) {
+            match engine::analyze_job_opts(&job, lib_opts) {
                 Ok(rep) => emit(&job, &rep, &cli),
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -577,7 +584,10 @@ fn main() {
                     adapted.ignored.join(", ")
                 );
             }
-            match engine::analyze_job(&adapted.job) {
+            match engine::analyze_job_opts(
+                &adapted.job,
+                vyges_sta_si::liberty::LibOpts { skip_ccs: cli.nldm_only },
+            ) {
                 Ok(rep) => emit_tcl(&adapted.job, &rep, &adapted.reports, &cli),
                 Err(e) => {
                     eprintln!("error: {e}");

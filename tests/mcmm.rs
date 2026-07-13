@@ -41,7 +41,7 @@ fn runs_committed_icsprout55_mcmm_job() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/icsprout55/mcmm.sta");
     let job = StaJob::load(path).expect("load mcmm.sta");
     assert!(job.is_mcmm(), "should be detected as MCMM");
-    let m = analyze_mcmm(&job).expect("analyze");
+    let m = analyze_mcmm(&job, Default::default()).expect("analyze");
     assert_eq!(m.scenarios.len(), 3, "ss/tt/ff");
     // setup binds at the SLOW corner (slowest paths). Rows are labelled by the
     // scenario file stem (the corner identity), not the shared design name.

@@ -1,7 +1,8 @@
 //! End-to-end: the example design runs offline (v0 is pure-std, no subprocess).
 
-use vyges_sta_si::engine::{analyze_job, render_report, MarginAdvisory};
+use vyges_sta_si::engine::{analyze_job, analyze_job_opts, render_report, MarginAdvisory};
 use vyges_sta_si::job::StaJob;
+use vyges_sta_si::liberty::LibOpts;
 use vyges_sta_si::sta::TimingReport;
 
 #[test]
@@ -95,4 +96,21 @@ fn advisory_handles_near_combinational_and_no_endpoints() {
     let mut empty = synthetic_report(0.0, 0, 0);
     empty.endpoints = 0;
     assert!(MarginAdvisory::compute(40.0, &empty).is_none());
+}
+
+// ---- CCS pruning / --liberty-nldm-only (#33) ----------------------------
+
+#[test]
+fn nldm_only_is_bit_identical_on_a_nldm_lib() {
+    // The example lib carries no CCS, so skipping CCS at load must be a no-op —
+    // this is the acceptance regression: bit-identical STA for NLDM runs.
+    let p = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/top/top.sta");
+    let job = StaJob::load(p).unwrap();
+    let full = analyze_job(&job).unwrap();
+    let nldm = analyze_job_opts(&job, LibOpts { skip_ccs: true }).unwrap();
+
+    assert_eq!(full.wns.to_bits(), nldm.wns.to_bits());
+    assert_eq!(full.tns.to_bits(), nldm.tns.to_bits());
+    assert_eq!(full.endpoints, nldm.endpoints);
+    assert_eq!(full.worst_endpoint, nldm.worst_endpoint);
 }
