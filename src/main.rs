@@ -405,6 +405,11 @@ fn main() {
     }
   },
   "artifacts": [ { "role": "timing_report" }, { "role": "sdf", "from_arg": "sdf" } ],
+  "assertion": {
+    "id": "timing-met",
+    "field": "timing_met",
+    "pass_when": { "is_true": true }
+  },
   "consumes": ["netlist", "liberty", "spef"]
 }
 "#;

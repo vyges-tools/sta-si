@@ -375,6 +375,23 @@ pub fn report_json(job: &StaJob, rep: &TimingReport) -> String {
     s.push_str(&format!("\"whs_ns\":{},", num(rep.whs)));
     s.push_str(&format!("\"ths_ns\":{},", num(rep.ths)));
     s.push_str(&format!("\"hold_met\":{},", rep.hold_endpoints > 0 && rep.whs >= 0.0));
+    // The single timing verdict, over both checks. `met` covers setup only, so a
+    // consumer reading it alone would call a design timing-clean while it still
+    // carried hold violations.
+    //
+    // Tri-state on purpose. `met`/`hold_met` are false both for a real violation
+    // and for "that check analyzed nothing", which are very different facts. Here
+    // they are kept apart: each check contributes only when it has endpoints, and
+    // when neither does, the verdict is `null` — no timing evidence was produced,
+    // which is not the same as failing.
+    let setup_ok = rep.endpoints == 0 || rep.wns >= 0.0;
+    let hold_ok = rep.hold_endpoints == 0 || rep.whs >= 0.0;
+    let timing_met = if rep.endpoints == 0 && rep.hold_endpoints == 0 {
+        "null".to_string()
+    } else {
+        (setup_ok && hold_ok).to_string()
+    };
+    s.push_str(&format!("\"timing_met\":{timing_met},"));
     // Timing-health advisory (#10): achievable clock + over-margin / hold-flood warning.
     if let Some(adv) = MarginAdvisory::compute(job.period_ns, rep) {
         s.push_str(&format!("\"achievable_period_ns\":{:.6},", adv.achievable_ns));
