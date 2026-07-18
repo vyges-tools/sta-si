@@ -25,13 +25,22 @@ fn timing_met_spans_setup_and_hold() {
     rep.whs = -0.05;
     let j = report_json(&job, &rep);
     assert!(j.contains("\"met\":true"), "setup unaffected: {j}");
-    assert!(j.contains("\"timing_met\":false"), "hold violation must fail the verdict: {j}");
+    assert!(
+        j.contains("\"timing_met\":false"),
+        "hold violation must fail the verdict: {j}"
+    );
 
     // Nothing analyzed at all → no evidence, so no verdict (not a failure).
     rep = clean;
     rep.endpoints = 0;
     rep.hold_endpoints = 0;
     let j = report_json(&job, &rep);
-    assert!(j.contains("\"met\":false"), "met collapses no-endpoints to false: {j}");
-    assert!(j.contains("\"timing_met\":null"), "no evidence is not a failure: {j}");
+    assert!(
+        j.contains("\"met\":false"),
+        "met collapses no-endpoints to false: {j}"
+    );
+    assert!(
+        j.contains("\"timing_met\":null"),
+        "no evidence is not a failure: {j}"
+    );
 }

@@ -44,10 +44,18 @@ pub struct Finding {
 
 impl Finding {
     fn err(code: &'static str, message: String) -> Finding {
-        Finding { severity: Severity::Error, code, message }
+        Finding {
+            severity: Severity::Error,
+            code,
+            message,
+        }
     }
     fn warn(code: &'static str, message: String) -> Finding {
-        Finding { severity: Severity::Warning, code, message }
+        Finding {
+            severity: Severity::Warning,
+            code,
+            message,
+        }
     }
 }
 
@@ -58,10 +66,16 @@ pub struct LintReport {
 
 impl LintReport {
     pub fn errors(&self) -> usize {
-        self.findings.iter().filter(|f| f.severity == Severity::Error).count()
+        self.findings
+            .iter()
+            .filter(|f| f.severity == Severity::Error)
+            .count()
     }
     pub fn warnings(&self) -> usize {
-        self.findings.iter().filter(|f| f.severity == Severity::Warning).count()
+        self.findings
+            .iter()
+            .filter(|f| f.severity == Severity::Warning)
+            .count()
     }
 }
 
@@ -81,20 +95,32 @@ pub fn lint(nl: &Netlist, sdc: &Sdc, lib: &Lib) -> LintReport {
     }
 
     // --- clocks -------------------------------------------------------------
-    let has_registers = nl.insts.iter().any(|i| lib.cells.get(&i.cell).map(|c| c.is_seq).unwrap_or(false));
+    let has_registers = nl
+        .insts
+        .iter()
+        .any(|i| lib.cells.get(&i.cell).map(|c| c.is_seq).unwrap_or(false));
     if sdc.clocks.is_empty() && has_registers {
-        f.push(Finding::err("no-clock", "design has registers but the SDC defines no clocks".into()));
+        f.push(Finding::err(
+            "no-clock",
+            "design has registers but the SDC defines no clocks".into(),
+        ));
     }
 
     let mut by_name: BTreeMap<&str, u32> = BTreeMap::new();
     let mut by_source: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for c in &sdc.clocks {
         *by_name.entry(c.name.as_str()).or_default() += 1;
-        by_source.entry(c.source.as_str()).or_default().push(c.name.as_str());
+        by_source
+            .entry(c.source.as_str())
+            .or_default()
+            .push(c.name.as_str());
         if c.period <= 0.0 {
             f.push(Finding::err(
                 "clock-period",
-                format!("clock `{}` has a non-positive period ({} ns)", c.name, c.period),
+                format!(
+                    "clock `{}` has a non-positive period ({} ns)",
+                    c.name, c.period
+                ),
             ));
         }
         // a clock whose source is neither a port nor any known net (and not an
@@ -103,20 +129,30 @@ pub fn lint(nl: &Netlist, sdc: &Sdc, lib: &Lib) -> LintReport {
         if !s.contains('/') && !nets.contains(s) {
             f.push(Finding::warn(
                 "clock-source",
-                format!("clock `{}` source `{}` is not a port or net in the design", c.name, s),
+                format!(
+                    "clock `{}` source `{}` is not a port or net in the design",
+                    c.name, s
+                ),
             ));
         }
     }
     for (name, n) in by_name {
         if n > 1 {
-            f.push(Finding::err("dup-clock-name", format!("clock `{name}` is defined {n} times")));
+            f.push(Finding::err(
+                "dup-clock-name",
+                format!("clock `{name}` is defined {n} times"),
+            ));
         }
     }
     for (src, names) in by_source {
         if names.len() > 1 {
             f.push(Finding::warn(
                 "dup-clock-source",
-                format!("source `{src}` carries {} clocks: {}", names.len(), names.join(", ")),
+                format!(
+                    "source `{src}` carries {} clocks: {}",
+                    names.len(),
+                    names.join(", ")
+                ),
             ));
         }
     }
@@ -127,10 +163,16 @@ pub fn lint(nl: &Netlist, sdc: &Sdc, lib: &Lib) -> LintReport {
     // --- input / output delay coverage -------------------------------------
     let in_default = sdc.input_delays.iter().any(|d| d.default);
     let out_default = sdc.output_delays.iter().any(|d| d.default);
-    let in_ports: BTreeSet<&str> =
-        sdc.input_delays.iter().flat_map(|d| d.ports.iter().map(String::as_str)).collect();
-    let out_ports: BTreeSet<&str> =
-        sdc.output_delays.iter().flat_map(|d| d.ports.iter().map(String::as_str)).collect();
+    let in_ports: BTreeSet<&str> = sdc
+        .input_delays
+        .iter()
+        .flat_map(|d| d.ports.iter().map(String::as_str))
+        .collect();
+    let out_ports: BTreeSet<&str> = sdc
+        .output_delays
+        .iter()
+        .flat_map(|d| d.ports.iter().map(String::as_str))
+        .collect();
 
     for p in &nl.inputs {
         let p = p.as_str();
@@ -138,22 +180,34 @@ pub fn lint(nl: &Netlist, sdc: &Sdc, lib: &Lib) -> LintReport {
             continue; // a clock input, not a data input
         }
         if !in_default && !in_ports.contains(p) {
-            f.push(Finding::warn("unconstrained-input", format!("input `{p}` has no set_input_delay")));
+            f.push(Finding::warn(
+                "unconstrained-input",
+                format!("input `{p}` has no set_input_delay"),
+            ));
         }
     }
     for p in &nl.outputs {
         let p = p.as_str();
         if !out_default && !out_ports.contains(p) {
-            f.push(Finding::warn("unconstrained-output", format!("output `{p}` has no set_output_delay")));
+            f.push(Finding::warn(
+                "unconstrained-output",
+                format!("output `{p}` has no set_output_delay"),
+            ));
         }
     }
 
     // an explicit delay targeting a port the design doesn't have
     for p in in_ports.iter().filter(|p| !inputs.contains(**p)) {
-        f.push(Finding::warn("delay-unknown-port", format!("set_input_delay targets `{p}`, not an input of the design")));
+        f.push(Finding::warn(
+            "delay-unknown-port",
+            format!("set_input_delay targets `{p}`, not an input of the design"),
+        ));
     }
     for p in out_ports.iter().filter(|p| !outputs.contains(**p)) {
-        f.push(Finding::warn("delay-unknown-port", format!("set_output_delay targets `{p}`, not an output of the design")));
+        f.push(Finding::warn(
+            "delay-unknown-port",
+            format!("set_output_delay targets `{p}`, not an output of the design"),
+        ));
     }
 
     f.sort_by(|a, b| (a.severity as u8, a.code).cmp(&(b.severity as u8, b.code)));
@@ -193,7 +247,10 @@ mod tests {
     fn registers_without_a_clock_is_an_error() {
         let sdc = Sdc::parse("set_input_delay 1 [all_inputs]\n").unwrap();
         let r = lint(&nl(), &sdc, &lib());
-        assert!(r.findings.iter().any(|f| f.code == "no-clock" && f.severity == Severity::Error));
+        assert!(r
+            .findings
+            .iter()
+            .any(|f| f.code == "no-clock" && f.severity == Severity::Error));
     }
 
     #[test]
@@ -213,7 +270,7 @@ mod tests {
         // clock present, but no input/output delays at all, and a stray clock source
         let sdc = Sdc::parse("create_clock -name clk -period 10 [get_ports clk]\n").unwrap();
         let r = lint(&nl(), &sdc, &lib());
-        assert!(r.findings.iter().any(|f| f.code == "unconstrained-input"));  // din
+        assert!(r.findings.iter().any(|f| f.code == "unconstrained-input")); // din
         assert!(r.findings.iter().any(|f| f.code == "unconstrained-output")); // dout
         assert_eq!(r.errors(), 0);
     }

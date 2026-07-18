@@ -51,7 +51,10 @@ impl std::fmt::Display for StaError {
             StaError::Io(m) => write!(f, "io error: {m}"),
             StaError::UnknownCell(c) => write!(f, "cell not in any .lib: {c}"),
             StaError::CombinationalLoop => {
-                write!(f, "combinational loop (sequential timing not modeled in v0)")
+                write!(
+                    f,
+                    "combinational loop (sequential timing not modeled in v0)"
+                )
             }
             StaError::SiNotModeled => write!(f, "SI/crosstalk not modeled in v0"),
         }
@@ -74,11 +77,10 @@ fn is_power_pin(pin: &str) -> bool {
     let p = pin.trim_start_matches('\\').to_ascii_uppercase();
     const RAILS: &[&str] = &[
         "VPWR", "VGND", "VPB", "VNB", // sky130 std cell
-        "VDD", "VSS", "VDDA", "VSSA", "VCC", "VEE", "VPP", "GND", "VNEG",
-        "VCCD", "VCCD1", "VCCD2", "VSSD", "VSSD1", "VSSD2",
-        "VDDIO", "VSSIO", "VDDPST", "VSSPST", "KAPWR", "VSWITCH", "VCCHIB",
-        "VNW", "VPW", "VNWELL", "VPWELL", "VWELL", "VSUBS", // wells / substrate
-        "VBP", "VBN", "VBB", "VBG", "VB", "VBODY",          // body bias
+        "VDD", "VSS", "VDDA", "VSSA", "VCC", "VEE", "VPP", "GND", "VNEG", "VCCD", "VCCD1", "VCCD2",
+        "VSSD", "VSSD1", "VSSD2", "VDDIO", "VSSIO", "VDDPST", "VSSPST", "KAPWR", "VSWITCH",
+        "VCCHIB", "VNW", "VPW", "VNWELL", "VPWELL", "VWELL", "VSUBS", // wells / substrate
+        "VBP", "VBN", "VBB", "VBG", "VB", "VBODY", // body bias
         "AVDD", "AVSS", "DVDD", "DVSS", "VPWRIN",
     ];
     RAILS.contains(&p.as_str())
@@ -121,14 +123,14 @@ pub struct PathNode {
 
 #[derive(Debug, Clone)]
 pub struct TimingReport {
-    pub wns: f64,           // setup worst negative slack (ns); >0 means met
-    pub tns: f64,           // setup total negative slack over endpoints (ns)
+    pub wns: f64, // setup worst negative slack (ns); >0 means met
+    pub tns: f64, // setup total negative slack over endpoints (ns)
     pub endpoints: usize,
     pub worst_endpoint: String,
     pub worst_path: Vec<PathNode>,
     // hold (early / min-delay path) — only meaningful when there are flop endpoints
-    pub whs: f64,           // worst hold slack (ns); >0 means met
-    pub ths: f64,           // total hold negative slack (ns)
+    pub whs: f64, // worst hold slack (ns); >0 means met
+    pub ths: f64, // total hold negative slack (ns)
     pub hold_endpoints: usize,
     pub worst_hold_endpoint: String,
     pub worst_hold_path: Vec<PathNode>,
@@ -192,7 +194,11 @@ impl Timing {
         endpoint_req: &[f64],
     ) -> Timing {
         Timing {
-            label2idx: labels.iter().enumerate().map(|(i, l)| (l.clone(), i)).collect(),
+            label2idx: labels
+                .iter()
+                .enumerate()
+                .map(|(i, l)| (l.clone(), i))
+                .collect(),
             labels: labels.to_vec(),
             is_endpoint: is_endpoint.to_vec(),
             excluded_setup: excluded_setup.to_vec(),
@@ -317,7 +323,11 @@ impl Timer {
     }
     /// Latest (setup / late) arrival time at `p`, ns.
     pub fn arrival(&self, p: PinId) -> f64 {
-        self.timing.arrival.get(p).copied().unwrap_or(f64::NEG_INFINITY)
+        self.timing
+            .arrival
+            .get(p)
+            .copied()
+            .unwrap_or(f64::NEG_INFINITY)
     }
     /// Earliest (hold / early) arrival time at `p`, ns.
     pub fn arrival_min(&self, p: PinId) -> f64 {
@@ -376,27 +386,32 @@ impl Timer {
     /// the *last updated* state until then.
     pub fn stage(&mut self, m: Move) -> bool {
         match m {
-            Move::Resize { inst, cell } => match self.nl.insts.iter_mut().find(|i| i.name == inst) {
-                Some(i) => {
-                    let old = i.cell.clone();
-                    i.cell = cell.clone();
-                    // record the move for the incremental path, preserving the cell as of the
-                    // last update as the "original" so repeated stages of one instance coalesce.
-                    self.pending
-                        .entry(inst)
-                        .and_modify(|e| e.1 = cell.clone())
-                        .or_insert((old, cell));
-                    self.dirty = true;
-                    true
+            Move::Resize { inst, cell } => {
+                match self.nl.insts.iter_mut().find(|i| i.name == inst) {
+                    Some(i) => {
+                        let old = i.cell.clone();
+                        i.cell = cell.clone();
+                        // record the move for the incremental path, preserving the cell as of the
+                        // last update as the "original" so repeated stages of one instance coalesce.
+                        self.pending
+                            .entry(inst)
+                            .and_modify(|e| e.1 = cell.clone())
+                            .or_insert((old, cell));
+                        self.dirty = true;
+                        true
+                    }
+                    None => false,
                 }
-                None => false,
-            },
+            }
         }
     }
 
     /// Convenience for the common move: swap `inst`'s library cell (resize / Vt-swap).
     pub fn resize(&mut self, inst: &str, cell: &str) -> bool {
-        self.stage(Move::Resize { inst: inst.to_string(), cell: cell.to_string() })
+        self.stage(Move::Resize {
+            inst: inst.to_string(),
+            cell: cell.to_string(),
+        })
     }
 
     /// Whether a staged mutation is pending an [`update`](Self::update).
@@ -511,8 +526,12 @@ fn build_report(
     let mut key2idx: HashMap<String, usize> = HashMap::new();
     let mut is_endpoint: Vec<bool> = Vec::new();
 
-    let node = |key: String, label: String, key2idx: &mut HashMap<String, usize>,
-                    labels: &mut Vec<String>, is_endpoint: &mut Vec<bool>| -> usize {
+    let node = |key: String,
+                label: String,
+                key2idx: &mut HashMap<String, usize>,
+                labels: &mut Vec<String>,
+                is_endpoint: &mut Vec<bool>|
+     -> usize {
         if let Some(&i) = key2idx.get(&key) {
             return i;
         }
@@ -529,13 +548,23 @@ fn build_report(
     // ---- pass 1: nodes + nets -------------------------------------------
     let mut nets: HashMap<String, Net> = HashMap::new();
     let ensure_net = |nets: &mut HashMap<String, Net>, n: &str| {
-        nets.entry(n.to_string()).or_insert(Net { driver: None, sinks: Vec::new(), load: 0.0 });
+        nets.entry(n.to_string()).or_insert(Net {
+            driver: None,
+            sinks: Vec::new(),
+            load: 0.0,
+        });
     };
 
     // primary input ports drive a net of the same name
     let mut input_ports: Vec<(usize, String)> = Vec::new();
     for p in &nl.inputs {
-        let idx = node(port_key(p), p.clone(), &mut key2idx, &mut labels, &mut is_endpoint);
+        let idx = node(
+            port_key(p),
+            p.clone(),
+            &mut key2idx,
+            &mut labels,
+            &mut is_endpoint,
+        );
         ensure_net(&mut nets, p);
         nets.get_mut(p).unwrap().driver = Some(idx);
         input_ports.push((idx, p.clone()));
@@ -543,7 +572,13 @@ fn build_report(
     // primary output ports are endpoints + sinks of their net
     let mut output_ports: Vec<(usize, String)> = Vec::new();
     for p in &nl.outputs {
-        let idx = node(port_key(p), p.clone(), &mut key2idx, &mut labels, &mut is_endpoint);
+        let idx = node(
+            port_key(p),
+            p.clone(),
+            &mut key2idx,
+            &mut labels,
+            &mut is_endpoint,
+        );
         is_endpoint[idx] = true;
         ensure_net(&mut nets, p);
         let net = nets.get_mut(p).unwrap();
@@ -655,8 +690,11 @@ fn build_report(
         let Some(cell) = lib.cell(&inst.cell) else {
             continue; // physical-only cell skipped in pass 1
         };
-        let conn: HashMap<&str, &str> =
-            inst.conns.iter().map(|(p, net)| (p.as_str(), net.as_str())).collect();
+        let conn: HashMap<&str, &str> = inst
+            .conns
+            .iter()
+            .map(|(p, net)| (p.as_str(), net.as_str()))
+            .collect();
         for (opin, pininfo) in &cell.pins {
             if pininfo.direction != Dir::Out || !conn.contains_key(opin.as_str()) {
                 continue;
@@ -667,15 +705,21 @@ fn build_report(
                     continue;
                 }
                 let i_idx = key2idx[&pin_key(&inst.name, &arc.related_pin)];
-                out_edges[i_idx].push(Edge { to: o_idx, kind: EdgeKind::Cell(Box::new(arc.clone())) });
+                out_edges[i_idx].push(Edge {
+                    to: o_idx,
+                    kind: EdgeKind::Cell(Box::new(arc.clone())),
+                });
                 indeg[o_idx] += 1;
             }
         }
     }
     // index the nets so net arcs can look up a (mutable, per-pass) delay table
     let net_order: Vec<String> = nets.keys().cloned().collect();
-    let net_idx: HashMap<&str, usize> =
-        net_order.iter().enumerate().map(|(i, nm)| (nm.as_str(), i)).collect();
+    let net_idx: HashMap<&str, usize> = net_order
+        .iter()
+        .enumerate()
+        .map(|(i, nm)| (nm.as_str(), i))
+        .collect();
     let nn = net_order.len();
     let mut net_res = vec![0.0f64; nn];
     let mut net_cap = vec![0.0f64; nn];
@@ -683,7 +727,9 @@ fn build_report(
     let mut net_drv_ip: Vec<Option<(String, String)>> = vec![None; nn]; // driver (inst, pin)
     let mut net_cpl: Vec<Vec<(usize, f64)>> = vec![Vec::new(); nn]; // (aggressor net idx, Cc)
     let ip_of = |node: usize| -> Option<(String, String)> {
-        labels[node].split_once('/').map(|(a, b)| (a.to_string(), b.to_string()))
+        labels[node]
+            .split_once('/')
+            .map(|(a, b)| (a.to_string(), b.to_string()))
     };
     for (name, net) in &nets {
         let i = net_idx[name.as_str()];
@@ -732,8 +778,14 @@ fn build_report(
             for &s in &net.sinks {
                 if s != d {
                     let aid = arcs.len();
-                    arcs.push(ArcInfo { net_idx: i, sink_ip: ip_of(s) });
-                    out_edges[d].push(Edge { to: s, kind: EdgeKind::Net(aid) });
+                    arcs.push(ArcInfo {
+                        net_idx: i,
+                        sink_ip: ip_of(s),
+                    });
+                    out_edges[d].push(Edge {
+                        to: s,
+                        kind: EdgeKind::Net(aid),
+                    });
                     indeg[s] += 1;
                 }
             }
@@ -753,7 +805,9 @@ fn build_report(
     // auto-enables (the more accurate) POCV even without a global pocv_sigma.
     let has_lvf = lib.cells.values().any(|c| {
         c.pins.values().any(|p| {
-            p.arcs.iter().any(|a| !a.sigma_rise.values.is_empty() || !a.sigma_fall.values.is_empty())
+            p.arcs
+                .iter()
+                .any(|a| !a.sigma_rise.values.is_empty() || !a.sigma_fall.values.is_empty())
         })
     });
     let pocv = job.pocv_sigma > 0.0 || has_lvf;
@@ -769,7 +823,14 @@ fn build_report(
     // per-cell-stage derate on the nominal delay (1.0 for POCV — it uses sigma)
     let cell_derate = |late: bool, stage: usize| -> f64 {
         if aocv {
-            aocv_lookup(if late { &job.aocv_late } else { &job.aocv_early }, stage as f64)
+            aocv_lookup(
+                if late {
+                    &job.aocv_late
+                } else {
+                    &job.aocv_early
+                },
+                stage as f64,
+            )
         } else if pocv {
             1.0
         } else if late {
@@ -792,8 +853,23 @@ fn build_report(
     let input_slew = job.input_slew;
     // `nd` = per-arc net delay, `ns` = per-arc degraded sink slew (0 = keep driver slew).
     #[allow(clippy::type_complexity)]
-    let relax = |nd: &[f64], ns: &[f64], late: bool| -> (Vec<f64>, Vec<f64>, Vec<Option<usize>>, Vec<usize>, Vec<[f64; 2]>, Vec<[f64; 2]>, Vec<[Option<usize>; 2]>) {
-        let init = if late { f64::NEG_INFINITY } else { f64::INFINITY };
+    let relax = |nd: &[f64],
+                 ns: &[f64],
+                 late: bool|
+     -> (
+        Vec<f64>,
+        Vec<f64>,
+        Vec<Option<usize>>,
+        Vec<usize>,
+        Vec<[f64; 2]>,
+        Vec<[f64; 2]>,
+        Vec<[Option<usize>; 2]>,
+    ) {
+        let init = if late {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
         let mut arr = vec![[init; 2]; n]; // per-lane metric (derated / +-N*sigma)
         let mut arr_nom = vec![[0.0f64; 2]; n];
         let mut var = vec![[0.0f64; 2]; n];
@@ -829,15 +905,21 @@ fn build_report(
                                 continue;
                             }
                             let metric = a + d; // band carries (no new variance)
-                            let better =
-                                if late { metric > arr[v][l] } else { metric < arr[v][l] };
+                            let better = if late {
+                                metric > arr[v][l]
+                            } else {
+                                metric < arr[v][l]
+                            };
                             if better {
                                 arr[v][l] = metric;
                                 arr_nom[v][l] = arr_nom[u][l] + d;
                                 var[v][l] = var[u][l];
                                 depth[v][l] = depth[u][l];
-                                slew[v][l] =
-                                    if sink_slew > 0.0 { sink_slew } else { slew[u][l] };
+                                slew[v][l] = if sink_slew > 0.0 {
+                                    sink_slew
+                                } else {
+                                    slew[u][l]
+                                };
                                 from[v][l] = Some(u);
                             }
                         }
@@ -868,12 +950,11 @@ fn build_report(
                                 // shielding), iterating Ceff <-> output transition to a
                                 // self-consistent point rather than a single lumped pass.
                                 let leff = match shield[v] {
-                                    Some((c1, tau)) => crate::ccs::ceff_iter(
-                                        c1,
-                                        load - c1,
-                                        tau,
-                                        |c| st.lookup(sin, c),
-                                    ),
+                                    Some((c1, tau)) => {
+                                        crate::ccs::ceff_iter(c1, load - c1, tau, |c| {
+                                            st.lookup(sin, c)
+                                        })
+                                    }
                                     None => load,
                                 };
                                 // CCS current-source delay when the arc carries it; else NLDM.
@@ -892,7 +973,11 @@ fn build_report(
                                 let sigma = if !pocv {
                                     0.0
                                 } else {
-                                    let lvf = if ol == 0 { &arc.sigma_rise } else { &arc.sigma_fall };
+                                    let lvf = if ol == 0 {
+                                        &arc.sigma_rise
+                                    } else {
+                                        &arc.sigma_fall
+                                    };
                                     if !lvf.values.is_empty() {
                                         lvf.lookup(sin, leff)
                                     } else {
@@ -902,12 +987,19 @@ fn build_report(
                                 let var_c = var[u][il] + sigma * sigma;
                                 let metric = if pocv {
                                     let band = n_sigma * var_c.sqrt();
-                                    if late { nom + band } else { nom - band }
+                                    if late {
+                                        nom + band
+                                    } else {
+                                        nom - band
+                                    }
                                 } else {
                                     nom
                                 };
-                                let better =
-                                    if late { metric > arr[v][ol] } else { metric < arr[v][ol] };
+                                let better = if late {
+                                    metric > arr[v][ol]
+                                } else {
+                                    metric < arr[v][ol]
+                                };
                                 if better {
                                     arr[v][ol] = metric;
                                     arr_nom[v][ol] = nom;
@@ -929,7 +1021,11 @@ fn build_report(
         // collapse each node to its worst lane (max for late, min for early)
         let pick = |a: [f64; 2]| -> usize {
             if late {
-                if a[0] >= a[1] { 0 } else { 1 }
+                if a[0] >= a[1] {
+                    0
+                } else {
+                    1
+                }
             } else if a[0] <= a[1] {
                 0
             } else {
@@ -1011,7 +1107,10 @@ fn build_report(
                     }
                 }
                 // last resort: lumped Elmore (R·C) + lumped crosstalk (R·xtalk-cap)
-                (net_res[i] * net_cap[i] * 1e-6 + net_res[i] * xc[i] * 1e-6, 0.0)
+                (
+                    net_res[i] * net_cap[i] * 1e-6 + net_res[i] * xc[i] * 1e-6,
+                    0.0,
+                )
             })
             .unzip()
     };
@@ -1032,12 +1131,16 @@ fn build_report(
             }
             cycle_checked = true;
         }
-        let sw: Vec<f64> =
-            (0..nn).map(|i| net_drv[i].map(|d| arr[d]).unwrap_or(f64::NEG_INFINITY)).collect();
-        let net_slew: Vec<f64> =
-            (0..nn).map(|i| net_drv[i].map(|d| slw[d]).unwrap_or(0.0)).collect();
+        let sw: Vec<f64> = (0..nn)
+            .map(|i| net_drv[i].map(|d| arr[d]).unwrap_or(f64::NEG_INFINITY))
+            .collect();
+        let net_slew: Vec<f64> = (0..nn)
+            .map(|i| net_drv[i].map(|d| slw[d]).unwrap_or(0.0))
+            .collect();
         let (nd, ns) = compute(&sw, &net_slew);
-        let delta = (0..n_arcs).map(|k| (nd[k] - arc_d[k]).abs()).fold(0.0, f64::max);
+        let delta = (0..n_arcs)
+            .map(|k| (nd[k] - arc_d[k]).abs())
+            .fold(0.0, f64::max);
         arc_d = nd;
         arc_s = ns;
         if delta < SI_TOL {
@@ -1100,7 +1203,9 @@ fn build_report(
         if !crpr_on {
             return 0.0;
         }
-        common_point(lck, cck).map(|p| (arrival[p] - arr_min[p]).max(0.0)).unwrap_or(0.0)
+        common_point(lck, cck)
+            .map(|p| (arrival[p] - arr_min[p]).max(0.0))
+            .unwrap_or(0.0)
     };
 
     // ---- multi-clock: which clock reaches each flop, and the launch→capture
@@ -1111,7 +1216,10 @@ fn build_report(
     let eff_clocks: Vec<(String, f64)> = if job.clocks.is_empty() {
         vec![(job.clock_port.clone(), period)]
     } else {
-        job.clocks.iter().map(|(_, src, per)| (src.clone(), *per)).collect()
+        job.clocks
+            .iter()
+            .map(|(_, src, per)| (src.clone(), *per))
+            .collect()
     };
     let mut clock_src: HashMap<usize, f64> = HashMap::new();
     for (src, per) in &eff_clocks {
@@ -1145,7 +1253,9 @@ fn build_report(
     let mut clock_group_node: HashMap<usize, usize> = HashMap::new();
     if !group_of_name.is_empty() {
         for (name, src, _per) in job.clocks.iter() {
-            let Some(&gi) = group_of_name.get(name.as_str()) else { continue };
+            let Some(&gi) = group_of_name.get(name.as_str()) else {
+                continue;
+            };
             let node = match src.split_once('/') {
                 Some((inst, pin)) => key2idx.get(&pin_key(inst, pin)).copied(),
                 None => key2idx.get(&port_key(src)).copied(),
@@ -1156,10 +1266,15 @@ fn build_report(
         }
     }
     let clock_group_of = |ck: usize| -> Option<usize> {
-        path_to_root(ck).into_iter().find_map(|n| clock_group_node.get(&n).copied())
+        path_to_root(ck)
+            .into_iter()
+            .find_map(|n| clock_group_node.get(&n).copied())
     };
     let is_async = |lck: Option<usize>, cap: Option<usize>| -> bool {
-        match (lck.and_then(|n| clock_group_of(n)), cap.and_then(|n| clock_group_of(n))) {
+        match (
+            lck.and_then(|n| clock_group_of(n)),
+            cap.and_then(|n| clock_group_of(n)),
+        ) {
             (Some(a), Some(b)) => a != b,
             _ => false,
         }
@@ -1196,7 +1311,9 @@ fn build_report(
     // worst (max) constraint over a pin's groups, interpolated at the operating
     // clock + data transitions — matches how delay arcs are looked up.
     let eval_cons = |cons: &[Constraint], clk_slew: f64, data_slew: f64| -> f64 {
-        cons.iter().map(|c| c.eval(clk_slew, data_slew)).fold(f64::NEG_INFINITY, f64::max)
+        cons.iter()
+            .map(|c| c.eval(clk_slew, data_slew))
+            .fold(f64::NEG_INFINITY, f64::max)
     };
 
     // timing exceptions, matched on launch/capture instance (or port) names.
@@ -1214,7 +1331,10 @@ fn build_report(
     for (idx, setup, ck) in &flop_d {
         let cap = ck_node(ck);
         let lck = launch_ck(*idx, &from);
-        let cap_early = cap.map(|i| arr_min[i]).filter(|a| a.is_finite()).unwrap_or(0.0);
+        let cap_early = cap
+            .map(|i| arr_min[i])
+            .filter(|a| a.is_finite())
+            .unwrap_or(0.0);
         let crpr = match (lck, cap) {
             (Some(l), Some(c)) => crpr_credit(l, c),
             _ => 0.0,
@@ -1239,7 +1359,13 @@ fn build_report(
         // capture the clock-side constants so the fast path can re-derive required time
         // from the (possibly changed) data slew without re-walking the clock network.
         if simple_ctx && !excluded_setup[*idx] {
-            inc_setup.push(SetupRec { idx: *idx, base, cons: setup.clone(), ck_slew, launch_ck: lck });
+            inc_setup.push(SetupRec {
+                idx: *idx,
+                base,
+                cons: setup.clone(),
+                ck_slew,
+                launch_ck: lck,
+            });
         }
     }
 
@@ -1303,7 +1429,9 @@ fn build_report(
             let cl = node_load[vnode];
             let leff = match shield[vnode] {
                 Some((c1, tau)) => crate::ccs::ceff_iter(c1, cl - c1, tau, |c| {
-                    arc.rise_transition.lookup(sin, c).max(arc.fall_transition.lookup(sin, c))
+                    arc.rise_transition
+                        .lookup(sin, c)
+                        .max(arc.fall_transition.lookup(sin, c))
                 }),
                 None => cl,
             };
@@ -1319,8 +1447,12 @@ fn build_report(
                 }
             } else {
                 (
-                    arc.cell_rise.lookup(sin, leff).max(arc.cell_fall.lookup(sin, leff)),
-                    arc.rise_transition.lookup(sin, leff).max(arc.fall_transition.lookup(sin, leff)),
+                    arc.cell_rise
+                        .lookup(sin, leff)
+                        .max(arc.cell_fall.lookup(sin, leff)),
+                    arc.rise_transition
+                        .lookup(sin, leff)
+                        .max(arc.fall_transition.lookup(sin, leff)),
                 )
             };
             (d * late_derate, s)
@@ -1370,8 +1502,11 @@ fn build_report(
                     if alt == on_path {
                         continue;
                     }
-                    let alt_path: Vec<usize> =
-                        prefix(alt).iter().chain(gba_path[wi..].iter()).copied().collect();
+                    let alt_path: Vec<usize> = prefix(alt)
+                        .iter()
+                        .chain(gba_path[wi..].iter())
+                        .copied()
+                        .collect();
                     worst_arr = worst_arr.max(retime(&alt_path));
                 }
             }
@@ -1414,7 +1549,10 @@ fn build_report(
             continue; // async clock groups: no hold check
         }
         hold_endpoints += 1;
-        let cap_late = cap.map(|i| arrival[i]).filter(|a| a.is_finite()).unwrap_or(0.0);
+        let cap_late = cap
+            .map(|i| arrival[i])
+            .filter(|a| a.is_finite())
+            .unwrap_or(0.0);
         let crpr = match (lck, cap) {
             (Some(l), Some(c)) => crpr_credit(l, c),
             _ => 0.0,
@@ -1426,7 +1564,13 @@ fn build_report(
         let slack = arr_min[idx] + base - hold_v;
         hold_slacks.push((idx, slack));
         if simple_ctx {
-            inc_hold.push(HoldRec { idx, base, cons: hold.clone(), ck_slew, launch_ck: lck });
+            inc_hold.push(HoldRec {
+                idx,
+                base,
+                cons: hold.clone(),
+                ck_slew,
+                launch_ck: lck,
+            });
         }
         if slack < 0.0 {
             ths += slack;
@@ -1464,7 +1608,11 @@ fn build_report(
         endpoints,
         worst_endpoint,
         worst_path,
-        whs: if hold_endpoints == 0 { f64::INFINITY } else { whs },
+        whs: if hold_endpoints == 0 {
+            f64::INFINITY
+        } else {
+            whs
+        },
         ths,
         hold_endpoints,
         worst_hold_endpoint,
@@ -1495,7 +1643,10 @@ fn build_report(
                 succ[u].push(e.to);
                 in_edges[e.to].push(match &e.kind {
                     EdgeKind::Net(_) => InEdge::Net { from: u },
-                    EdgeKind::Cell(arc) => InEdge::Cell { from: u, arc: arc.clone() },
+                    EdgeKind::Cell(arc) => InEdge::Cell {
+                        from: u,
+                        arc: arc.clone(),
+                    },
                 });
             }
         }
@@ -1511,7 +1662,11 @@ fn build_report(
         }
         let topo = IncTopo {
             n,
-            label2idx: labels.iter().enumerate().map(|(i, l)| (l.clone(), i)).collect(),
+            label2idx: labels
+                .iter()
+                .enumerate()
+                .map(|(i, l)| (l.clone(), i))
+                .collect(),
             labels: labels.clone(),
             succ,
             in_edges,
@@ -1528,8 +1683,16 @@ fn build_report(
         };
         let state = IncState {
             node_load: node_load.clone(),
-            late: Lanes { arr: late_arr, slew: late_slew, from: late_from },
-            early: Lanes { arr: early_arr, slew: early_slew, from: early_from },
+            late: Lanes {
+                arr: late_arr,
+                slew: late_slew,
+                from: late_from,
+            },
+            early: Lanes {
+                arr: early_arr,
+                slew: early_slew,
+                from: early_from,
+            },
             arrival: arrival.clone(),
             slew: slew.clone(),
             from: from.clone(),

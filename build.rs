@@ -37,7 +37,11 @@ fn build_sha() -> String {
     match git(&["rev-parse", "--short", "HEAD"]) {
         Some(sha) => {
             let dirty = git(&["status", "--porcelain"]).is_some_and(|s| !s.trim().is_empty());
-            if dirty { format!("{sha}-dirty") } else { sha }
+            if dirty {
+                format!("{sha}-dirty")
+            } else {
+                sha
+            }
         }
         None => "unknown".to_string(),
     }
@@ -49,5 +53,9 @@ fn git(args: &[&str]) -> Option<String> {
         return None;
     }
     let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }

@@ -77,7 +77,10 @@ fn negative_unate_chain_alternates_edges() {
     let rep = analyze_inputs(NL, &lib("negative_unate"), &job()).unwrap();
     // period 2.0; arrival = 2.0 - WNS. The alternating path is 0.70 ns, NOT 1.20.
     let arrival = 2.0 - rep.wns;
-    assert!((arrival - 0.70).abs() < 1e-6, "alternating chain arrival should be 0.70, got {arrival}");
+    assert!(
+        (arrival - 0.70).abs() < 1e-6,
+        "alternating chain arrival should be 0.70, got {arrival}"
+    );
 }
 
 #[test]
@@ -86,6 +89,14 @@ fn unate_beats_non_unate_pessimism() {
     let non = analyze_inputs(NL, &lib("non_unate"), &job()).unwrap();
     // non_unate cannot alternate -> hits 4×0.30 = 1.20; negative_unate alternates -> 0.70.
     let non_arr = 2.0 - non.wns;
-    assert!((non_arr - 1.20).abs() < 1e-6, "non_unate should be 1.20, got {non_arr}");
-    assert!(neg.wns > non.wns + 0.4, "unate must beat non_unate pessimism: {} vs {}", neg.wns, non.wns);
+    assert!(
+        (non_arr - 1.20).abs() < 1e-6,
+        "non_unate should be 1.20, got {non_arr}"
+    );
+    assert!(
+        neg.wns > non.wns + 0.4,
+        "unate must beat non_unate pessimism: {} vs {}",
+        neg.wns,
+        non.wns
+    );
 }

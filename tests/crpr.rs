@@ -52,7 +52,8 @@ library (crpr) {
 "#;
 
 // no clock buffer: both flops directly on clk (zero insertion delay)
-const NL_FLAT: &str = "module c ( clk, din, dout ); input clk, din; output dout; wire q1, q2, n1;\n\
+const NL_FLAT: &str =
+    "module c ( clk, din, dout ); input clk, din; output dout; wire q1, q2, n1;\n\
                        INV ob ( .A(din), .Y(dout) );\n\
                        DFF r1 ( .CK(clk), .D(q2), .Q(q1) );\n\
                        INV g1 ( .A(q1),   .Y(n1) );\n\
@@ -60,7 +61,8 @@ const NL_FLAT: &str = "module c ( clk, din, dout ); input clk, din; output dout;
                        endmodule";
 
 // both flops behind the SAME 2-inverter clock buffer -> fully shared clock path
-const NL_SHARED: &str = "module c ( clk, din, dout ); input clk, din; output dout; wire q1, q2, n1, ck1, ckg;\n\
+const NL_SHARED: &str =
+    "module c ( clk, din, dout ); input clk, din; output dout; wire q1, q2, n1, ck1, ckg;\n\
                        INV ob ( .A(din), .Y(dout) );\n\
                        INV cb1 ( .A(clk), .Y(ck1) );\n\
                        INV cb2 ( .A(ck1), .Y(ckg) );\n\
@@ -80,7 +82,7 @@ fn job() -> StaJob {
         clocks: vec![],
         input_slew: 0.02,
         output_load: 0.005,
-        late_derate: 1.10, // OCV: clock buffer is late ×1.10 on launch...
+        late_derate: 1.10,  // OCV: clock buffer is late ×1.10 on launch...
         early_derate: 0.90, // ...and early ×0.90 on capture -> shared-path pessimism
         pocv_sigma: 0.0,
         pocv_n: 3.0,
@@ -115,7 +117,12 @@ fn crpr_removes_shared_clock_pessimism() {
 
     // without CRPR the shared clock path is derived late+early -> false skew that
     // eats setup slack relative to the zero-latency design.
-    assert!(shared_off.wns < flat.wns, "off {} should be < flat {}", shared_off.wns, flat.wns);
+    assert!(
+        shared_off.wns < flat.wns,
+        "off {} should be < flat {}",
+        shared_off.wns,
+        flat.wns
+    );
     // CRPR adds it back -> the fully-shared clock cancels and slack matches flat.
     assert!(
         (shared_on.wns - flat.wns).abs() < 1e-9,
@@ -124,7 +131,12 @@ fn crpr_removes_shared_clock_pessimism() {
         flat.wns
     );
     // and CRPR is a credit, never a penalty
-    assert!(shared_on.wns > shared_off.wns, "CRPR should relax: {} !> {}", shared_on.wns, shared_off.wns);
+    assert!(
+        shared_on.wns > shared_off.wns,
+        "CRPR should relax: {} !> {}",
+        shared_on.wns,
+        shared_off.wns
+    );
 }
 
 #[test]
@@ -134,5 +146,10 @@ fn crpr_also_relaxes_hold() {
     let shared_off = analyze_inputs(NL_SHARED, LIB, &off).unwrap();
     let shared_on = analyze_inputs(NL_SHARED, LIB, &job()).unwrap();
     // hold uses late capture / early launch on the shared path -> CRPR relaxes it too
-    assert!(shared_on.whs >= shared_off.whs, "CRPR hold {} !>= {}", shared_on.whs, shared_off.whs);
+    assert!(
+        shared_on.whs >= shared_off.whs,
+        "CRPR hold {} !>= {}",
+        shared_on.whs,
+        shared_off.whs
+    );
 }

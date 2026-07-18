@@ -57,7 +57,10 @@ fn receiver_load_beats_static_capacitance() {
     // pin with a receiver model -> Miller-aware load (0.0027), not the static 0.0019
     let inv_a = &lib.cell("INV").unwrap().pins["A"];
     assert!((inv_a.load_cap() - 0.0027).abs() < 1e-9);
-    assert!(inv_a.load_cap() > inv_a.capacitance, "receiver load includes Miller > static cap");
+    assert!(
+        inv_a.load_cap() > inv_a.capacitance,
+        "receiver load includes Miller > static cap"
+    );
     // pin without a receiver model -> falls back to the static capacitance
     let buf_a = &lib.cell("BUF").unwrap().pins["A"];
     assert!(buf_a.recv.is_none());

@@ -24,10 +24,22 @@ fn spef_pf_units_scale_to_ff() {
 "#;
     let s = Spef::parse(spef);
     let rc = s.nets.get("n1").expect("n1");
-    assert!((rc.cap_ff - 20.0).abs() < 1e-6, "D_NET 0.02 pF -> 20 fF, got {}", rc.cap_ff);
-    assert!((rc.ground[0].1 - 10.0).abs() < 1e-6, "0.01 pF -> 10 fF, got {}", rc.ground[0].1);
+    assert!(
+        (rc.cap_ff - 20.0).abs() < 1e-6,
+        "D_NET 0.02 pF -> 20 fF, got {}",
+        rc.cap_ff
+    );
+    assert!(
+        (rc.ground[0].1 - 10.0).abs() < 1e-6,
+        "0.01 pF -> 10 fF, got {}",
+        rc.ground[0].1
+    );
     // 1 KOHM -> 1000 Ω
-    assert!((rc.res[0].2 - 1000.0).abs() < 1e-6, "1 KOHM -> 1000 Ω, got {}", rc.res[0].2);
+    assert!(
+        (rc.res[0].2 - 1000.0).abs() < 1e-6,
+        "1 KOHM -> 1000 Ω, got {}",
+        rc.res[0].2
+    );
 }
 
 const LIB: &str = r#"
@@ -80,13 +92,36 @@ const NL: &str = "module top ( clk, rst_n, q ); input clk, rst_n; output q; wire
 
 fn job() -> StaJob {
     StaJob {
-        design: "top".into(), netlist: "x".into(), libs: vec!["x".into()], spef: None,
-        clock_port: "clk".into(), period_ns: 10.0, clocks: vec![], input_slew: 0.02,
-        output_load: 0.005, late_derate: 1.0, early_derate: 1.0, pocv_sigma: 0.0, pocv_n: 3.0,
-        aocv_late: vec![], aocv_early: vec![], miller: 2.0, xtalk_window: 0.0,
-        input_delay: 0.0, output_delay: 0.0, io_input_delays: vec![], io_output_delays: vec![],
-        setup_uncertainty: 0.0, hold_uncertainty: 0.0, sdc: None,
-        scenarios: vec![], exceptions: vec![], async_groups: vec![], crpr: true, pba: false, base_dir: String::new(),
+        design: "top".into(),
+        netlist: "x".into(),
+        libs: vec!["x".into()],
+        spef: None,
+        clock_port: "clk".into(),
+        period_ns: 10.0,
+        clocks: vec![],
+        input_slew: 0.02,
+        output_load: 0.005,
+        late_derate: 1.0,
+        early_derate: 1.0,
+        pocv_sigma: 0.0,
+        pocv_n: 3.0,
+        aocv_late: vec![],
+        aocv_early: vec![],
+        miller: 2.0,
+        xtalk_window: 0.0,
+        input_delay: 0.0,
+        output_delay: 0.0,
+        io_input_delays: vec![],
+        io_output_delays: vec![],
+        setup_uncertainty: 0.0,
+        hold_uncertainty: 0.0,
+        sdc: None,
+        scenarios: vec![],
+        exceptions: vec![],
+        async_groups: vec![],
+        crpr: true,
+        pba: false,
+        base_dir: String::new(),
     }
 }
 
@@ -96,7 +131,10 @@ fn fillers_skipped_and_async_reset_not_data() {
     let rep = analyze_inputs(NL, LIB, &job()).expect("analyze (fill skipped)");
     // the RESET_B->Q 'clear' arc (delay 5.0) must NOT be on the worst data path —
     // the launch is the real CLK->Q reg-to-reg, not the async reset.
-    assert!(!rep.worst_path.iter().any(|p| p.label.ends_with("/RESET_B")),
-        "async reset must not be a data launch: {:?}", rep.worst_path);
+    assert!(
+        !rep.worst_path.iter().any(|p| p.label.ends_with("/RESET_B")),
+        "async reset must not be a data launch: {:?}",
+        rep.worst_path
+    );
     assert!(rep.wns > 0.0, "reg->reg meets at 10 ns: {}", rep.wns);
 }

@@ -52,7 +52,8 @@ library (sk) {
 // Q is a primary output — primary I/O would need set_in/out_delay we don't model.
 // A separate din -> dout feed-through gives the module its port without touching
 // the reg-to-reg paths under test. Both flops on the same (undelayed) clock.
-const NL_FLAT: &str = "module sk ( clk, din, dout ); input clk, din; output dout; wire q1, q2, n1;\n\
+const NL_FLAT: &str =
+    "module sk ( clk, din, dout ); input clk, din; output dout; wire q1, q2, n1;\n\
                        INV ob ( .A(din), .Y(dout) );\n\
                        DFF r1 ( .CK(clk), .D(q2), .Q(q1) );\n\
                        INV g1 ( .A(q1),   .Y(n1) );\n\
@@ -60,7 +61,8 @@ const NL_FLAT: &str = "module sk ( clk, din, dout ); input clk, din; output dout
                        endmodule";
 
 // a 2-inverter clock buffer (clk -> ckd) delays r2's clock only -> skew
-const NL_SKEW: &str = "module sk ( clk, din, dout ); input clk, din; output dout; wire q1, q2, n1, ck1, ckd;\n\
+const NL_SKEW: &str =
+    "module sk ( clk, din, dout ); input clk, din; output dout; wire q1, q2, n1, ck1, ckd;\n\
                        INV ob ( .A(din), .Y(dout) );\n\
                        INV cb1 ( .A(clk), .Y(ck1) );\n\
                        INV cb2 ( .A(ck1), .Y(ckd) );\n\
@@ -70,7 +72,8 @@ const NL_SKEW: &str = "module sk ( clk, din, dout ); input clk, din; output dout
                        endmodule";
 
 // both flops on the SAME delayed clock -> common latency, no skew
-const NL_BOTH_DELAYED: &str = "module sk ( clk, din, dout ); input clk, din; output dout; wire q1, q2, n1, ck1, ckd;\n\
+const NL_BOTH_DELAYED: &str =
+    "module sk ( clk, din, dout ); input clk, din; output dout; wire q1, q2, n1, ck1, ckd;\n\
                        INV ob ( .A(din), .Y(dout) );\n\
                        INV cb1 ( .A(clk), .Y(ck1) );\n\
                        INV cb2 ( .A(ck1), .Y(ckd) );\n\
@@ -120,12 +123,25 @@ fn skew_shifts_worst_endpoint_and_tightens_slack() {
     let skew = analyze_inputs(NL_SKEW, LIB, &job()).unwrap();
 
     // undelayed: the reg->reg path (r1 -> g1 -> r2) is worst, captured at r2/D
-    assert_eq!(flat.worst_endpoint, "r2/D", "flat worst {}", flat.worst_endpoint);
+    assert_eq!(
+        flat.worst_endpoint, "r2/D",
+        "flat worst {}",
+        flat.worst_endpoint
+    );
 
     // delaying r2's clock credits r2/D more required time (skew helps it) but
     // delays r2/Q's launch, so the path captured at r1/D becomes the tight one.
-    assert_eq!(skew.worst_endpoint, "r1/D", "skew worst {}", skew.worst_endpoint);
-    assert!(skew.wns < flat.wns, "skew {} !< flat {}", skew.wns, flat.wns);
+    assert_eq!(
+        skew.worst_endpoint, "r1/D",
+        "skew worst {}",
+        skew.worst_endpoint
+    );
+    assert!(
+        skew.wns < flat.wns,
+        "skew {} !< flat {}",
+        skew.wns,
+        flat.wns
+    );
 }
 
 #[test]

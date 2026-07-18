@@ -94,10 +94,21 @@ fn pba_catches_non_greedy_worst_path() {
     let rep = analyze_inputs(NL, LIB, &job(true)).unwrap();
     // GBA picks I2 at O (later arrival, fast slew) -> H looks cheap -> arrival ~0.30
     // -> WNS ~2.70. The real worst (via I1, slow slew -> H=2.0) is arrival ~2.10.
-    assert!(rep.wns > 2.5, "GBA (optimistic) WNS should be ~2.70, got {}", rep.wns);
+    assert!(
+        rep.wns > 2.5,
+        "GBA (optimistic) WNS should be ~2.70, got {}",
+        rep.wns
+    );
     let pba = rep.pba_wns.expect("PBA enabled");
-    assert!((pba - 0.90).abs() < 0.05, "PBA WNS should be ~0.90 (arrival 2.10), got {pba}");
-    assert!(pba < rep.wns - 1.5, "PBA must catch the optimism: pba {pba} vs gba {}", rep.wns);
+    assert!(
+        (pba - 0.90).abs() < 0.05,
+        "PBA WNS should be ~0.90 (arrival 2.10), got {pba}"
+    );
+    assert!(
+        pba < rep.wns - 1.5,
+        "PBA must catch the optimism: pba {pba} vs gba {}",
+        rep.wns
+    );
 }
 
 #[test]

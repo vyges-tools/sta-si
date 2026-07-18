@@ -118,14 +118,20 @@ pub(crate) struct IncGraph {
 /// worst (max) constraint over a pin's groups, interpolated at the operating slews —
 /// identical to `build_report`'s `eval_cons`.
 fn eval_cons(cons: &[Constraint], clk_slew: f64, data_slew: f64) -> f64 {
-    cons.iter().map(|c| c.eval(clk_slew, data_slew)).fold(f64::NEG_INFINITY, f64::max)
+    cons.iter()
+        .map(|c| c.eval(clk_slew, data_slew))
+        .fold(f64::NEG_INFINITY, f64::max)
 }
 
 /// Collapse a node's lanes to the worst lane index (max for late, min for early).
 fn pick(lanes: &Lanes, v: usize, late: bool) -> usize {
     let a = lanes.arr[v];
     if late {
-        if a[0] >= a[1] { 0 } else { 1 }
+        if a[0] >= a[1] {
+            0
+        } else {
+            1
+        }
     } else if a[0] <= a[1] {
         0
     } else {
@@ -136,15 +142,27 @@ fn pick(lanes: &Lanes, v: usize, late: bool) -> usize {
 impl IncGraph {
     /// The current in-edges of a node: the swapped-in override if resized, else the base.
     fn in_edges(&self, v: usize) -> &[InEdge] {
-        self.state.overrides.get(&v).map(Vec::as_slice).unwrap_or(&self.topo.in_edges[v])
+        self.state
+            .overrides
+            .get(&v)
+            .map(Vec::as_slice)
+            .unwrap_or(&self.topo.in_edges[v])
     }
 
     /// Recompute one node's per-lane arrival/slew/from from its in-edges, given the current
     /// working lanes (predecessors already settled in topo order). `late` selects the
     /// max-delay (setup) vs min-delay (hold) lane choice. Mirrors `relax`'s simple branches.
     fn recompute_node(&self, v: usize, lanes: &mut Lanes, late: bool) {
-        let init = if late { f64::NEG_INFINITY } else { f64::INFINITY };
-        let derate = if late { self.topo.late_derate } else { self.topo.early_derate };
+        let init = if late {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+        let derate = if late {
+            self.topo.late_derate
+        } else {
+            self.topo.early_derate
+        };
         let load = self.state.node_load[v];
         let mut arr = [init; 2];
         let mut slew = [self.topo.input_slew; 2];
@@ -195,7 +213,11 @@ impl IncGraph {
                                 (dt.lookup(sin, leff), st.lookup(sin, leff))
                             };
                             let metric = a_in + d * derate; // flat derate, no sigma band
-                            let better = if late { metric > arr[ol] } else { metric < arr[ol] };
+                            let better = if late {
+                                metric > arr[ol]
+                            } else {
+                                metric < arr[ol]
+                            };
                             if better {
                                 arr[ol] = metric;
                                 slew[ol] = sout;
@@ -263,16 +285,24 @@ impl IncGraph {
                         // output pin: rebuild its incoming cell arcs from the new cell, held
                         // as an override so the base topology stays immutable.
                         let ox = *self.topo.label2idx.get(&format!("{inst}/{pin}"))?;
-                        let conn: HashMap<&str, &str> =
-                            iref.conns.iter().map(|(p, n)| (p.as_str(), n.as_str())).collect();
+                        let conn: HashMap<&str, &str> = iref
+                            .conns
+                            .iter()
+                            .map(|(p, n)| (p.as_str(), n.as_str()))
+                            .collect();
                         let mut edges: Vec<InEdge> = Vec::new();
                         for arc in &new_cell.pins[pin].arcs {
                             if !conn.contains_key(arc.related_pin.as_str()) {
                                 continue;
                             }
-                            let from =
-                                *self.topo.label2idx.get(&format!("{inst}/{}", arc.related_pin))?;
-                            edges.push(InEdge::Cell { from, arc: Box::new(arc.clone()) });
+                            let from = *self
+                                .topo
+                                .label2idx
+                                .get(&format!("{inst}/{}", arc.related_pin))?;
+                            edges.push(InEdge::Cell {
+                                from,
+                                arc: Box::new(arc.clone()),
+                            });
                         }
                         self.state.overrides.insert(ox, edges);
                         seeds.push(ox);
@@ -407,7 +437,11 @@ impl IncGraph {
             endpoints,
             worst_endpoint,
             worst_path,
-            whs: if hold_endpoints == 0 { f64::INFINITY } else { whs },
+            whs: if hold_endpoints == 0 {
+                f64::INFINITY
+            } else {
+                whs
+            },
             ths,
             hold_endpoints,
             worst_hold_endpoint,

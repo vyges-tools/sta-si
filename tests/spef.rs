@@ -105,7 +105,7 @@ fn parses_total_cap_and_summed_res() {
     assert!((n1.cap_ff - 20.0).abs() < 1e-9); // *D_NET total
     assert!((n1.res_ohm - 1000.0).abs() < 1e-9); // 500 + 500 summed *RES
     assert!((s.wire_load_pf("n1") - 0.020).abs() < 1e-9); // fF -> pF
-    // Elmore = R*C -> ns : 1000 * 20 * 1e-6 = 0.02 ns
+                                                          // Elmore = R*C -> ns : 1000 * 20 * 1e-6 = 0.02 ns
     assert!((s.net_delay_ns("n1") - 0.02).abs() < 1e-9);
     assert!((n1.coupling_ff - 5.0).abs() < 1e-9); // two-node *CAP entry
 }
@@ -121,7 +121,12 @@ fn crosstalk_reduces_slack_vs_quiet() {
     let with_si = analyze(&nl, &lib, &j, Some(&spef)).unwrap();
     j.miller = 1.0; // quiet aggressor -> coupling acts as plain ground (no extra)
     let quiet = analyze(&nl, &lib, &j, Some(&spef)).unwrap();
-    assert!(with_si.wns < quiet.wns, "SI {} !< quiet {}", with_si.wns, quiet.wns);
+    assert!(
+        with_si.wns < quiet.wns,
+        "SI {} !< quiet {}",
+        with_si.wns,
+        quiet.wns
+    );
 }
 
 #[test]
@@ -143,7 +148,7 @@ fn per_pin_elmore_differentiates_sinks() {
     assert!((d["s1"] - 7e-5).abs() < 1e-12, "s1={}", d["s1"]);
     assert!((d["s2"] - 2.1e-4).abs() < 1e-12, "s2={}", d["s2"]);
     assert!(d["s2"] > d["s1"]); // far sink is slower — the whole point of per-pin
-    // a crosstalk cap at the net node raises every downstream sink
+                                // a crosstalk cap at the net node raises every downstream sink
     let dx = rc.elmore("D", 10.0).unwrap();
     assert!(dx["s1"] > d["s1"] && dx["s2"] > d["s2"]);
 }
@@ -160,7 +165,12 @@ fn window_filters_non_overlapping_aggressors() {
     let wide = analyze(&nl, &lib, &j, Some(&spef)).unwrap();
     j.xtalk_window = 0.0; // narrow -> no overlap -> crosstalk filtered out
     let narrow = analyze(&nl, &lib, &j, Some(&spef)).unwrap();
-    assert!(wide.wns < narrow.wns, "wide {} !< narrow {}", wide.wns, narrow.wns);
+    assert!(
+        wide.wns < narrow.wns,
+        "wide {} !< narrow {}",
+        wide.wns,
+        narrow.wns
+    );
 }
 
 #[test]
@@ -171,5 +181,10 @@ fn spef_adds_delay_and_load_reducing_slack() {
     let ideal = analyze(&nl, &lib, &j, None).unwrap();
     let withrc = analyze(&nl, &lib, &j, Some(&Spef::parse(SPEF))).unwrap();
     // parasitics (net delay + wire load) increase arrival -> less slack
-    assert!(withrc.wns < ideal.wns, "withrc {} !< ideal {}", withrc.wns, ideal.wns);
+    assert!(
+        withrc.wns < ideal.wns,
+        "withrc {} !< ideal {}",
+        withrc.wns,
+        ideal.wns
+    );
 }

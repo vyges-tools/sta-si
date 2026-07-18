@@ -101,7 +101,11 @@ fn reg_to_reg_setup_path() {
     // the tight path is the reg->reg one, captured at r2/D
     assert_eq!(rep.worst_endpoint, "r2/D");
     // launched by r1/Q (CK->Q), through g1
-    assert!(rep.worst_path.iter().any(|p| p.label == "r1/Q"), "{:?}", rep.worst_path);
+    assert!(
+        rep.worst_path.iter().any(|p| p.label == "r1/Q"),
+        "{:?}",
+        rep.worst_path
+    );
     // required = period - setup(0.05); 1 ns easily met
     assert!(rep.wns > 0.0 && rep.wns < 0.95, "wns={}", rep.wns);
 }
@@ -111,19 +115,36 @@ fn tighter_setup_eats_slack() {
     // larger setup -> required earlier -> less slack
     let base = analyze_inputs(NL, LIB, &job(1.0)).unwrap();
     let tight = analyze_inputs(NL, &LIB.replace("\"0.05\"", "\"0.20\""), &job(1.0)).unwrap();
-    assert!(tight.wns < base.wns, "tight {} !< base {}", tight.wns, base.wns);
+    assert!(
+        tight.wns < base.wns,
+        "tight {} !< base {}",
+        tight.wns,
+        base.wns
+    );
 }
 
 #[test]
 fn reg_to_reg_hold_path() {
     let rep = analyze_inputs(NL, LIB, &job(1.0)).unwrap();
     // both flop D pins are hold endpoints, launched by the min CK->Q path
-    assert_eq!(rep.hold_endpoints, 2, "hold_endpoints={}", rep.hold_endpoints);
+    assert_eq!(
+        rep.hold_endpoints, 2,
+        "hold_endpoints={}",
+        rep.hold_endpoints
+    );
     // earliest data (>= ~min CK->Q) easily clears the 0.02 ns hold here
     assert!(rep.whs > 0.0, "whs={}", rep.whs);
     // worst hold path starts at the clock and reaches a flop D via a flop Q
-    let labels: Vec<&str> = rep.worst_hold_path.iter().map(|p| p.label.as_str()).collect();
-    assert!(rep.worst_hold_endpoint.ends_with("/D"), "{}", rep.worst_hold_endpoint);
+    let labels: Vec<&str> = rep
+        .worst_hold_path
+        .iter()
+        .map(|p| p.label.as_str())
+        .collect();
+    assert!(
+        rep.worst_hold_endpoint.ends_with("/D"),
+        "{}",
+        rep.worst_hold_endpoint
+    );
     assert!(labels.iter().any(|l| l.ends_with("/Q")), "{:?}", labels);
 }
 
@@ -132,7 +153,12 @@ fn bigger_hold_eats_hold_slack() {
     // larger hold requirement -> the same early arrival clears less of it
     let base = analyze_inputs(NL, LIB, &job(1.0)).unwrap();
     let tight = analyze_inputs(NL, &LIB.replace("\"0.02\"", "\"0.09\""), &job(1.0)).unwrap();
-    assert!(tight.whs < base.whs, "tight {} !< base {}", tight.whs, base.whs);
+    assert!(
+        tight.whs < base.whs,
+        "tight {} !< base {}",
+        tight.whs,
+        base.whs
+    );
     // hold slack is period-independent (same-edge check) — unchanged at 2 ns
     let wide = analyze_inputs(NL, LIB, &job(2.0)).unwrap();
     assert!((wide.whs - base.whs).abs() < 1e-9, "hold moved with period");

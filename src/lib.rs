@@ -22,12 +22,12 @@ pub mod job;
 // (sta-si was loom's seed — these originated here). Re-exported under the crate
 // root so `crate::liberty` / `crate::sdc` / … keep resolving across the engine.
 pub use vyges_loom::{ccs, liberty, netlist, sdc, spef};
-pub mod sta;
-pub mod sdf; // SDF (Standard Delay Format) back-annotation writer
-pub mod sdclint; // SDC constraint linter (completeness + consistency)
-mod inc;
-pub mod si;
 pub mod engine;
+mod inc;
+pub mod sdclint; // SDC constraint linter (completeness + consistency)
+pub mod sdf; // SDF (Standard Delay Format) back-annotation writer
+pub mod si;
+pub mod sta;
 pub mod tcl; // experimental: OpenSTA-TCL-subset adapter (Layer 1)
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

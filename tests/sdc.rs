@@ -31,12 +31,18 @@ fn parses_core_commands() {
     assert!((s.clocks[0].period - 10.0).abs() < 1e-9, "var-subst period");
 
     // one default + one per-port input delay
-    assert!(s.input_delays.iter().any(|d| d.default && (d.value - 2.0).abs() < 1e-9));
+    assert!(s
+        .input_delays
+        .iter()
+        .any(|d| d.default && (d.value - 2.0).abs() < 1e-9));
     assert!(s
         .input_delays
         .iter()
         .any(|d| d.ports.iter().any(|p| p == "data_in") && (d.value - 1.5).abs() < 1e-9));
-    assert!(s.output_delays.iter().any(|d| d.default && (d.value - 3.0).abs() < 1e-9));
+    assert!(s
+        .output_delays
+        .iter()
+        .any(|d| d.default && (d.value - 3.0).abs() < 1e-9));
 
     assert!((s.setup_uncertainty - 0.25).abs() < 1e-9);
     assert!((s.hold_uncertainty - 0.10).abs() < 1e-9);
@@ -60,7 +66,11 @@ fn generated_clock_period_resolves() {
         create_generated_clock -name clk_div2 -source [get_ports clk] -divide_by 2 [get_pins div/Q]
     "#;
     let s = Sdc::parse(sdc).unwrap();
-    let g = s.clocks.iter().find(|c| c.name == "clk_div2").expect("gen clock");
+    let g = s
+        .clocks
+        .iter()
+        .find(|c| c.name == "clk_div2")
+        .expect("gen clock");
     assert!((g.period - 8.0).abs() < 1e-9, "divide_by 2 -> 2x period");
     assert_eq!(g.source, "div/Q");
 }
@@ -145,11 +155,20 @@ fn io_budget_and_uncertainty_eat_slack() {
     let base = run(0.0, 0.0, 0.0);
     // input delay pushes the launch later -> less slack, 1:1
     let with_in = run(1.0, 0.0, 0.0);
-    assert!((base - with_in - 1.0).abs() < 1e-6, "input_delay 1ns -> 1ns less slack");
+    assert!(
+        (base - with_in - 1.0).abs() < 1e-6,
+        "input_delay 1ns -> 1ns less slack"
+    );
     // output delay eats the period at the endpoint -> less slack, 1:1
     let with_out = run(0.0, 2.0, 0.0);
-    assert!((base - with_out - 2.0).abs() < 1e-6, "output_delay 2ns -> 2ns less slack");
+    assert!(
+        (base - with_out - 2.0).abs() < 1e-6,
+        "output_delay 2ns -> 2ns less slack"
+    );
     // setup uncertainty tightens required time -> less slack, 1:1
     let with_unc = run(0.0, 0.0, 0.3);
-    assert!((base - with_unc - 0.3).abs() < 1e-6, "uncertainty 0.3ns -> 0.3ns less slack");
+    assert!(
+        (base - with_unc - 0.3).abs() < 1e-6,
+        "uncertainty 0.3ns -> 0.3ns less slack"
+    );
 }

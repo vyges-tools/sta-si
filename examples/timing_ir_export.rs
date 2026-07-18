@@ -51,9 +51,14 @@ fn main() {
     let mut arcs: Vec<String> = Vec::new();
     let mut checks: Vec<String> = Vec::new();
     for inst in &nl.insts {
-        let Some(cell) = lib.cells.get(&inst.cell) else { continue };
-        let conn: BTreeMap<&str, &str> =
-            inst.conns.iter().map(|(p, n)| (p.as_str(), n.as_str())).collect();
+        let Some(cell) = lib.cells.get(&inst.cell) else {
+            continue;
+        };
+        let conn: BTreeMap<&str, &str> = inst
+            .conns
+            .iter()
+            .map(|(p, n)| (p.as_str(), n.as_str()))
+            .collect();
 
         // delay arcs: input pin -> each output pin
         for out in cell.outputs() {

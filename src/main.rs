@@ -69,7 +69,11 @@ fn link(label: &str, url: &str) {
     use std::io::IsTerminal;
     println!("{label}:\n  {url}");
     if std::io::stdout().is_terminal() {
-        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
         let _ = std::process::Command::new(opener).arg(url).status();
     }
 }
@@ -111,14 +115,26 @@ fn pdk_resolve(pdk: &str, key: &str, corner: Option<&str>) -> Result<String, Str
     if let Some(c) = corner {
         cmd.args(["--corner", c]);
     }
-    let out = cmd.output().map_err(|e| format!("vyges-pdk-store not runnable: {e}"))?;
+    let out = cmd
+        .output()
+        .map_err(|e| format!("vyges-pdk-store not runnable: {e}"))?;
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).trim().trim_start_matches("error:").trim().to_string();
-        return Err(if err.is_empty() { format!("could not resolve {key} for PDK {pdk:?}") } else { err });
+        let err = String::from_utf8_lossy(&out.stderr)
+            .trim()
+            .trim_start_matches("error:")
+            .trim()
+            .to_string();
+        return Err(if err.is_empty() {
+            format!("could not resolve {key} for PDK {pdk:?}")
+        } else {
+            err
+        });
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if s.is_empty() {
-        Err(format!("pdk-store returned no path for {key} of PDK {pdk:?}"))
+        Err(format!(
+            "pdk-store returned no path for {key} of PDK {pdk:?}"
+        ))
     } else {
         Ok(s)
     }
@@ -196,7 +212,12 @@ fn render_lint(r: &vyges_sta_si::sdclint::LintReport) -> String {
         r.warnings()
     ));
     for f in &r.findings {
-        s.push_str(&format!("  {:7} [{}] {}\n", f.severity.tag(), f.code, f.message));
+        s.push_str(&format!(
+            "  {:7} [{}] {}\n",
+            f.severity.tag(),
+            f.code,
+            f.message
+        ));
     }
     s
 }
@@ -295,7 +316,11 @@ fn emit_sta_si_events(job: &StaJob, rep: &TimingReport) {
     vyges_events::emit(
         &Event::new(
             "vyges-sta-si",
-            if viol == 0 { Severity::Info } else { Severity::Warn },
+            if viol == 0 {
+                Severity::Info
+            } else {
+                Severity::Warn
+            },
             format!(
                 "sta complete: WNS {:.4} ns, TNS {:.4} ns, WHS {:.4} ns — {viol} violation(s)",
                 rep.wns, rep.tns, rep.whs
@@ -336,7 +361,11 @@ fn emit_mcmm(job: &StaJob, rep: &engine::McmmReport, cli: &Cli) -> ! {
     for s in &rep.scenarios {
         emit_sta_si_events(job, &s.report);
     }
-    let text = if cli.json { engine::mcmm_json(job, rep) } else { engine::render_mcmm(job, rep) };
+    let text = if cli.json {
+        engine::mcmm_json(job, rep)
+    } else {
+        engine::render_mcmm(job, rep)
+    };
     write_out(&text, cli);
     if cli.fail_on_violation {
         let setup_bad = rep.worst_setup().map(|x| x.1 < 0.0).unwrap_or(false);
@@ -431,7 +460,11 @@ fn main() {
         return link("Star vyges-sta-si on GitHub ⭐", STAR_URL);
     }
     if cli.version {
-        println!("vyges-sta-si {} ({})", vyges_sta_si::VERSION, env!("VYGES_GIT_SHA"));
+        println!(
+            "vyges-sta-si {} ({})",
+            vyges_sta_si::VERSION,
+            env!("VYGES_GIT_SHA")
+        );
         println!("{}", vyges_sta_si::COPYRIGHT);
         return;
     }
@@ -454,7 +487,11 @@ fn main() {
             match StaJob::load(path) {
                 Ok(j) => println!(
                     "OK  design={} netlist={} libs={} clock={}@{}ns",
-                    j.design, j.netlist, j.libs.len(), j.clock_port, j.period_ns
+                    j.design,
+                    j.netlist,
+                    j.libs.len(),
+                    j.clock_port,
+                    j.period_ns
                 ),
                 Err(e) => {
                     eprintln!("error: {e}");
@@ -476,7 +513,9 @@ fn main() {
             };
             // --liberty-nldm-only: skip CCS at Liberty load (parse-time). Load-time
             // option, threaded to the analysis rather than stored on the job.
-            let lib_opts = vyges_sta_si::liberty::LibOpts { skip_ccs: cli.nldm_only };
+            let lib_opts = vyges_sta_si::liberty::LibOpts {
+                skip_ccs: cli.nldm_only,
+            };
             // no liberty in the job? resolve it from --pdk via pdk-store (`lib`,
             // for --corner or the PDK default corner).
             if job.libs.is_empty() {
@@ -584,7 +623,11 @@ fn main() {
                     exit(1);
                 }
             };
-            let text = if cli.json { render_lint_json(&report) } else { render_lint(&report) };
+            let text = if cli.json {
+                render_lint_json(&report)
+            } else {
+                render_lint(&report)
+            };
             write_out(&text, &cli);
             // gate: errors always fail; --fail-on-violation also fails on warnings.
             let fail = report.errors() > 0 || (cli.fail_on_violation && report.warnings() > 0);
@@ -615,7 +658,9 @@ fn main() {
             }
             match engine::analyze_job_opts(
                 &adapted.job,
-                vyges_sta_si::liberty::LibOpts { skip_ccs: cli.nldm_only },
+                vyges_sta_si::liberty::LibOpts {
+                    skip_ccs: cli.nldm_only,
+                },
             ) {
                 Ok(rep) => emit_tcl(&adapted.job, &rep, &adapted.reports, &cli),
                 Err(e) => {

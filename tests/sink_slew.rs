@@ -85,7 +85,11 @@ fn job() -> StaJob {
 }
 
 fn sink_slew(rep: &vyges_sta_si::sta::TimingReport) -> f64 {
-    rep.worst_path.iter().find(|p| p.label == "u2/A").map(|p| p.slew).expect("u2/A on path")
+    rep.worst_path
+        .iter()
+        .find(|p| p.label == "u2/A")
+        .map(|p| p.slew)
+        .expect("u2/A on path")
 }
 
 #[test]
@@ -99,6 +103,12 @@ fn rc_degrades_sink_slew() {
     let s_ideal = sink_slew(&ideal);
     // RC degrades the sink edge to ~0.85 ns (vs the driver's ~0.04 ns passed through
     // in the ideal case)
-    assert!(s_rc > 0.3, "RC sink slew should be heavily degraded, got {s_rc}");
-    assert!(s_rc > s_ideal + 0.2, "RC slew {s_rc} should exceed ideal {s_ideal}");
+    assert!(
+        s_rc > 0.3,
+        "RC sink slew should be heavily degraded, got {s_rc}"
+    );
+    assert!(
+        s_rc > s_ideal + 0.2,
+        "RC slew {s_rc} should exceed ideal {s_ideal}"
+    );
 }

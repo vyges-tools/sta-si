@@ -26,9 +26,21 @@ fn rep(wns: f64, whs: f64) -> TimingReport {
 fn aggregates_worst_per_check_across_corners() {
     let m = McmmReport {
         scenarios: vec![
-            ScenarioResult { name: "ss".into(), period_ns: 2.0, report: rep(0.10, 0.30) },
-            ScenarioResult { name: "tt".into(), period_ns: 2.0, report: rep(0.40, 0.20) },
-            ScenarioResult { name: "ff".into(), period_ns: 2.0, report: rep(0.80, -0.05) },
+            ScenarioResult {
+                name: "ss".into(),
+                period_ns: 2.0,
+                report: rep(0.10, 0.30),
+            },
+            ScenarioResult {
+                name: "tt".into(),
+                period_ns: 2.0,
+                report: rep(0.40, 0.20),
+            },
+            ScenarioResult {
+                name: "ff".into(),
+                period_ns: 2.0,
+                report: rep(0.80, -0.05),
+            },
         ],
     };
     // setup is worst at the slow corner, hold at the fast corner — different winners

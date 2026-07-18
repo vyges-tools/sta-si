@@ -97,6 +97,12 @@ fn engine_uses_ccs_when_present() {
     // single endpoint y; arrival = inverter delay; required = period 2.0
     let nldm_arr = 2.0 - nldm.wns;
     let ccs_arr = 2.0 - ccs.wns;
-    assert!((nldm_arr - 0.10).abs() < 1e-6, "NLDM inverter delay should be 0.10, got {nldm_arr}");
-    assert!((ccs_arr - 0.50).abs() < 1e-6, "CCS inverter delay should be 0.50, got {ccs_arr}");
+    assert!(
+        (nldm_arr - 0.10).abs() < 1e-6,
+        "NLDM inverter delay should be 0.10, got {nldm_arr}"
+    );
+    assert!(
+        (ccs_arr - 0.50).abs() < 1e-6,
+        "CCS inverter delay should be 0.50, got {ccs_arr}"
+    );
 }

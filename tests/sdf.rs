@@ -13,10 +13,19 @@ fn inv_chain_iopath_and_spef_interconnect() {
     assert!(out.contains("(SDFVERSION \"3.0\")"));
     // one IOPATH A->Y per inverter (g1/g2/g3)
     assert!(out.contains("(INSTANCE g1)") && out.contains("(INSTANCE g3)"));
-    assert!(out.matches("(IOPATH A Y").count() >= 3, "one IOPATH per INV:\n{out}");
+    assert!(
+        out.matches("(IOPATH A Y").count() >= 3,
+        "one IOPATH per INV:\n{out}"
+    );
     // interconnect comes from the SPEF (driver output pin -> sink input pin)
-    assert!(out.contains("(INTERCONNECT g1/Y g2/A"), "spef interconnect n1:\n{out}");
-    assert!(out.contains("(INTERCONNECT g2/Y g3/A"), "spef interconnect n2:\n{out}");
+    assert!(
+        out.contains("(INTERCONNECT g1/Y g2/A"),
+        "spef interconnect n1:\n{out}"
+    );
+    assert!(
+        out.contains("(INTERCONNECT g2/Y g3/A"),
+        "spef interconnect n2:\n{out}"
+    );
     assert!(out.trim_end().ends_with(")"));
 }
 

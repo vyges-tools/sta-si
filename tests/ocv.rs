@@ -80,8 +80,18 @@ fn aocv_sits_between_flat_extremes() {
     aocv.aocv_late = vec![(1.0, 1.10), (6.0, 1.02)];
     let aocv = analyze_inputs(NL, LIB, &aocv).unwrap();
 
-    assert!(nominal.wns > aocv.wns, "nominal {} !> aocv {}", nominal.wns, aocv.wns);
-    assert!(aocv.wns > flat.wns, "aocv {} !> flat {}", aocv.wns, flat.wns);
+    assert!(
+        nominal.wns > aocv.wns,
+        "nominal {} !> aocv {}",
+        nominal.wns,
+        aocv.wns
+    );
+    assert!(
+        aocv.wns > flat.wns,
+        "aocv {} !> flat {}",
+        aocv.wns,
+        flat.wns
+    );
 }
 
 #[test]
@@ -97,8 +107,18 @@ fn pocv_band_eats_setup_slack_monotonically() {
     let p2 = analyze_inputs(NL, LIB, &p2).unwrap();
 
     // the N-sigma band lengthens the late path, so slack shrinks with sigma
-    assert!(p1.wns < nominal.wns, "pocv {} !< nominal {}", p1.wns, nominal.wns);
-    assert!(p2.wns < p1.wns, "bigger sigma {} !< smaller {}", p2.wns, p1.wns);
+    assert!(
+        p1.wns < nominal.wns,
+        "pocv {} !< nominal {}",
+        p1.wns,
+        nominal.wns
+    );
+    assert!(
+        p2.wns < p1.wns,
+        "bigger sigma {} !< smaller {}",
+        p2.wns,
+        p1.wns
+    );
 }
 
 #[test]
@@ -111,10 +131,13 @@ fn pocv_sub_linear_in_depth() {
     p.pocv_sigma = 0.10;
     let p = analyze_inputs(NL, LIB, &p).unwrap();
     let band = nominal.wns - p.wns; // ns the band cost over 4 stages
-    // a single stage's nominal delay is ~0.10-0.30 ns; 3-sigma of one stage is
-    // ~3*0.10*0.30 ≈ 0.09 ns. A linear (worst-case) 4-stage band would be ~4x
-    // that; RSS is ~2x. So the band must be well under the linear bound.
+                                    // a single stage's nominal delay is ~0.10-0.30 ns; 3-sigma of one stage is
+                                    // ~3*0.10*0.30 ≈ 0.09 ns. A linear (worst-case) 4-stage band would be ~4x
+                                    // that; RSS is ~2x. So the band must be well under the linear bound.
     let linear_bound = 4.0 * 3.0 * 0.10 * 0.30;
     assert!(band > 0.0, "band {band} not positive");
-    assert!(band < linear_bound, "band {band} !< linear bound {linear_bound} (RSS should beat linear)");
+    assert!(
+        band < linear_bound,
+        "band {band} !< linear bound {linear_bound} (RSS should beat linear)"
+    );
 }

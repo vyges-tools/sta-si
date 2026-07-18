@@ -52,13 +52,20 @@ pub fn emit(design: &str, nl: &Netlist, lib: &Lib, spef: Option<&Spef>) -> Strin
 
     // per-instance cell delays + setup/hold
     for inst in &nl.insts {
-        let Some(cell) = lib.cells.get(&inst.cell) else { continue };
-        let conn: BTreeMap<&str, &str> =
-            inst.conns.iter().map(|(p, n)| (p.as_str(), n.as_str())).collect();
+        let Some(cell) = lib.cells.get(&inst.cell) else {
+            continue;
+        };
+        let conn: BTreeMap<&str, &str> = inst
+            .conns
+            .iter()
+            .map(|(p, n)| (p.as_str(), n.as_str()))
+            .collect();
 
         let mut iopaths: Vec<String> = Vec::new();
         for out in cell.outputs() {
-            let load = conn.get(out.name.as_str()).map_or(0.0, |n| net_load(nl, lib, n));
+            let load = conn
+                .get(out.name.as_str())
+                .map_or(0.0, |n| net_load(nl, lib, n));
             for arc in &out.arcs {
                 iopaths.push(format!(
                     "      (IOPATH {} {} {} {})",
@@ -113,9 +120,15 @@ pub fn emit(design: &str, nl: &Netlist, lib: &Lib, spef: Option<&Spef>) -> Strin
         let mut inter: Vec<String> = Vec::new();
         // net -> (driver (inst,pin), sinks [(inst,pin)])
         for inst in &nl.insts {
-            let Some(cell) = lib.cells.get(&inst.cell) else { continue };
+            let Some(cell) = lib.cells.get(&inst.cell) else {
+                continue;
+            };
             for out in cell.outputs() {
-                let Some(net) = inst.conns.iter().find(|(p, _)| *p == out.name).map(|(_, n)| n)
+                let Some(net) = inst
+                    .conns
+                    .iter()
+                    .find(|(p, _)| *p == out.name)
+                    .map(|(_, n)| n)
                 else {
                     continue;
                 };
@@ -153,7 +166,11 @@ pub fn emit(design: &str, nl: &Netlist, lib: &Lib, spef: Option<&Spef>) -> Strin
                     };
                     inter.push(format!(
                         "      (INTERCONNECT {}/{} {}/{} {})",
-                        inst.name, out.name, si, sp_pin, triple(d)
+                        inst.name,
+                        out.name,
+                        si,
+                        sp_pin,
+                        triple(d)
                     ));
                 }
             }

@@ -172,14 +172,25 @@ fn timer_resize_updates_and_matches_rebuild() {
     let before = t.wns();
 
     // swap u1 from INV to the faster INV2 (also via the explicit Move form once)
-    assert!(t.stage(Move::Resize { inst: "u1".into(), cell: "INV2".into() }));
+    assert!(t.stage(Move::Resize {
+        inst: "u1".into(),
+        cell: "INV2".into()
+    }));
     assert!(t.is_dirty());
     t.update().unwrap();
     assert!(!t.is_dirty());
     let after = t.wns();
-    assert!(after > before, "faster cell should improve slack: {before} -> {after}");
+    assert!(
+        after > before,
+        "faster cell should improve slack: {before} -> {after}"
+    );
     assert_eq!(
-        t.netlist().insts.iter().find(|i| i.name == "u1").unwrap().cell,
+        t.netlist()
+            .insts
+            .iter()
+            .find(|i| i.name == "u1")
+            .unwrap()
+            .cell,
         "INV2"
     );
 
@@ -278,7 +289,10 @@ fn assert_timers_identical(a: &Timer, b: &Timer) {
     assert_eq!(ra.endpoints, rb.endpoints, "endpoints");
     assert_eq!(ra.hold_endpoints, rb.hold_endpoints, "hold_endpoints");
     assert_eq!(ra.worst_endpoint, rb.worst_endpoint, "worst_endpoint");
-    assert_eq!(ra.worst_hold_endpoint, rb.worst_hold_endpoint, "worst_hold_endpoint");
+    assert_eq!(
+        ra.worst_hold_endpoint, rb.worst_hold_endpoint,
+        "worst_hold_endpoint"
+    );
     assert_eq!(ra.worst_path.len(), rb.worst_path.len(), "worst_path len");
     for (x, y) in ra.worst_path.iter().zip(&rb.worst_path) {
         assert_eq!(x.label, y.label);
@@ -317,7 +331,9 @@ fn incremental_update_matches_full_rebuild_under_random_resizes() {
 
         let mut rng: u64 = 0x9e3779b97f4a7c15 ^ period.to_bits();
         for _ in 0..40 {
-            rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            rng = rng
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             let gate = gates[((rng >> 33) as usize) % gates.len()];
             let cell = cells[((rng >> 29) as usize) % cells.len()];
             t.resize(gate, cell);
@@ -327,7 +343,10 @@ fn incremental_update_matches_full_rebuild_under_random_resizes() {
         }
         // the fast path must have actually carried these updates (else the test is vacuous).
         let (inc, full) = t.update_stats();
-        assert!(inc >= 35, "expected mostly incremental updates, got {inc} inc / {full} full");
+        assert!(
+            inc >= 35,
+            "expected mostly incremental updates, got {inc} inc / {full} full"
+        );
     }
 }
 
@@ -375,6 +394,14 @@ fn timer_checkpoint_restore_round_trips() {
 
     t.restore(ckpt);
     assert_eq!(t.wns(), base); // back to baseline (cached, no recompute)
-    assert_eq!(t.netlist().insts.iter().find(|i| i.name == "u1").unwrap().cell, "INV");
+    assert_eq!(
+        t.netlist()
+            .insts
+            .iter()
+            .find(|i| i.name == "u1")
+            .unwrap()
+            .cell,
+        "INV"
+    );
     assert!(!t.is_dirty());
 }

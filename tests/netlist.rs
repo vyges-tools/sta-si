@@ -16,12 +16,18 @@ fn parses_module_ports_instances() {
     assert_eq!(nl.insts.len(), 2);
     assert_eq!(nl.insts[0].cell, "AND2");
     assert_eq!(nl.insts[0].name, "g1");
-    assert_eq!(nl.insts[0].conns, vec![
-        ("A".into(), "a".into()),
-        ("B".into(), "b".into()),
-        ("Y".into(), "n1".into()),
-    ]);
-    assert_eq!(nl.insts[1].conns, vec![("A".into(), "n1".into()), ("Y".into(), "y".into())]);
+    assert_eq!(
+        nl.insts[0].conns,
+        vec![
+            ("A".into(), "a".into()),
+            ("B".into(), "b".into()),
+            ("Y".into(), "n1".into()),
+        ]
+    );
+    assert_eq!(
+        nl.insts[1].conns,
+        vec![("A".into(), "n1".into()), ("Y".into(), "y".into())]
+    );
 }
 
 #[test]
@@ -48,6 +54,9 @@ fn reassembles_bit_select_connection_nets() {
              BUF g0 ( .A(d0), .X(count[0]) ); BUF g1 ( .A(d1), .X(count[1]) ); endmodule";
     let nl = parse(v).unwrap();
     assert_eq!(nl.outputs, vec!["count[1]", "count[0]"]);
-    assert!(nl.insts[1].conns.contains(&("X".into(), "count[1]".into())),
-        "bit-select net reassembled to count[1], got {:?}", nl.insts[1].conns);
+    assert!(
+        nl.insts[1].conns.contains(&("X".into(), "count[1]".into())),
+        "bit-select net reassembled to count[1], got {:?}",
+        nl.insts[1].conns
+    );
 }

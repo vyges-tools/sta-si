@@ -80,8 +80,16 @@ fn job() -> StaJob {
 fn lvf_tables_drive_pocv_band() {
     let nominal = analyze_inputs(NL, &lib(false), &job()).unwrap(); // no LVF -> no band
     let lvf = analyze_inputs(NL, &lib(true), &job()).unwrap(); // LVF -> 3-sigma band
-    // band = 3·sqrt(4·0.05²) = 0.30 ns shaved off the late slack
+                                                               // band = 3·sqrt(4·0.05²) = 0.30 ns shaved off the late slack
     let band = nominal.wns - lvf.wns;
-    assert!((band - 0.30).abs() < 0.02, "LVF 3-sigma band should be ~0.30 ns, got {band}");
-    assert!(lvf.wns < nominal.wns, "LVF must add pessimism: {} !< {}", lvf.wns, nominal.wns);
+    assert!(
+        (band - 0.30).abs() < 0.02,
+        "LVF 3-sigma band should be ~0.30 ns, got {band}"
+    );
+    assert!(
+        lvf.wns < nominal.wns,
+        "LVF must add pessimism: {} !< {}",
+        lvf.wns,
+        nominal.wns
+    );
 }

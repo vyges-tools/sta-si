@@ -90,30 +90,48 @@ fn job(exceptions: Vec<Exception>) -> StaJob {
 }
 
 fn exc(kind: ExcKind, from: &str, to: &str) -> Exception {
-    Exception { kind, from: from.into(), to: to.into() }
+    Exception {
+        kind,
+        from: from.into(),
+        to: to.into(),
+    }
 }
 
 #[test]
 fn false_path_drops_the_violating_endpoint() {
     let base = analyze_inputs(NL, LIB, &job(vec![])).unwrap();
     // at 0.25 ns the reg→reg path violates and is the worst endpoint
-    assert_eq!(base.worst_endpoint, "r2/D", "base worst {}", base.worst_endpoint);
+    assert_eq!(
+        base.worst_endpoint, "r2/D",
+        "base worst {}",
+        base.worst_endpoint
+    );
     assert!(base.wns < 0.0, "base should violate, wns={}", base.wns);
 
     let fp = analyze_inputs(NL, LIB, &job(vec![exc(ExcKind::FalsePath, "r1", "r2")])).unwrap();
     // r2/D is excluded -> it's no longer the worst, and timing now meets
     assert_ne!(fp.worst_endpoint, "r2/D", "false path should drop r2/D");
-    assert!(fp.wns > 0.0, "with r1->r2 false, design meets: wns={}", fp.wns);
+    assert!(
+        fp.wns > 0.0,
+        "with r1->r2 false, design meets: wns={}",
+        fp.wns
+    );
     assert_eq!(fp.endpoints, base.endpoints - 1, "one fewer setup endpoint");
 }
 
 #[test]
 fn multicycle_relaxes_the_path() {
     let base = analyze_inputs(NL, LIB, &job(vec![])).unwrap();
-    assert!(base.wns < 0.0 && base.worst_endpoint == "r2/D", "base violates at r2/D");
+    assert!(
+        base.wns < 0.0 && base.worst_endpoint == "r2/D",
+        "base violates at r2/D"
+    );
     let mc = analyze_inputs(NL, LIB, &job(vec![exc(ExcKind::Multicycle(2), "r1", "r2")])).unwrap();
     // a 2-cycle path gets one extra period of capture window -> r2/D meets and is
     // no longer the binding endpoint, so the design meets.
     assert!(mc.wns > 0.0, "2-cycle path meets: wns={}", mc.wns);
-    assert_ne!(mc.worst_endpoint, "r2/D", "multicycle should relax r2/D off the critical path");
+    assert_ne!(
+        mc.worst_endpoint, "r2/D",
+        "multicycle should relax r2/D off the critical path"
+    );
 }

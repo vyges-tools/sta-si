@@ -103,7 +103,8 @@ pub fn analyze_job_opts(
     job: &StaJob,
     lib_opts: crate::liberty::LibOpts,
 ) -> Result<TimingReport, StaError> {
-    let nl = netlist::load(&job.resolve(&job.netlist)).map_err(|e| StaError::Parse(e.to_string()))?;
+    let nl =
+        netlist::load(&job.resolve(&job.netlist)).map_err(|e| StaError::Parse(e.to_string()))?;
     let mut lib = Lib::default();
     for l in &job.libs {
         let one = Lib::load_opts(&job.resolve(l), lib_opts)
@@ -131,7 +132,8 @@ pub fn sdf_for_job_opts(
     job: &StaJob,
     lib_opts: crate::liberty::LibOpts,
 ) -> Result<String, StaError> {
-    let nl = netlist::load(&job.resolve(&job.netlist)).map_err(|e| StaError::Parse(e.to_string()))?;
+    let nl =
+        netlist::load(&job.resolve(&job.netlist)).map_err(|e| StaError::Parse(e.to_string()))?;
     let mut lib = Lib::default();
     for l in &job.libs {
         let one = Lib::load_opts(&job.resolve(l), lib_opts)
@@ -171,7 +173,8 @@ pub fn liberty_json_for_job(
 /// Lint a job's SDC constraints (completeness + consistency) against its netlist.
 /// Uses the job's SDC file if present, else the inline `.sta` clock definitions.
 pub fn lint_job(job: &StaJob) -> Result<crate::sdclint::LintReport, StaError> {
-    let nl = netlist::load(&job.resolve(&job.netlist)).map_err(|e| StaError::Parse(e.to_string()))?;
+    let nl =
+        netlist::load(&job.resolve(&job.netlist)).map_err(|e| StaError::Parse(e.to_string()))?;
     let mut lib = Lib::default();
     for l in &job.libs {
         let one = Lib::load(&job.resolve(l)).map_err(|e| StaError::Parse(e.to_string()))?;
@@ -181,7 +184,9 @@ pub fn lint_job(job: &StaJob) -> Result<crate::sdclint::LintReport, StaError> {
         return Err(StaError::Parse("no cells in any .lib".into()));
     }
     let sdc = match &job.sdc {
-        Some(p) => crate::sdc::Sdc::load(&job.resolve(p)).map_err(|e| StaError::Parse(e.to_string()))?,
+        Some(p) => {
+            crate::sdc::Sdc::load(&job.resolve(p)).map_err(|e| StaError::Parse(e.to_string()))?
+        }
         None => {
             // no SDC file — lint the inline `.sta` clocks (still catches a bad period,
             // a duplicate, a registered design with no clock at all).
@@ -252,8 +257,11 @@ impl MarginAdvisory {
         // Over-margined when the design can close ≥ OVER_MARGIN_RATIO× faster than clocked
         // (achievable ≤ 0 satisfies this too).
         let over_margin = achievable <= period_ns / OVER_MARGIN_RATIO;
-        let hold_critical =
-            rep.hold_slacks.iter().filter(|&&(_, sl)| sl <= HOLD_CRIT_MARGIN_NS).count();
+        let hold_critical = rep
+            .hold_slacks
+            .iter()
+            .filter(|&&(_, sl)| sl <= HOLD_CRIT_MARGIN_NS)
+            .count();
         let hold_flood = rep.hold_endpoints > 0
             && hold_critical >= HOLD_FLOOD_MIN
             && (hold_critical as f64) >= HOLD_FLOOD_FRAC * rep.hold_endpoints as f64;
@@ -273,9 +281,16 @@ pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
     let mut s = String::new();
     s.push_str(&format!("STA report — design {}\n", job.design));
     if job.clocks.len() > 1 {
-        let cl: Vec<String> =
-            job.clocks.iter().map(|(n, _, p)| format!("{n}@{p:.2}ns")).collect();
-        s.push_str(&format!("  clocks: {}   xtalk_miller {:.2}\n", cl.join(", "), job.miller));
+        let cl: Vec<String> = job
+            .clocks
+            .iter()
+            .map(|(n, _, p)| format!("{n}@{p:.2}ns"))
+            .collect();
+        s.push_str(&format!(
+            "  clocks: {}   xtalk_miller {:.2}\n",
+            cl.join(", "),
+            job.miller
+        ));
     } else {
         s.push_str(&format!(
             "  clock {}  period {:.3} ns   xtalk_miller {:.2}\n",
@@ -283,16 +298,27 @@ pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
         ));
     }
     let ocv = if job.pocv_sigma > 0.0 {
-        format!("POCV — per-stage sigma {:.3}, {:.1}-sigma band", job.pocv_sigma, job.pocv_n)
+        format!(
+            "POCV — per-stage sigma {:.3}, {:.1}-sigma band",
+            job.pocv_sigma, job.pocv_n
+        )
     } else if !job.aocv_late.is_empty() || !job.aocv_early.is_empty() {
         "AOCV — depth-dependent derate table".to_string()
     } else {
-        format!("flat derate — late {:.3} / early {:.3}", job.late_derate, job.early_derate)
+        format!(
+            "flat derate — late {:.3} / early {:.3}",
+            job.late_derate, job.early_derate
+        )
     };
-    s.push_str(&format!("  OCV: {ocv}   CRPR: {}\n", if job.crpr { "on" } else { "off" }));
+    s.push_str(&format!(
+        "  OCV: {ocv}   CRPR: {}\n",
+        if job.crpr { "on" } else { "off" }
+    ));
     if let Some(pba) = rep.pba_wns {
         let v = if pba >= 0.0 { "MET" } else { "VIOLATED" };
-        s.push_str(&format!("  PBA WNS: {pba:.4} ns   [{v}]  (path-based re-timing)\n"));
+        s.push_str(&format!(
+            "  PBA WNS: {pba:.4} ns   [{v}]  (path-based re-timing)\n"
+        ));
     }
     s.push_str(&format!("  endpoints: {}\n", rep.endpoints));
     if rep.endpoints == 0 {
@@ -310,7 +336,10 @@ pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
     ));
     s.push_str(&format!("    {:>9}  {:>7}   node\n", "arrival", "slew"));
     for p in &rep.worst_path {
-        s.push_str(&format!("    {:9.4}  {:7.4}   {}\n", p.arrival, p.slew, p.label));
+        s.push_str(&format!(
+            "    {:9.4}  {:7.4}   {}\n",
+            p.arrival, p.slew, p.label
+        ));
     }
     if rep.hold_endpoints > 0 {
         let hverdict = if rep.whs >= 0.0 { "MET" } else { "VIOLATED" };
@@ -324,7 +353,10 @@ pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
         ));
         s.push_str(&format!("    {:>9}  {:>7}   node\n", "arrival", "slew"));
         for p in &rep.worst_hold_path {
-            s.push_str(&format!("    {:9.4}  {:7.4}   {}\n", p.arrival, p.slew, p.label));
+            s.push_str(&format!(
+                "    {:9.4}  {:7.4}   {}\n",
+                p.arrival, p.slew, p.label
+            ));
         }
     }
     // Timing-health advisory: achievable clock + over-margin / hold-flood warning (#10).
@@ -359,7 +391,13 @@ pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
 
 /// Render the report as machine-readable JSON (std-only, no deps).
 pub fn report_json(job: &StaJob, rep: &TimingReport) -> String {
-    let num = |v: f64| if v.is_finite() { format!("{v:.6}") } else { "null".to_string() };
+    let num = |v: f64| {
+        if v.is_finite() {
+            format!("{v:.6}")
+        } else {
+            "null".to_string()
+        }
+    };
     let mut s = String::new();
     s.push('{');
     s.push_str(&format!("\"design\":{:?},", job.design));
@@ -370,11 +408,17 @@ pub fn report_json(job: &StaJob, rep: &TimingReport) -> String {
     s.push_str(&format!("\"wns_ns\":{},", num(rep.wns)));
     s.push_str(&format!("\"tns_ns\":{},", num(rep.tns)));
     s.push_str(&format!("\"met\":{},", rep.endpoints > 0 && rep.wns >= 0.0));
-    s.push_str(&format!("\"pba_wns_ns\":{},", rep.pba_wns.map(num).unwrap_or_else(|| "null".into())));
+    s.push_str(&format!(
+        "\"pba_wns_ns\":{},",
+        rep.pba_wns.map(num).unwrap_or_else(|| "null".into())
+    ));
     s.push_str(&format!("\"hold_endpoints\":{},", rep.hold_endpoints));
     s.push_str(&format!("\"whs_ns\":{},", num(rep.whs)));
     s.push_str(&format!("\"ths_ns\":{},", num(rep.ths)));
-    s.push_str(&format!("\"hold_met\":{},", rep.hold_endpoints > 0 && rep.whs >= 0.0));
+    s.push_str(&format!(
+        "\"hold_met\":{},",
+        rep.hold_endpoints > 0 && rep.whs >= 0.0
+    ));
     // The single timing verdict, over both checks. `met` covers setup only, so a
     // consumer reading it alone would call a design timing-clean while it still
     // carried hold violations.
@@ -394,20 +438,33 @@ pub fn report_json(job: &StaJob, rep: &TimingReport) -> String {
     s.push_str(&format!("\"timing_met\":{timing_met},"));
     // Timing-health advisory (#10): achievable clock + over-margin / hold-flood warning.
     if let Some(adv) = MarginAdvisory::compute(job.period_ns, rep) {
-        s.push_str(&format!("\"achievable_period_ns\":{:.6},", adv.achievable_ns));
+        s.push_str(&format!(
+            "\"achievable_period_ns\":{:.6},",
+            adv.achievable_ns
+        ));
         s.push_str(&format!(
             "\"max_freq_mhz\":{},",
-            adv.max_freq_mhz.map(|f| format!("{f:.3}")).unwrap_or_else(|| "null".into())
+            adv.max_freq_mhz
+                .map(|f| format!("{f:.3}"))
+                .unwrap_or_else(|| "null".into())
         ));
         s.push_str(&format!("\"target_freq_mhz\":{:.3},", adv.target_freq_mhz));
         s.push_str(&format!(
             "\"over_margin_ratio\":{},",
-            adv.over_margin_ratio.map(|r| format!("{r:.3}")).unwrap_or_else(|| "null".into())
+            adv.over_margin_ratio
+                .map(|r| format!("{r:.3}"))
+                .unwrap_or_else(|| "null".into())
         ));
-        s.push_str(&format!("\"hold_critical_endpoints\":{},", adv.hold_critical));
+        s.push_str(&format!(
+            "\"hold_critical_endpoints\":{},",
+            adv.hold_critical
+        ));
         s.push_str(&format!("\"over_margin_warning\":{},", adv.warn));
     }
-    s.push_str(&format!("\"worst_hold_endpoint\":{:?},", rep.worst_hold_endpoint));
+    s.push_str(&format!(
+        "\"worst_hold_endpoint\":{:?},",
+        rep.worst_hold_endpoint
+    ));
     s.push_str(&format!("\"worst_endpoint\":{:?},", rep.worst_endpoint));
     s.push_str("\"worst_path\":[");
     for (i, p) in rep.worst_path.iter().enumerate() {
@@ -459,14 +516,21 @@ impl McmmReport {
 
 /// Run every scenario `.sta` listed in the MCMM job and collect the results.
 /// Each scenario is a full, independent STA (own corner libs, derates, clock).
-pub fn analyze_mcmm(job: &StaJob, lib_opts: crate::liberty::LibOpts) -> Result<McmmReport, StaError> {
+pub fn analyze_mcmm(
+    job: &StaJob,
+    lib_opts: crate::liberty::LibOpts,
+) -> Result<McmmReport, StaError> {
     let mut scenarios = Vec::new();
     for s in &job.scenarios {
         let sub = StaJob::load(&job.resolve(s)).map_err(|e| StaError::Parse(e.to_string()))?;
         let report = analyze_job_opts(&sub, lib_opts)?; // CLI knob propagates to every corner
-        // Label the row by the scenario file (the corner identity, e.g. `ss_n40C_1v60`),
-        // not the design name — every scenario shares the same design.
-        scenarios.push(ScenarioResult { name: scenario_label(s), period_ns: sub.period_ns, report });
+                                                        // Label the row by the scenario file (the corner identity, e.g. `ss_n40C_1v60`),
+                                                        // not the design name — every scenario shares the same design.
+        scenarios.push(ScenarioResult {
+            name: scenario_label(s),
+            period_ns: sub.period_ns,
+            report,
+        });
     }
     if scenarios.is_empty() {
         return Err(StaError::Parse("MCMM job lists no scenarios".into()));
@@ -499,8 +563,16 @@ pub fn render_mcmm(job: &StaJob, rep: &McmmReport) -> String {
             (false, true) => "HOLD VIOLATED",
             (true, true) => "SETUP+HOLD VIOLATED",
         };
-        let wns = if r.endpoints > 0 { format!("{:.4}", r.wns) } else { "  —".into() };
-        let whs = if r.hold_endpoints > 0 { format!("{:.4}", r.whs) } else { "  —".into() };
+        let wns = if r.endpoints > 0 {
+            format!("{:.4}", r.wns)
+        } else {
+            "  —".into()
+        };
+        let whs = if r.hold_endpoints > 0 {
+            format!("{:.4}", r.whs)
+        } else {
+            "  —".into()
+        };
         s.push_str(&format!(
             "  {:<20} {:>8.3}  {:>12}  {:>12}   {}\n",
             sc.name, sc.period_ns, wns, whs, verdict
@@ -510,14 +582,18 @@ pub fn render_mcmm(job: &StaJob, rep: &McmmReport) -> String {
     match rep.worst_setup() {
         Some((name, wns)) => s.push_str(&format!(
             "  worst setup: {:.4} ns  (scenario {})   [{}]\n",
-            wns, name, if wns >= 0.0 { "MET" } else { "VIOLATED" }
+            wns,
+            name,
+            if wns >= 0.0 { "MET" } else { "VIOLATED" }
         )),
         None => s.push_str("  worst setup: (no setup endpoints)\n"),
     }
     match rep.worst_hold() {
         Some((name, whs)) => s.push_str(&format!(
             "  worst hold:  {:.4} ns  (scenario {})   [{}]\n",
-            whs, name, if whs >= 0.0 { "MET" } else { "VIOLATED" }
+            whs,
+            name,
+            if whs >= 0.0 { "MET" } else { "VIOLATED" }
         )),
         None => s.push_str("  worst hold:  (no hold endpoints)\n"),
     }
@@ -526,7 +602,13 @@ pub fn render_mcmm(job: &StaJob, rep: &McmmReport) -> String {
 
 /// MCMM report as machine-readable JSON.
 pub fn mcmm_json(job: &StaJob, rep: &McmmReport) -> String {
-    let num = |v: f64| if v.is_finite() { format!("{v:.6}") } else { "null".to_string() };
+    let num = |v: f64| {
+        if v.is_finite() {
+            format!("{v:.6}")
+        } else {
+            "null".to_string()
+        }
+    };
     let mut s = String::new();
     s.push('{');
     s.push_str(&format!("\"design\":{:?},", job.design));
@@ -550,7 +632,8 @@ pub fn mcmm_json(job: &StaJob, rep: &McmmReport) -> String {
     ));
     s.push_str(&format!(
         "\"worst_setup_scenario\":{},",
-        ws.map(|x| format!("{:?}", x.0)).unwrap_or_else(|| "null".into())
+        ws.map(|x| format!("{:?}", x.0))
+            .unwrap_or_else(|| "null".into())
     ));
     s.push_str(&format!(
         "\"worst_hold_ns\":{},",
@@ -558,7 +641,8 @@ pub fn mcmm_json(job: &StaJob, rep: &McmmReport) -> String {
     ));
     s.push_str(&format!(
         "\"worst_hold_scenario\":{},",
-        wh.map(|x| format!("{:?}", x.0)).unwrap_or_else(|| "null".into())
+        wh.map(|x| format!("{:?}", x.0))
+            .unwrap_or_else(|| "null".into())
     ));
     let met = ws.map(|x| x.1 >= 0.0).unwrap_or(true) && wh.map(|x| x.1 >= 0.0).unwrap_or(true);
     s.push_str(&format!("\"met\":{met}"));

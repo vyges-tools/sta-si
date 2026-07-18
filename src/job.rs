@@ -73,10 +73,10 @@ pub struct StaJob {
     pub pocv_n: f64,     // number of sigmas for the statistical bound (default 3.0)
     pub aocv_late: Vec<(f64, f64)>, // AOCV late derate vs path depth: (stages, derate)
     pub aocv_early: Vec<(f64, f64)>, // AOCV early derate vs path depth
-    pub miller: f64, // crosstalk Miller coupling factor (2.0 worst late; 1.0 disables SI)
+    pub miller: f64,     // crosstalk Miller coupling factor (2.0 worst late; 1.0 disables SI)
     pub xtalk_window: f64, // ns — guard band added to the slew-derived switching window
     pub crpr: bool, // remove clock-reconvergence pessimism on the shared clock path (default true)
-    pub pba: bool,  // path-based analysis: re-time critical paths with path-local slews (default false)
+    pub pba: bool, // path-based analysis: re-time critical paths with path-local slews (default false)
     // MCMM: when non-empty, this is a multi-corner/multi-mode job — each entry is a
     // path to a single-scenario `.sta`; the engine runs all and reports the worst
     // setup and worst hold across them. The fields above are then unused.
@@ -166,10 +166,15 @@ impl StaJob {
                 let (name, src, per) = match toks.as_slice() {
                     [src, per] => (src.to_string(), src.to_string(), per),
                     [name, src, per] => (name.to_string(), src.to_string(), per),
-                    _ => return Err(JobError("clock needs 'port period' or 'name source period'".into())),
+                    _ => {
+                        return Err(JobError(
+                            "clock needs 'port period' or 'name source period'".into(),
+                        ))
+                    }
                 };
-                let period: f64 =
-                    per.parse().map_err(|_| JobError(format!("bad clock period: {per:?}")))?;
+                let period: f64 = per
+                    .parse()
+                    .map_err(|_| JobError(format!("bad clock period: {per:?}")))?;
                 clocks.push((name, src, period));
                 continue;
             }
@@ -177,12 +182,15 @@ impl StaJob {
                 // `false_path: <from> <to>`   `multicycle: <from> <to> <cycles>`
                 let t: Vec<&str> = v.split_whitespace().collect();
                 let exc = match (key.as_str(), t.as_slice()) {
-                    ("false_path", [from, to]) => {
-                        Exception { kind: ExcKind::FalsePath, from: from.to_string(), to: to.to_string() }
-                    }
+                    ("false_path", [from, to]) => Exception {
+                        kind: ExcKind::FalsePath,
+                        from: from.to_string(),
+                        to: to.to_string(),
+                    },
                     ("multicycle", [from, to, n]) => {
-                        let cyc: u32 =
-                            n.parse().map_err(|_| JobError(format!("bad multicycle count: {n:?}")))?;
+                        let cyc: u32 = n
+                            .parse()
+                            .map_err(|_| JobError(format!("bad multicycle count: {n:?}")))?;
                         Exception {
                             kind: ExcKind::Multicycle(cyc),
                             from: from.to_string(),
@@ -196,11 +204,21 @@ impl StaJob {
             }
             kv.insert(key, v.trim().to_string());
         }
-        let get = |k: &str| kv.get(k).cloned().ok_or_else(|| JobError(format!("missing key: {k}")));
-        let split_list = |s: &str| {
-            s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect::<Vec<_>>()
+        let get = |k: &str| {
+            kv.get(k)
+                .cloned()
+                .ok_or_else(|| JobError(format!("missing key: {k}")))
         };
-        let scenarios = kv.get("scenarios").map(|s| split_list(s)).unwrap_or_default();
+        let split_list = |s: &str| {
+            s.split(',')
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+        };
+        let scenarios = kv
+            .get("scenarios")
+            .map(|s| split_list(s))
+            .unwrap_or_default();
         let mcmm = !scenarios.is_empty();
         let sdc = kv.get("sdc").filter(|s| !s.is_empty()).cloned();
         // clock/netlist/lib are required for a single run, optional for an MCMM job
@@ -235,8 +253,14 @@ impl StaJob {
             aocv_early: kv.get("aocv_early").map(|s| pairs(s)).unwrap_or_default(),
             miller: num("miller", 2.0),
             xtalk_window: num("xtalk_window", 0.0), // guard band on top of slew-derived window
-            crpr: kv.get("crpr").map(|s| s != "false" && s != "0").unwrap_or(true),
-            pba: kv.get("pba").map(|s| s == "true" || s == "1").unwrap_or(false),
+            crpr: kv
+                .get("crpr")
+                .map(|s| s != "false" && s != "0")
+                .unwrap_or(true),
+            pba: kv
+                .get("pba")
+                .map(|s| s == "true" || s == "1")
+                .unwrap_or(false),
             scenarios,
             exceptions,
             async_groups: Vec::new(),
@@ -253,7 +277,10 @@ impl StaJob {
 
     pub fn load(path: &str) -> Result<StaJob, JobError> {
         let text = std::fs::read_to_string(path).map_err(|e| JobError(format!("{path}: {e}")))?;
-        let base = Path::new(path).parent().and_then(|p| p.to_str()).unwrap_or(".");
+        let base = Path::new(path)
+            .parent()
+            .and_then(|p| p.to_str())
+            .unwrap_or(".");
         let mut job = StaJob::parse(&text, base)?;
         if let Some(sdc_path) = job.sdc.clone() {
             let resolved = job.resolve(&sdc_path);
@@ -268,7 +295,10 @@ impl StaJob {
         if Path::new(rel).is_absolute() || self.base_dir.is_empty() {
             rel.to_string()
         } else {
-            Path::new(&self.base_dir).join(rel).to_string_lossy().into_owned()
+            Path::new(&self.base_dir)
+                .join(rel)
+                .to_string_lossy()
+                .into_owned()
         }
     }
 
@@ -304,8 +334,11 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
     }
     // clocks: SDC is authoritative when present.
     if !sdc.clocks.is_empty() {
-        job.clocks =
-            sdc.clocks.iter().map(|c| (c.name.clone(), c.source.clone(), c.period)).collect();
+        job.clocks = sdc
+            .clocks
+            .iter()
+            .map(|c| (c.name.clone(), c.source.clone(), c.period))
+            .collect();
         job.clock_port = job.clocks[0].1.clone();
         job.period_ns = job.clocks[0].2;
     }
@@ -318,7 +351,8 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
             in_def = Some(d.value);
         }
         for p in &d.ports {
-            job.io_input_delays.push((p.clone(), d.value + sdc.clock_latency));
+            job.io_input_delays
+                .push((p.clone(), d.value + sdc.clock_latency));
         }
     }
     if let Some(v) = in_def {
@@ -330,7 +364,8 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
             out_def = Some(d.value);
         }
         for p in &d.ports {
-            job.io_output_delays.push((p.clone(), d.value + sdc.clock_latency));
+            job.io_output_delays
+                .push((p.clone(), d.value + sdc.clock_latency));
         }
     }
     if let Some(v) = out_def {

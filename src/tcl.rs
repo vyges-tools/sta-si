@@ -179,7 +179,9 @@ pub fn adapt(script_path: &str) -> Result<Adapted, TclError> {
     }
 
     if design.is_empty() {
-        return Err(TclError("no `link_design <top>` — cannot determine the design".into()));
+        return Err(TclError(
+            "no `link_design <top>` — cannot determine the design".into(),
+        ));
     }
     if netlist.is_empty() {
         return Err(TclError("no `read_verilog <netlist>`".into()));
@@ -213,7 +215,11 @@ pub fn adapt(script_path: &str) -> Result<Adapted, TclError> {
 
     ignored.sort();
     ignored.dedup();
-    Ok(Adapted { job, reports: reports.defaulted(), ignored })
+    Ok(Adapted {
+        job,
+        reports: reports.defaulted(),
+        ignored,
+    })
 }
 
 /// A bare [`StaJob`] with the same defaults `StaJob::parse` uses; the constraint
@@ -276,11 +282,23 @@ pub fn render(job: &StaJob, rep: &crate::sta::TimingReport, reports: &Reports) -
 
     let want_max = reports.checks_max || reports.wns || reports.tns || reports.worst_slack;
     if reports.checks && want_max {
-        s.push_str(&path_block(job, "max", rep.endpoints, &rep.worst_endpoint, rep.wns, &rep.worst_path));
+        s.push_str(&path_block(
+            job,
+            "max",
+            rep.endpoints,
+            &rep.worst_endpoint,
+            rep.wns,
+            &rep.worst_path,
+        ));
     }
     if reports.checks && reports.checks_min {
         s.push_str(&path_block(
-            job, "min", rep.hold_endpoints, &rep.worst_hold_endpoint, rep.whs, &rep.worst_hold_path,
+            job,
+            "min",
+            rep.hold_endpoints,
+            &rep.worst_hold_endpoint,
+            rep.whs,
+            &rep.worst_hold_path,
         ));
     }
     // Scalars (OpenSTA `report_wns`/`report_tns`/`report_worst_slack` print the value).
@@ -309,7 +327,11 @@ fn path_block(
     slack: f64,
     path: &[crate::sta::PathNode],
 ) -> String {
-    let label = if kind == "max" { "max (Setup)" } else { "min (Hold)" };
+    let label = if kind == "max" {
+        "max (Setup)"
+    } else {
+        "min (Hold)"
+    };
     let mut s = String::new();
     s.push_str(&format!("Path Type: {label}\n"));
     if endpoints == 0 || path.is_empty() {
@@ -320,9 +342,15 @@ fn path_block(
     s.push_str(&format!("  Startpoint: {startpoint}\n"));
     s.push_str(&format!("  Endpoint:   {endpoint}\n"));
     s.push_str(&format!("  Path Group: {}\n", job.clock_port));
-    s.push_str(&format!("    {:>10}  {:>8}   {}\n", "Arrival", "Slew", "Node"));
+    s.push_str(&format!(
+        "    {:>10}  {:>8}   {}\n",
+        "Arrival", "Slew", "Node"
+    ));
     for p in path {
-        s.push_str(&format!("    {:10.4}  {:8.4}   {}\n", p.arrival, p.slew, p.label));
+        s.push_str(&format!(
+            "    {:10.4}  {:8.4}   {}\n",
+            p.arrival, p.slew, p.label
+        ));
     }
     let met = if slack >= 0.0 { "MET" } else { "VIOLATED" };
     s.push_str(&format!("    slack {} ({})\n\n", fmt(slack), met));
@@ -438,8 +466,14 @@ fn first_file(toks: &[String]) -> Option<String> {
 
 fn unwrap(s: &str) -> String {
     let s = s.trim();
-    let s = s.strip_prefix('{').and_then(|x| x.strip_suffix('}')).unwrap_or(s);
-    let s = s.strip_prefix('"').and_then(|x| x.strip_suffix('"')).unwrap_or(s);
+    let s = s
+        .strip_prefix('{')
+        .and_then(|x| x.strip_suffix('}'))
+        .unwrap_or(s);
+    let s = s
+        .strip_prefix('"')
+        .and_then(|x| x.strip_suffix('"'))
+        .unwrap_or(s);
     s.trim().to_string()
 }
 
@@ -474,7 +508,10 @@ mod tests {
     #[test]
     fn tokenizes_keeping_groups() {
         let t = tokenize("set_input_delay 0.1 -clock clk [get_ports a]");
-        assert_eq!(t, ["set_input_delay", "0.1", "-clock", "clk", "[get_ports a]"]);
+        assert_eq!(
+            t,
+            ["set_input_delay", "0.1", "-clock", "clk", "[get_ports a]"]
+        );
     }
 
     #[test]
@@ -495,7 +532,13 @@ mod tests {
     #[test]
     fn path_delay_flags() {
         assert_eq!(path_delay(&tokenize("report_checks")), (false, true));
-        assert_eq!(path_delay(&tokenize("report_checks -path_delay min")), (true, false));
-        assert_eq!(path_delay(&tokenize("report_checks -path_delay min_max")), (true, true));
+        assert_eq!(
+            path_delay(&tokenize("report_checks -path_delay min")),
+            (true, false)
+        );
+        assert_eq!(
+            path_delay(&tokenize("report_checks -path_delay min_max")),
+            (true, true)
+        );
     }
 }

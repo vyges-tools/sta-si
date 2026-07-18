@@ -31,7 +31,10 @@ fn single_rc_step_response_is_069_rc() {
     // transient with a fast (near-step) driver edge
     let tr = rc.transient("3:Y", 0.001, 0.0).expect("tree");
     let (delay, slew) = tr.get("4:A").copied().expect("sink");
-    assert!((delay - 0.693).abs() < 0.03, "RC step 50% should be ~0.693 ns, got {delay}");
+    assert!(
+        (delay - 0.693).abs() < 0.03,
+        "RC step 50% should be ~0.693 ns, got {delay}"
+    );
     assert!(slew > 0.0, "sink should have a finite slew, got {slew}");
 
     // Elmore (first moment) over-estimates: R·C = 1.0 ns
