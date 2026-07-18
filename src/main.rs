@@ -183,12 +183,39 @@ fn parse_cli(args: &[String]) -> Cli {
     c
 }
 
+/// Add `"report_path"` to a `--json` payload so the result says where its report landed.
+///
+/// String surgery rather than a JSON round-trip because this crate is std-only. Inserting
+/// after the opening brace keeps every existing field untouched; an empty object gets no
+/// trailing comma.
+fn with_report_path(json: &str, path: Option<&str>) -> String {
+    let (Some(p), Some(rest)) = (path, json.trim_start().strip_prefix('{')) else {
+        return json.to_string();
+    };
+    let esc = p.replace('\\', "\\\\").replace('"', "\\\"");
+    let sep = if rest.trim_start().starts_with('}') {
+        ""
+    } else {
+        ","
+    };
+    format!("{{\"report_path\": \"{esc}\"{sep}{rest}")
+}
+
+/// Write the report, and — when `--json` — always put the machine payload on stdout.
+///
+/// `-o` used to redirect the JSON itself, so asking for the report file cost you the parsed
+/// result: stdout carried only `wrote <path>`. Now the file still receives exactly what it
+/// did before, the notice moves to stderr where status messages belong, and stdout keeps the
+/// payload so a caller gets the verdict *and* the artifact.
 fn write_out(text: &str, cli: &Cli) {
     match &cli.out {
         Some(path) => match std::fs::write(path, text) {
             Ok(_) => {
                 if !cli.quiet {
-                    println!("wrote {path}");
+                    eprintln!("wrote {path}");
+                }
+                if cli.json {
+                    print!("{text}");
                 }
             }
             Err(e) => {
@@ -333,7 +360,7 @@ fn emit_sta_si_events(job: &StaJob, rep: &TimingReport) {
 fn emit(job: &StaJob, rep: &TimingReport, cli: &Cli) -> ! {
     emit_sta_si_events(job, rep); // vyges-events causal trail on stderr; report goes to stdout / -o
     let text = if cli.json {
-        engine::report_json(job, rep)
+        with_report_path(&engine::report_json(job, rep), cli.out.as_deref())
     } else {
         engine::render_report(job, rep)
     };
@@ -434,7 +461,7 @@ fn main() {
       "out": { "type": "string", "description": "write the report to FILE instead of stdout" }
     }
   },
-  "artifacts": [ { "role": "timing_report", "from_arg": "out" }, { "role": "sdf", "from_arg": "sdf" } ],
+  "artifacts": [ { "role": "timing_report", "field": "report_path" }, { "role": "sdf", "from_arg": "sdf" } ],
   "assertion": {
     "id": "timing-met",
     "field": "timing_met",
