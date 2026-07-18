@@ -447,6 +447,10 @@ fn main() {
         const DESCRIBE: &str = r#"{
   "name": "sta-si",
   "summary": "static timing analysis with signal integrity (job → report)",
+  "maturity": "workflow-validated",
+  "provenance_limitations": [
+      "The job names the netlist, Liberty and SPEF; input_hash covers the job path and arguments, not their contents, and Liberty `include` files are not enumerated."
+  ],
   "invocation": {
     "args_template": ["run", "{job}"],
     "optional": [ { "arg": "sdf", "flag": "--sdf" }, { "arg": "out", "flag": "-o" }, { "arg": "nldm_only", "flag": "--liberty-nldm-only" }, { "arg": "emit_liberty_json", "flag": "--emit-liberty-json" } ],
