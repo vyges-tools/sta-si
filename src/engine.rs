@@ -256,6 +256,17 @@ pub struct SlackDistribution {
     pub critical: usize,
 }
 
+// NOT PROVIDED: the same distribution for SETUP slack.
+//
+// `TimingReport` carries per-endpoint hold slacks (the hold-fix ECO ranks from them) but not
+// setup ones -- those live on the `Timer` and would mean widening a struct built for every
+// run. The flood this advisory is about is a hold phenomenon, so the setup shape has no
+// established consumer yet.
+//
+// Add it when something actually asks: a closure-lesson loop that wants setup shape, or a
+// case where the setup distribution would have explained a failure the WNS alone did not.
+// Until then it would be a wider hot struct serving nobody. See vyges-tools-internal#10.
+
 impl SlackDistribution {
     /// `slacks` need not be sorted. `None` for an empty population: a distribution over
     /// nothing is not zero, it is absent, and reporting zeros would read as "everything is
