@@ -1,6 +1,6 @@
 [package]
 name = "vyges-sta-si"
-version = "0.1.17"
+version = "0.1.18"
 edition = "2021"
 description = "Static timing analysis with signal integrity: WNS/TNS sign-off with a CI gate."
 license = "Apache-2.0"
