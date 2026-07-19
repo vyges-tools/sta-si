@@ -238,6 +238,57 @@ pub struct MarginAdvisory {
     pub warn: bool,
 }
 
+/// The shape of the hold-slack population, not just its worst point.
+///
+/// A hold *flood* and a handful of bad paths have the same WHS; what separates them is how
+/// many endpoints sit near the cliff. A hold-fixer pads every one of those, so the
+/// distribution — not the worst value — is what predicts the buffer-budget burden that
+/// sank the motivating case (RSZ-0060, max buffer count reached).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SlackDistribution {
+    pub count: usize,
+    pub min_ns: f64,
+    pub p10_ns: f64,
+    pub median_ns: f64,
+    pub p90_ns: f64,
+    pub max_ns: f64,
+    /// Endpoints at or below the hold-critical margin — the ones a fixer will act on.
+    pub critical: usize,
+}
+
+impl SlackDistribution {
+    /// `slacks` need not be sorted. `None` for an empty population: a distribution over
+    /// nothing is not zero, it is absent, and reporting zeros would read as "everything is
+    /// exactly on the line".
+    pub fn of(slacks: &[(crate::sta::PinId, f64)]) -> Option<SlackDistribution> {
+        let mut v: Vec<f64> = slacks
+            .iter()
+            .map(|&(_, s)| s)
+            .filter(|s| s.is_finite())
+            .collect();
+        if v.is_empty() {
+            return None;
+        }
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // Nearest-rank percentiles: no interpolation between endpoints, because every value
+        // here is an actual endpoint's slack and inventing a value between two of them would
+        // report a path that does not exist.
+        let at = |q: f64| -> f64 {
+            let i = ((q * (v.len() - 1) as f64).round() as usize).min(v.len() - 1);
+            v[i]
+        };
+        Some(SlackDistribution {
+            count: v.len(),
+            min_ns: v[0],
+            p10_ns: at(0.10),
+            median_ns: at(0.50),
+            p90_ns: at(0.90),
+            max_ns: v[v.len() - 1],
+            critical: v.iter().filter(|&&s| s <= HOLD_CRIT_MARGIN_NS).count(),
+        })
+    }
+}
+
 impl MarginAdvisory {
     /// Derive the advisory from the target period and a completed report. Returns `None`
     /// when there is no setup timing to reason about (no endpoints, non-finite WNS, or a
@@ -419,6 +470,55 @@ pub fn report_json(job: &StaJob, rep: &TimingReport) -> String {
         "\"hold_met\":{},",
         rep.hold_endpoints > 0 && rep.whs >= 0.0
     ));
+    // Timing-health advisory (#10). This is the half a machine consumer needs: the
+    // soc-generator closure-lesson loop tunes per-PDK knob defaults from it, and it cannot
+    // scrape a text report or reconstruct this from an event stream.
+    //
+    // `null` rather than an invented number wherever the quantity is not meaningful: no
+    // setup endpoints, a non-finite WNS, or a critical path so short that a finite max
+    // frequency says nothing. A consumer can tell "not applicable" from "zero".
+    match MarginAdvisory::compute(job.period_ns, rep) {
+        Some(adv) => {
+            s.push_str("\"timing_health\":{");
+            s.push_str(&format!("\"achievable_ns\":{},", num(adv.achievable_ns)));
+            s.push_str(&format!(
+                "\"max_freq_mhz\":{},",
+                adv.max_freq_mhz.map(num).unwrap_or_else(|| "null".into())
+            ));
+            s.push_str(&format!(
+                "\"target_freq_mhz\":{},",
+                num(adv.target_freq_mhz)
+            ));
+            s.push_str(&format!(
+                "\"over_margin_ratio\":{},",
+                adv.over_margin_ratio
+                    .map(num)
+                    .unwrap_or_else(|| "null".into())
+            ));
+            s.push_str(&format!("\"hold_critical\":{},", adv.hold_critical));
+            s.push_str(&format!("\"over_margin_warn\":{}", adv.warn));
+            s.push('}');
+            s.push(',');
+        }
+        None => s.push_str("\"timing_health\":null,"),
+    }
+    // The hold-slack shape, which is what distinguishes a flood from a few bad paths at the
+    // same WHS — and therefore what predicts the hold-fix burden.
+    match SlackDistribution::of(&rep.hold_slacks) {
+        Some(d) => {
+            s.push_str("\"hold_slack_distribution\":{");
+            s.push_str(&format!("\"count\":{},", d.count));
+            s.push_str(&format!("\"min_ns\":{},", num(d.min_ns)));
+            s.push_str(&format!("\"p10_ns\":{},", num(d.p10_ns)));
+            s.push_str(&format!("\"median_ns\":{},", num(d.median_ns)));
+            s.push_str(&format!("\"p90_ns\":{},", num(d.p90_ns)));
+            s.push_str(&format!("\"max_ns\":{},", num(d.max_ns)));
+            s.push_str(&format!("\"critical\":{}", d.critical));
+            s.push('}');
+            s.push(',');
+        }
+        None => s.push_str("\"hold_slack_distribution\":null,"),
+    }
     // The single timing verdict, over both checks. `met` covers setup only, so a
     // consumer reading it alone would call a design timing-clean while it still
     // carried hold violations.

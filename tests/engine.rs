@@ -2,6 +2,7 @@
 
 use vyges_sta_si::engine::{
     analyze_job, analyze_job_opts, liberty_json_for_job, render_report, MarginAdvisory,
+    SlackDistribution,
 };
 use vyges_sta_si::job::StaJob;
 use vyges_sta_si::liberty::LibOpts;
@@ -128,4 +129,120 @@ fn liberty_json_dumps_the_shared_ir() {
     assert!(js.contains("\"cell_count\":"));
     assert!(js.contains("\"cells\":{"));
     assert!(js.contains("\"direction\":")); // at least one pin serialized
+}
+
+// ---- what a machine consumer reads (#10) ----
+//
+// The advisory existed in the text report and the event stream but not in the JSON. The
+// soc-generator closure-lesson loop tunes per-PDK knob defaults from these numbers, and it
+// can neither scrape a text report nor reconstruct them from an event stream.
+
+fn health_json(period: f64, rep: &vyges_sta_si::sta::TimingReport) -> String {
+    let mut job =
+        StaJob::load(concat!(env!("CARGO_MANIFEST_DIR"), "/examples/top/top.sta")).unwrap();
+    job.period_ns = period;
+    vyges_sta_si::engine::report_json(&job, rep)
+}
+
+#[test]
+fn json_carries_the_timing_health_advisory() {
+    let rep = synthetic_report(26.0, 100, 50);
+    let j = health_json(40.0, &rep);
+    // the decision-relevant numbers, not just a boolean
+    assert!(j.contains("\"timing_health\""), "{j}");
+    assert!(j.contains("\"achievable_ns\":14.000000"), "{j}");
+    assert!(j.contains("\"over_margin_warn\":true"), "{j}");
+    assert!(j.contains("\"hold_critical\":50"), "{j}");
+    // ~71.4 MHz achievable against a 25 MHz target
+    assert!(j.contains("\"target_freq_mhz\":25.000000"), "{j}");
+    assert!(j.contains("\"max_freq_mhz\":71.4"), "{j}");
+}
+
+/// A quantity that is not meaningful must be `null`, never a plausible number: a consumer
+/// has to be able to tell "not applicable" from "zero".
+#[test]
+fn json_reports_null_rather_than_inventing_a_frequency() {
+    // no setup endpoints at all → no advisory to give
+    let mut empty = synthetic_report(0.0, 0, 0);
+    empty.endpoints = 0;
+    let j = health_json(40.0, &empty);
+    assert!(j.contains("\"timing_health\":null"), "{j}");
+
+    // critical path ≈ 0 at this clock → a finite max frequency says nothing
+    let comb = synthetic_report(40.0, 0, 0);
+    let j = health_json(40.0, &comb);
+    assert!(j.contains("\"max_freq_mhz\":null"), "{j}");
+    assert!(j.contains("\"over_margin_ratio\":null"), "{j}");
+}
+
+/// A hold flood and a handful of bad paths share the same WHS. The distribution is what
+/// separates them, and therefore what predicts the hold-fix burden.
+#[test]
+fn the_hold_distribution_separates_a_flood_from_a_few_bad_paths() {
+    let flood = synthetic_report(26.0, 100, 90); // 90 of 100 at the cliff
+    let few = synthetic_report(26.0, 100, 3); //  3 of 100
+    let d_flood = SlackDistribution::of(&flood.hold_slacks).expect("flood");
+    let d_few = SlackDistribution::of(&few.hold_slacks).expect("few");
+
+    assert_eq!(d_flood.count, 100);
+    assert_eq!(d_flood.critical, 90);
+    assert_eq!(d_few.critical, 3);
+    // identical worst slack...
+    assert_eq!(d_flood.min_ns, d_few.min_ns);
+    // ...but the median tells them apart: the flood's middle endpoint is at the cliff.
+    assert_eq!(d_flood.median_ns, 0.0);
+    assert_eq!(d_few.median_ns, 1.0);
+}
+
+#[test]
+fn an_empty_population_has_no_distribution_rather_than_a_zero_one() {
+    // Zeros would read as "every endpoint is exactly on the line", which is a claim.
+    assert!(SlackDistribution::of(&[]).is_none());
+    let j = health_json(40.0, &synthetic_report(26.0, 0, 0));
+    assert!(j.contains("\"hold_slack_distribution\":null"), "{j}");
+}
+
+#[test]
+fn percentiles_are_real_endpoint_values_not_interpolations() {
+    // Slacks 0,1,2,3,4 — a median of 2 is an endpoint that exists; 2.5 would not be.
+    let s: Vec<(usize, f64)> = (0..5).map(|i| (i, i as f64)).collect();
+    let d = SlackDistribution::of(&s).expect("dist");
+    assert_eq!((d.min_ns, d.median_ns, d.max_ns), (0.0, 2.0, 4.0));
+    assert!(s.iter().any(|&(_, v)| v == d.p10_ns));
+    assert!(s.iter().any(|&(_, v)| v == d.p90_ns));
+}
+
+/// The payload is assembled by hand, so its realistic failure modes are a trailing comma
+/// before a closing brace and unbalanced braces — both of which make it unparseable for the
+/// consumer this block exists to serve. Checked without pulling in a JSON parser, since this
+/// crate is deliberately std-only.
+#[test]
+fn the_json_stays_well_formed_with_the_new_blocks() {
+    for rep in [
+        synthetic_report(26.0, 100, 50), // advisory + distribution present
+        synthetic_report(-5.0, 10, 0),   // setup violated, no hold flood
+        synthetic_report(26.0, 0, 0),    // both blocks null
+    ] {
+        let j = health_json(40.0, &rep);
+        let compact: String = j.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            !compact.contains(",}") && !compact.contains(",]"),
+            "trailing comma makes the payload unparseable:\n{j}"
+        );
+        let mut depth = 0i32;
+        let mut in_str = false;
+        let mut prev_escape = false;
+        for c in j.chars() {
+            match c {
+                '"' if !prev_escape => in_str = !in_str,
+                '{' | '[' if !in_str => depth += 1,
+                '}' | ']' if !in_str => depth -= 1,
+                _ => {}
+            }
+            prev_escape = c == '\\' && !prev_escape;
+            assert!(depth >= 0, "unbalanced close in:\n{j}");
+        }
+        assert_eq!(depth, 0, "unbalanced braces in:\n{j}");
+        assert!(!in_str, "unterminated string in:\n{j}");
+    }
 }
