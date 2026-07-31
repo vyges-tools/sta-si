@@ -1,0 +1,72 @@
+/* Fixture: a flop with an asynchronous reset, shaped like sky130's dfrtp.
+   RESET_B carries recovery/removal (its own tables) and a clear EFFECT arc to Q —
+   deliberately different numbers from D's setup/hold, so a test that checked the
+   wrong table could not pass by coincidence. */
+library(tie) {
+  time_unit : "1ns";
+  capacitive_load_unit (1, pf);
+  slew_lower_threshold_pct_rise : 20.0;
+  slew_upper_threshold_pct_rise : 80.0;
+  slew_lower_threshold_pct_fall : 20.0;
+  slew_upper_threshold_pct_fall : 80.0;
+  cell (BUF) {
+    area : 2.0;
+    pin(A) { direction : input; capacitance : 0.001; }
+    pin(X) { direction : output; function : "A";
+      timing () { related_pin : "A"; timing_type : combinational;
+        cell_rise(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.05, 0.07", "0.08, 0.11"); }
+        cell_fall(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.05, 0.07", "0.08, 0.11"); }
+        rise_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.02, 0.03", "0.03, 0.05"); }
+        fall_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.02, 0.03", "0.03, 0.05"); } } }
+  }
+  cell (CONB) {
+    /* tie cell, shaped like sky130 conb_1: outputs a fixed level, no timing arcs */
+    area : 3.7;
+    pin("HI") { direction : "output"; function : "1"; }
+    pin("LO") { direction : "output"; function : "0"; }
+  }
+  cell (AND2) {
+    area : 3.0;
+    pin(A) { direction : input; capacitance : 0.001; }
+    pin(B) { direction : input; capacitance : 0.001; }
+    pin(X) { direction : output; function : "A&B";
+      timing () { related_pin : "A"; timing_type : combinational;
+        cell_rise(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.06, 0.08", "0.09, 0.12"); }
+        cell_fall(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.06, 0.08", "0.09, 0.12"); }
+        rise_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.02, 0.03", "0.03, 0.05"); }
+        fall_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.02, 0.03", "0.03, 0.05"); } }
+      timing () { related_pin : "B"; timing_type : combinational;
+        cell_rise(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.06, 0.08", "0.09, 0.12"); }
+        cell_fall(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.06, 0.08", "0.09, 0.12"); }
+        rise_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.02, 0.03", "0.03, 0.05"); }
+        fall_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.02, 0.03", "0.03, 0.05"); } } }
+  }
+  cell (DFRTP) {
+    area : 6.0;
+    ff (IQ, IQN) { clocked_on : "CLK"; next_state : "D"; clear : "!RESET_B"; }
+    pin(CLK) { direction : input; clock : true; capacitance : 0.001; }
+    pin(D) { direction : input; capacitance : 0.001;
+      timing () { related_pin : "CLK"; timing_type : setup_rising;
+        rise_constraint(s) { index_1("0.01, 0.1"); index_2("0.01, 0.1"); values("0.05, 0.05", "0.05, 0.05"); }
+        fall_constraint(s) { index_1("0.01, 0.1"); index_2("0.01, 0.1"); values("0.05, 0.05", "0.05, 0.05"); } }
+      timing () { related_pin : "CLK"; timing_type : hold_rising;
+        rise_constraint(s) { index_1("0.01, 0.1"); index_2("0.01, 0.1"); values("0.02, 0.02", "0.02, 0.02"); }
+        fall_constraint(s) { index_1("0.01, 0.1"); index_2("0.01, 0.1"); values("0.02, 0.02", "0.02, 0.02"); } } }
+    pin(RESET_B) { direction : input; capacitance : 0.001;
+      timing () { related_pin : "CLK"; timing_type : recovery_rising;
+        rise_constraint(s) { index_1("0.01, 0.1"); index_2("0.01, 0.1"); values("0.11, 0.11", "0.11, 0.11"); }
+        fall_constraint(s) { index_1("0.01, 0.1"); index_2("0.01, 0.1"); values("0.11, 0.11", "0.11, 0.11"); } }
+      timing () { related_pin : "CLK"; timing_type : removal_rising;
+        rise_constraint(s) { index_1("0.01, 0.1"); index_2("0.01, 0.1"); values("0.07, 0.07", "0.07, 0.07"); }
+        fall_constraint(s) { index_1("0.01, 0.1"); index_2("0.01, 0.1"); values("0.07, 0.07", "0.07, 0.07"); } } }
+    pin(Q) { direction : output; function : "IQ";
+      timing () { related_pin : "CLK"; timing_type : rising_edge;
+        cell_rise(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.30, 0.32", "0.33, 0.36"); }
+        cell_fall(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.30, 0.32", "0.33, 0.36"); }
+        rise_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.04, 0.05", "0.05, 0.07"); }
+        fall_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.04, 0.05", "0.05, 0.07"); } }
+      timing () { related_pin : "RESET_B"; timing_type : clear;
+        cell_fall(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.25, 0.27", "0.28, 0.30"); }
+        fall_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.05, 0.06", "0.06, 0.08"); } } }
+  }
+}

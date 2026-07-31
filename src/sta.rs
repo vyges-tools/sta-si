@@ -960,6 +960,9 @@ fn build_report(
     // arrival is the clock insertion delay to this flop (skew).
     let mut flop_d: Vec<(usize, Vec<Constraint>, Option<String>)> = Vec::new();
     let mut flop_hold: Vec<(usize, Vec<Constraint>, Option<String>)> = Vec::new();
+    // Nodes that drive a fixed logic level (tie cells: `function : "1"` / `"0"`). A net
+    // driven by one can never switch, so it carries no timing — see the edge build below.
+    let mut const_driver: Vec<bool> = Vec::new();
     let mut ck_node_list: Vec<usize> = Vec::new(); // nodes that are clock (CK) pins
     for inst in &nl.insts {
         // physical-only cells (fill/decap/tap/antenna) have no connections and no
@@ -990,6 +993,12 @@ fn build_report(
             match cell.pins.get(pin).map(|p| p.direction) {
                 Some(Dir::Out) => {
                     nets.get_mut(net).unwrap().driver.get_or_insert(idx);
+                    if cell.pins[pin].is_constant() {
+                        if const_driver.len() <= idx {
+                            const_driver.resize(idx + 1, false);
+                        }
+                        const_driver[idx] = true;
+                    }
                 }
                 Some(Dir::In) => {
                     // Miller-aware receiver load when the pin carries a CCS receiver
@@ -1263,8 +1272,19 @@ fn build_report(
         let mut order: Vec<usize> = Vec::new();
         for v in 0..n {
             if indeg_work[v] == 0 {
-                arr[v] = [seed[v]; 2]; // input ports seed with their SDC arrival delay
-                arr_nom[v] = [seed[v]; 2];
+                // A tie cell drives a LEVEL, not an edge — it is a source of no
+                // transition. Leaving it unreached (rather than seeded at t=0) is what
+                // makes its whole fanout untimed: the net arc refuses to propagate from a
+                // non-finite arrival, every sink then arrives unreached too, and the
+                // endpoint guards drop them. Seeding it at 0 instead invents a launch at
+                // time zero and manufactures hold violations on wires that cannot switch.
+                //
+                // It is still pushed, so the topological walk stays consistent and a gate
+                // with one constant input still times correctly through its other inputs.
+                if !const_driver.get(v).copied().unwrap_or(false) {
+                    arr[v] = [seed[v]; 2]; // input ports seed with their SDC arrival delay
+                    arr_nom[v] = [seed[v]; 2];
+                }
                 order.push(v);
             }
         }

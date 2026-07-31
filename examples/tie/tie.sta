@@ -1,0 +1,9 @@
+# Constant (tie-cell) propagation: a net driven by `function : "1"`/`"0"` never switches,
+# so it carries no timing — and a gate with one constant input must still time through
+# its other input.
+design:      tie
+netlist:     tie.v
+lib:         tie.lib
+clock:       clk 2.0
+input_slew:  0.02
+output_load: 0.005
