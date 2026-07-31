@@ -172,3 +172,82 @@ pub fn plan_hold_repair(t: &mut Timer, opts: &RepairOpts) -> Result<Plan, StaErr
     }
     Ok(plan)
 }
+
+/// Schema tag written into every emitted plan. Bump it if the shape changes incompatibly —
+/// an applier that does not recognise the tag must refuse rather than guess.
+pub const PLAN_SCHEMA: &str = "vyges-eco-plan-v1";
+
+impl Plan {
+    /// Serialize as an **ECO plan** — the interchange between planning and applying.
+    ///
+    /// The two sides are deliberately joined by a *file*, not a library call: the planner lives
+    /// in the timer and the applier lives in the database layer, and neither should have to link
+    /// the other. It also makes the plan a reviewable artifact — someone can read what is about
+    /// to happen to their design before it happens.
+    ///
+    /// `design` is carried so an applier can refuse a plan aimed at a different block.
+    ///
+    /// Each fix names the target as `"inst/pin"`, which is exactly the addressing the ODB
+    /// applier already uses for buffer insertion.
+    pub fn to_json(&self, design: &str) -> String {
+        let num = |v: f64| {
+            if v.is_finite() {
+                format!("{v:.6}")
+            } else {
+                "null".to_string()
+            }
+        };
+        let mut s = String::new();
+        s.push('{');
+        s.push_str(&format!("\"schema\":{PLAN_SCHEMA:?},"));
+        s.push_str(&format!("\"design\":{design:?},"));
+        s.push_str(&format!("\"fix_count\":{},", self.fixes.len()));
+        s.push_str("\"metrics\":{");
+        s.push_str(&format!("\"whs_before_ns\":{},", num(self.whs_before)));
+        s.push_str(&format!("\"whs_after_ns\":{},", num(self.whs_after)));
+        s.push_str(&format!("\"ths_before_ns\":{},", num(self.ths_before)));
+        s.push_str(&format!("\"ths_after_ns\":{},", num(self.ths_after)));
+        s.push_str(&format!("\"wns_before_ns\":{},", num(self.wns_before)));
+        s.push_str(&format!("\"wns_after_ns\":{}", num(self.wns_after)));
+        s.push_str("},");
+        s.push_str("\"fixes\":[");
+        for (i, f) in self.fixes.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            match &f.mv {
+                Move::InsertDelay { inst, pin, cell, name } => {
+                    s.push_str("{\"op\":\"insert_delay\",");
+                    s.push_str(&format!("\"target\":{:?},", format!("{inst}/{pin}")));
+                    s.push_str(&format!("\"inst\":{inst:?},"));
+                    s.push_str(&format!("\"pin\":{pin:?},"));
+                    s.push_str(&format!("\"cell\":{cell:?},"));
+                    s.push_str(&format!("\"name\":{name:?},"));
+                }
+                Move::Resize { inst, cell } => {
+                    s.push_str("{\"op\":\"resize\",");
+                    s.push_str(&format!("\"target\":{inst:?},"));
+                    s.push_str(&format!("\"inst\":{inst:?},"));
+                    s.push_str(&format!("\"cell\":{cell:?},"));
+                }
+            }
+            s.push_str(&format!("\"whs_before_ns\":{},", num(f.whs_before)));
+            s.push_str(&format!("\"whs_after_ns\":{}", num(f.whs_after)));
+            s.push('}');
+        }
+        s.push_str("],");
+        s.push_str("\"rejected\":[");
+        for (i, r) in self.rejected.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!(
+                "{{\"target\":{:?},\"reason\":{:?}}}",
+                r.target.label,
+                format!("{:?}", r.reason)
+            ));
+        }
+        s.push_str("]}");
+        s
+    }
+}
