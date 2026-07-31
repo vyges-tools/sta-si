@@ -46,8 +46,8 @@ is a toolchain-wide property: char, extract, and em-ir are configured the same w
 formats** (Verilog, Liberty, SPEF, SDC), so you iterate timing in the fast Vyges loop
 and hand the *same files* to OpenSTA or the commercial sign-off timer for final sign-off — no flow change,
 just a different timer on identical inputs. That interop is demonstrated, not promised:
-on a real routed block, sta-si and OpenSTA agree on WNS within **0.5%** from the same
-library/SPEF/SDC. Adopt it for the fast inner loop where licenses are scarce and runs
+on a real routed block, sta-si and OpenSTA agree on WNS within **~1 %** — on the same critical
+path — from the same library/SPEF/SDC. Adopt it for the fast inner loop where licenses are scarce and runs
 are slow; keep your sign-off tool for tape-out.
 
 **Built on a shared foundation, not a private front end.** The readers — Verilog and **Yosys
@@ -143,6 +143,7 @@ reproducible rather than a number you have to take on trust.
 | --- | --- | --- | --- | --- |
 | routed sky130 block | 144 k | 20 MB SPEF | **10 s** | 0.5 GB |
 | ISPD 2013 `netcard` | **982 k** | ideal | **33 s** | 10.6 GB |
+| ISPD 2013 `netcard` | **982 k** | **1.3 GB SPEF** | **45 min** | 17.5 GB |
 
 **With parasitics, what governs the runtime is extraction detail, not gate count.** The per-net
 RC transient solve dominates, and it scales with how finely each net was extracted:
@@ -151,13 +152,18 @@ RC transient solve dominates, and it scales with how finely each net was extract
 | --- | --- | --- | --- |
 | routed sky130 block | 144 k | 0.14 KB | **0.07 ms** |
 | ISPD `des_perf` | 107 k | 0.87 KB | **2.38 ms** |
+| ISPD `netcard` | 982 k | 1.39 KB | **2.73 ms** |
 | ISPD `cordic` | 35 k | 1.07 KB | **2.85 ms** |
 
-Two designs of near-identical size differ by **34×** in time per instance, because one is
-extracted six times more finely. So "how many gates" is the wrong question to ask about runtime
-here — "how detailed is the SPEF" is the right one. Practical reading: on a densely extracted
-netlist, run it without parasitics for the fast iteration loop and with them when you want the
-SI and RC-accurate answer.
+The three densely extracted designs cluster at **2.4–2.9 ms per instance across a 28× range in
+size**, while the sky130 block — extracted six to ten times less finely — runs **34× faster per
+instance**. So "how many gates" is the wrong question to ask about runtime here; "how detailed
+is the SPEF" is the right one.
+
+Practical reading: on a densely extracted netlist, run without parasitics for the fast iteration
+loop, and with them when you want the SI and RC-accurate answer. The two are not close in cost,
+and on this benchmark the parasitics move WNS by well under a picosecond on a 2 ns period — so
+which one you want is a real choice, not a formality.
 
 ### Where it sits vs OpenSTA / the commercial signoff timer — run it *first*, not *instead*
 
