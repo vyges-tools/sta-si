@@ -1,0 +1,9 @@
+# The shared ECO-loop fixture: this same design also exists as eco_demo.odb in vyges-opendb,
+# emitted from the same generator, so a plan produced here applies there by construction.
+design:      eco_demo
+netlist:     eco_demo.v
+lib:         eco_demo.lib
+clock:       clk 1.0
+input_slew:  0.02
+output_load: 0.005
+hold_uncertainty: 0.25   # creates a real hold violation for the repair to close
