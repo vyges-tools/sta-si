@@ -126,12 +126,38 @@ stated as gaps rather than papered over.
 | --- | --- | --- |
 | **Statistical STA / on-chip variation** | **yes** | Flat derate, **AOCV** (depth-dependent derate table), and **POCV** — a per-stage sigma with an N-sigma band growing as √depth (RSS), not linearly. Auto-enables from Liberty **LVF** `ocv_sigma_*` tables when the library carries them. **CRPR** credits back shared launch/capture clock pessimism. |
 | **SI and crosstalk analysis** | **yes** | Coupling capacitance from SPEF with a Miller multiplier, filtered by **switching-window overlap** and iterated to convergence. **CCS** current-source delay when the Liberty has it, **effective capacitance** with resistive shielding (π-model reduction, Ceff iteration), and a **waveform-into-RC transient** for net delay and sink-slew degradation, measured at the library's own slew thresholds. |
-| **Very large designs (>10 M gates)** | **not proven** | Measured on a post-route block of **144 k instances** with 20 MB of parasitics: **~10 s wall, ~0.5 GB peak**, single-threaded, SI iteration and all. A persistent timing graph then lets an optimizer re-time only the cone it changed rather than repeat that. Nothing at 10 M instances has been run, so nothing is claimed there — the honest reading of the numbers above is that memory, not runtime, is what would bind first. |
+| **Very large designs (>10 M gates)** | **not proven** | Runs just under **1 M instances** in ~33 s at ~11 GB, single-threaded. Nothing at 10 M has been run, so nothing is claimed there. Measured numbers, and the thing that actually governs them, are below. |
 | **Fits an existing flow** | **partial** | Standard formats end to end: Liberty (NLDM/CCS/LVF), gate-level Verilog or Yosys JSON, SPEF, SDC in; SDF back-annotation and JSON reports out. Driven by a declarative job file, or an **experimental** OpenSTA-style Tcl subset. That subset is not a drop-in for a Tcl-driven sign-off flow, and is not meant to be — see below. |
 
 The first two are the point: they are the margins the open baseline does not give you, and they
 are why running this **alongside** an open sign-off timer tells you something new rather than
 repeating it. The last two are honest limits, not roadmap promises.
+
+#### Measured scale
+
+Single-threaded, one core, no tuning. The second row is a public benchmark
+([ISPD 2013 `netcard`](http://www.ispd.cc/contests/13/ispd2013_contest.html)), so it is
+reproducible rather than a number you have to take on trust.
+
+| design | instances | interconnect | wall | peak RSS |
+| --- | --- | --- | --- | --- |
+| routed sky130 block | 144 k | 20 MB SPEF | **10 s** | 0.5 GB |
+| ISPD 2013 `netcard` | **982 k** | ideal | **33 s** | 10.6 GB |
+
+**With parasitics, what governs the runtime is extraction detail, not gate count.** The per-net
+RC transient solve dominates, and it scales with how finely each net was extracted:
+
+| design | instances | SPEF per instance | wall per instance |
+| --- | --- | --- | --- |
+| routed sky130 block | 144 k | 0.14 KB | **0.07 ms** |
+| ISPD `des_perf` | 107 k | 0.87 KB | **2.38 ms** |
+| ISPD `cordic` | 35 k | 1.07 KB | **2.85 ms** |
+
+Two designs of near-identical size differ by **34×** in time per instance, because one is
+extracted six times more finely. So "how many gates" is the wrong question to ask about runtime
+here — "how detailed is the SPEF" is the right one. Practical reading: on a densely extracted
+netlist, run it without parasitics for the fast iteration loop and with them when you want the
+SI and RC-accurate answer.
 
 ### Where it sits vs OpenSTA / the commercial signoff timer — run it *first*, not *instead*
 
