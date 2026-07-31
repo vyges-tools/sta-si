@@ -152,6 +152,51 @@ destination (the `.sta` job stays the recommended driver). **It's experimental a
 feedback**: which OpenSTA commands and report formats does your flow actually depend on? File a
 feature request (`vyges-sta-si --feature-request`) — real usage should draw the subset boundary.
 
+### Coming from Yosys — feed `write_json` straight in
+
+If you synthesise with **Yosys**, you do not need to write Verilog back out for us to re-parse.
+`vyges-sta-si` reads Yosys's JSON netlist directly: point `netlist:` at a `.json` and the reader
+is chosen from the extension.
+
+Whatever your Yosys script does, end it with `write_json` instead of `write_verilog`:
+
+```sh
+# ... your usual synthesis + tech mapping ...
+yosys -p "read_verilog rtl/*.v; synth -top top; \
+          dfflibmap -liberty cells.lib; abc -liberty cells.lib; \
+          write_json top.json"
+```
+
+```text
+design:  top
+netlist: top.json        # Yosys write_json — .v works exactly the same way
+lib:     cells.lib
+clock:   clk 1.0
+```
+
+```sh
+vyges-sta-si run top.sta --json
+```
+
+Skipping the Verilog round trip removes a step that costs time and invites dialect drift — the
+netlist you time is the one Yosys actually produced.
+
+**The format changes nothing about the answer.** Both readers build the same in-memory netlist,
+so slack, the critical path and the SDF output are identical either way. That is asserted, not
+assumed: [`examples/top/top_yosys.json`](examples/top/top_yosys.json) is genuine `write_json`
+output for [`top.v`](examples/top/top.v), [`top_json.sta`](examples/top/top_json.sta) is the
+matching job, and [`tests/yosys_json.rs`](tests/yosys_json.rs) checks the two jobs agree on WNS,
+TNS and the worst endpoint.
+
+Already have a gate-level netlist and just want the JSON? Yosys will convert it without
+synthesising anything:
+
+```sh
+yosys -p "read_verilog top.v; write_json top.json"
+```
+
+Post-layout, add your `spef:` as usual — the netlist source is independent of parasitics.
+
 ### Integrating into a flow — three ways (the leanest needs no adapter)
 
 1. **Direct binary** *(recommended for new / upstream integration)* — `vyges-sta-si` is a plain
@@ -247,7 +292,7 @@ A job (`*.sta`) is a few `key: value` lines:
 
 ```text
 design:      top
-netlist:     top.v          # gate-level structural Verilog
+netlist:     top.v          # gate-level Verilog — or top.json from Yosys write_json
 lib:         cells.lib      # one or more, comma-separated
 spef:        top.spef       # optional parasitics -> wire load + net delay
 clock:       clk 1.0        # clock port + period (ns); repeat for multiple clocks:

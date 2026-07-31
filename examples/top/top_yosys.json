@@ -1,0 +1,95 @@
+{
+  "creator": "Yosys 0.62 (git sha1 7326bb7d6641500ecb285c291a54a662cb1e76cf, clang++ 17.0.0 -fPIC -O3)",
+  "modules": {
+    "top": {
+      "attributes": {
+        "cells_not_processed": "00000000000000000000000000000001",
+        "src": "top.v:2.1-9.10"
+      },
+      "ports": {
+        "a": {
+          "direction": "input",
+          "bits": [ 2 ]
+        },
+        "y": {
+          "direction": "output",
+          "bits": [ 3 ]
+        }
+      },
+      "cells": {
+        "g1": {
+          "hide_name": 0,
+          "type": "INV",
+          "parameters": {
+          },
+          "attributes": {
+            "module_not_derived": "00000000000000000000000000000001",
+            "src": "top.v:6.7-6.28"
+          },
+          "connections": {
+            "A": [ 2 ],
+            "Y": [ 4 ]
+          }
+        },
+        "g2": {
+          "hide_name": 0,
+          "type": "INV",
+          "parameters": {
+          },
+          "attributes": {
+            "module_not_derived": "00000000000000000000000000000001",
+            "src": "top.v:7.7-7.28"
+          },
+          "connections": {
+            "A": [ 4 ],
+            "Y": [ 5 ]
+          }
+        },
+        "g3": {
+          "hide_name": 0,
+          "type": "INV",
+          "parameters": {
+          },
+          "attributes": {
+            "module_not_derived": "00000000000000000000000000000001",
+            "src": "top.v:8.7-8.28"
+          },
+          "connections": {
+            "A": [ 5 ],
+            "Y": [ 3 ]
+          }
+        }
+      },
+      "netnames": {
+        "a": {
+          "hide_name": 0,
+          "bits": [ 2 ],
+          "attributes": {
+            "src": "top.v:3.10-3.11"
+          }
+        },
+        "n1": {
+          "hide_name": 0,
+          "bits": [ 4 ],
+          "attributes": {
+            "src": "top.v:5.10-5.12"
+          }
+        },
+        "n2": {
+          "hide_name": 0,
+          "bits": [ 5 ],
+          "attributes": {
+            "src": "top.v:5.14-5.16"
+          }
+        },
+        "y": {
+          "hide_name": 0,
+          "bits": [ 3 ],
+          "attributes": {
+            "src": "top.v:4.10-4.11"
+          }
+        }
+      }
+    }
+  }
+}

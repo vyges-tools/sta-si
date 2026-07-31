@@ -1,0 +1,12 @@
+# Same job as top.sta, but the netlist is Yosys write_json output instead of Verilog.
+# Nothing else differs — tests/yosys_json.rs asserts both jobs report the same WNS/TNS
+# and the same worst endpoint. Regenerate with:
+#   yosys -p "read_verilog top.v; write_json top_yosys.json"
+design:      top
+netlist:     top_yosys.json
+lib:         cells.lib
+spef:        top.spef     # parasitics -> wire load + Elmore net delay
+clock:       clk 1.0      # port + period (ns)
+input_slew:  0.02         # ns
+output_load: 0.005        # pF at the primary output
+late_derate: 1.0          # OCV late derate on cell delays

@@ -7,6 +7,7 @@
 use crate::job::StaJob;
 use crate::liberty::Lib;
 use crate::netlist;
+use crate::yosys_json;
 use crate::spef::Spef;
 use crate::sta::{self, StaError, TimingReport};
 
@@ -97,14 +98,34 @@ pub fn analyze_job(job: &StaJob) -> Result<TimingReport, StaError> {
 }
 
 /// Like [`analyze_job`] but with explicit Liberty load options — e.g. `skip_ccs`
+/// Load a gate-level netlist, choosing the reader from the file extension.
+///
+/// `.json` is a **Yosys** netlist (`write_json`), anything else is structural Verilog. Both
+/// readers come from `vyges-loom` and return the same `Netlist`, so everything downstream —
+/// timing, SI, SDF — is identical whichever way the design arrived.
+///
+/// This matters because Yosys is how most open flows produce a gate-level netlist in the first
+/// place: `write_json` is a first-class output, and taking it directly avoids a Verilog
+/// write/re-parse round trip (and the dialect drift that comes with it).
+pub fn load_netlist(path: &str) -> Result<crate::netlist::Netlist, StaError> {
+    let res = if std::path::Path::new(path)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+    {
+        yosys_json::load(path)
+    } else {
+        netlist::load(path)
+    };
+    res.map_err(|e| StaError::Parse(e.to_string()))
+}
+
 /// for `--liberty-nldm-only`. CCS pruning is a load-time choice (not job state), so
 /// it is a parameter here rather than a field on [`StaJob`].
 pub fn analyze_job_opts(
     job: &StaJob,
     lib_opts: crate::liberty::LibOpts,
 ) -> Result<TimingReport, StaError> {
-    let nl =
-        netlist::load(&job.resolve(&job.netlist)).map_err(|e| StaError::Parse(e.to_string()))?;
+    let nl = load_netlist(&job.resolve(&job.netlist))?;
     let mut lib = Lib::default();
     for l in &job.libs {
         let one = Lib::load_opts(&job.resolve(l), lib_opts)
@@ -132,8 +153,7 @@ pub fn sdf_for_job_opts(
     job: &StaJob,
     lib_opts: crate::liberty::LibOpts,
 ) -> Result<String, StaError> {
-    let nl =
-        netlist::load(&job.resolve(&job.netlist)).map_err(|e| StaError::Parse(e.to_string()))?;
+    let nl = load_netlist(&job.resolve(&job.netlist))?;
     let mut lib = Lib::default();
     for l in &job.libs {
         let one = Lib::load_opts(&job.resolve(l), lib_opts)
@@ -173,8 +193,7 @@ pub fn liberty_json_for_job(
 /// Lint a job's SDC constraints (completeness + consistency) against its netlist.
 /// Uses the job's SDC file if present, else the inline `.sta` clock definitions.
 pub fn lint_job(job: &StaJob) -> Result<crate::sdclint::LintReport, StaError> {
-    let nl =
-        netlist::load(&job.resolve(&job.netlist)).map_err(|e| StaError::Parse(e.to_string()))?;
+    let nl = load_netlist(&job.resolve(&job.netlist))?;
     let mut lib = Lib::default();
     for l in &job.libs {
         let one = Lib::load(&job.resolve(l)).map_err(|e| StaError::Parse(e.to_string()))?;

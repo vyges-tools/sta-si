@@ -21,7 +21,7 @@ pub mod job;
 // Parsers + CCS data model now come from the shared vyges-loom foundation
 // (sta-si was loom's seed — these originated here). Re-exported under the crate
 // root so `crate::liberty` / `crate::sdc` / … keep resolving across the engine.
-pub use vyges_loom::{ccs, liberty, netlist, sdc, spef};
+pub use vyges_loom::{ccs, liberty, netlist, sdc, spef, yosys_json};
 pub mod engine;
 mod inc;
 pub mod sdclint; // SDC constraint linter (completeness + consistency)
