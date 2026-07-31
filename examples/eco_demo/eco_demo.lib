@@ -180,4 +180,43 @@ library (eco_demo) {
       }
     }
   }
+
+  /* High-Vt sibling of DFF: same footprint, same area, SAME CK and D capacitance, ~1.6x slower
+     clock-to-Q. The CK load being identical is the whole point — it leaves the clock network
+     completely unperturbed, which is what makes this swap incrementally analysable (Tier A in
+     docs/loom/incremental-timing-sequential-cells.md). DFF_X2 changes CK cap and therefore
+     cannot be. */
+  cell (DFF_HVT) {
+    cell_footprint : "dff";
+    area : 5.0;
+    ff (IQ, IQN) { clocked_on : "CK"; next_state : "D"; }
+    pin (CK) { direction : input; clock : true; capacitance : 0.001; }
+    pin (D) {
+      direction : input;
+      capacitance : 0.001;
+      timing () {
+        related_pin : "CK";
+        timing_type : setup_rising;
+        rise_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.06" ); }
+        fall_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.06" ); }
+      }
+      timing () {
+        related_pin : "CK";
+        timing_type : hold_rising;
+        rise_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.01" ); }
+        fall_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.01" ); }
+      }
+    }
+    pin (Q) {
+      direction : output;
+      timing () {
+        related_pin : "CK";
+        timing_type : rising_edge;
+        cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.16, 0.35", "0.22, 0.48" ); }
+        cell_fall (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.16, 0.35", "0.22, 0.48" ); }
+        rise_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.05, 0.14", "0.06, 0.17" ); }
+        fall_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.05, 0.14", "0.06, 0.17" ); }
+      }
+    }
+  }
 }

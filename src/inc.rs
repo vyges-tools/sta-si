@@ -72,6 +72,42 @@ pub(crate) struct HoldRec {
     pub launch_ck: Option<usize>,
 }
 
+/// Whether swapping `old` for `new` leaves the **clock network** untouched.
+///
+/// This timer does not use ideal clocks: it builds a clock tree, finds the least common
+/// ancestor of a launch/capture pair, and credits CRPR from the OCV spread there. So changing a
+/// flop's CK-pin capacitance changes clock arrival at *every other flop on that net* and shifts
+/// the CRPR credit of every pair whose common point lies below the change — emphatically not a
+/// cone-local edit.
+///
+/// When the CK pin's capacitance is **identical**, none of that happens: the clock driver sees
+/// the same load, so every clock arrival, slew and CRPR credit is unchanged by construction, and
+/// only the data-side effects remain (the CK→Q arc, the D-pin load, and the setup/hold
+/// constraint tables). That is the shape of a **Vt swap** — same size, same load, different
+/// threshold — which is the standard flop-level hold fix.
+///
+/// Deliberately strict: every clock pin must exist in both cells with the same capacitance. An
+/// unknown is a refusal, not an assumption.
+fn ck_load_preserving(old: &crate::liberty::Cell, new: &crate::liberty::Cell) -> bool {
+    // both must agree on which pin is the clock, or we are not comparing like with like
+    if old.clock_pin != new.clock_pin {
+        return false;
+    }
+    for (name, op) in &old.pins {
+        if !op.clock {
+            continue;
+        }
+        let Some(np) = new.pins.get(name) else {
+            return false; // clock pin missing from the replacement
+        };
+        if !np.clock || np.load_cap().to_bits() != op.load_cap().to_bits() {
+            return false; // any change in clock load perturbs the clock network
+        }
+    }
+    // and the replacement must not introduce a clock pin the original did not have
+    new.pins.iter().all(|(name, np)| !np.clock || old.pins.get(name).is_some_and(|op| op.clock))
+}
+
 /// Immutable timing topology — built once, never mutated, never cloned.
 pub(crate) struct IncTopo {
     pub n: usize,
@@ -256,13 +292,23 @@ impl IncGraph {
         moves: &[(String, String, String)],
     ) -> Option<(TimingReport, Timing)> {
         let mut seeds: Vec<usize> = Vec::new();
+        // Tier A (see docs/loom/incremental-timing-sequential-cells.md): a sequential swap that
+        // leaves CK load untouched changes the endpoint's setup/hold CONSTRAINT TABLES, which
+        // live in the immutable topology. Collect replacements here and apply them where the
+        // records are evaluated — the same override trick the arc rebuild already uses.
+        let mut cons_override: HashMap<usize, (Vec<Constraint>, Vec<Constraint>)> = HashMap::new();
 
         for (inst, old_c, new_c) in moves {
             let new_cell = lib.cell(new_c)?;
             let old_cell = lib.cell(old_c)?;
-            // combinational only: a sequential / clock cell is not handled by this path.
+            // Sequential cells are handled only under an EXPLICIT positive condition — see
+            // `ck_load_preserving`. The rule for this path is that anything it does not fully
+            // understand is a miss, never a guess, so the condition is proved rather than the
+            // old bail relaxed.
             if new_cell.is_seq || new_cell.clock_pin.is_some() {
-                return None;
+                if !ck_load_preserving(old_cell, new_cell) {
+                    return None;
+                }
             }
             let iref = nl.insts.iter().find(|i| &i.name == inst)?;
             for (pin, net) in &iref.conns {
@@ -273,7 +319,30 @@ impl IncGraph {
                     return None;
                 }
                 match nd {
+                    Dir::In if new_cell.pins[pin].clock => {
+                        // A clock input under Tier A: its capacitance is identical (that is the
+                        // precondition), so the clock net's driver sees no change and must NOT
+                        // seed the cone — seeding here would walk into the clock network and
+                        // trip the clock-in-cone bail on an edit that provably cannot perturb it.
+                        debug_assert_eq!(
+                            new_cell.pins[pin].load_cap().to_bits(),
+                            old_cell.pins[pin].load_cap().to_bits()
+                        );
+                    }
                     Dir::In => {
+                        // a data endpoint's setup/hold tables belong to the CELL, so a swap
+                        // changes the check itself, not just the arrival
+                        if new_cell.is_seq {
+                            if let Some(&ep) = self.topo.label2idx.get(&format!("{inst}/{pin}")) {
+                                cons_override.insert(
+                                    ep,
+                                    (
+                                        new_cell.pins[pin].setup.clone(),
+                                        new_cell.pins[pin].hold.clone(),
+                                    ),
+                                );
+                            }
+                        }
                         // input pin cap changed → the net's driver sees a different load.
                         let d = *self.topo.net_driver.get(net)?;
                         let old_cap = old_cell.pins[pin].load_cap();
@@ -374,7 +443,8 @@ impl IncGraph {
             if self.launch_ck(r.idx, &from) != r.launch_ck {
                 return None;
             }
-            let setup_v = eval_cons(&r.cons, r.ck_slew, slew[r.idx]);
+            let cons = cons_override.get(&r.idx).map(|(su, _)| su).unwrap_or(&r.cons);
+            let setup_v = eval_cons(cons, r.ck_slew, slew[r.idx]);
             endpoint_req[r.idx] = r.base - setup_v;
         }
         for r in &self.topo.hold_recs {
@@ -417,7 +487,8 @@ impl IncGraph {
                 continue;
             }
             hold_endpoints += 1;
-            let hold_v = eval_cons(&r.cons, r.ck_slew, slew_min[r.idx]);
+            let cons = cons_override.get(&r.idx).map(|(_, ho)| ho).unwrap_or(&r.cons);
+            let hold_v = eval_cons(cons, r.ck_slew, slew_min[r.idx]);
             let slack = arr_min[r.idx] + r.base - hold_v;
             hold_slacks.push((r.idx, slack));
             if slack < 0.0 {
