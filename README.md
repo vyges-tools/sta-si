@@ -50,6 +50,15 @@ on a real routed block, sta-si and OpenSTA agree on WNS within **0.5%** from the
 library/SPEF/SDC. Adopt it for the fast inner loop where licenses are scarce and runs
 are slow; keep your sign-off tool for tape-out.
 
+**Built on a shared foundation, not a private front end.** The readers — Verilog and **Yosys
+JSON** netlists, Liberty (NLDM + CCS), SDC, SPEF — are not part of this timer. They live in
+[**`vyges-loom`**](https://github.com/vyges-tools/loom), the data plane every Vyges engine sits
+on: parse once, query many. So the netlist you time is the same object `vyges-power`,
+`vyges-extract` and `vyges-lvs` see, and a format the foundation learns is a format every engine
+gains — Yosys JSON support reached this timer as a few lines, not a port. It is also why adding
+a reader never drags a whole application in behind it (see
+[`docs/opensta-integration.md`](docs/opensta-integration.md)).
+
 ## The problem it solves
 
 Given a **gate-level netlist** (`*.v`), one or more **Liberty** libraries
@@ -196,6 +205,17 @@ yosys -p "read_verilog top.v; write_json top.json"
 ```
 
 Post-layout, add your `spef:` as usual — the netlist source is independent of parasitics.
+
+**What about ABC's `-liberty` timing?** ABC reads Liberty and has its own static timer
+(`read_lib`, `stime`), and it is *not* OpenSTA — it is UC Berkeley ABC's own, independent of any
+sign-off timer. But it is **mapping-time estimation**: it exists to steer gate selection during
+technology mapping, so it works from library delays alone — no parasitics, no SDC exceptions or
+generated clocks, no crosstalk, no OCV/AOCV derating. That is the right trade for choosing
+gates, and the wrong basis for believing a number.
+
+So the two do not overlap and nothing needs reconciling: ABC picks the gates, then
+`vyges-sta-si` times the netlist it produced, with SPEF, your real SDC, SI and derating applied.
+Mapping estimate first, timing analysis second.
 
 ### Integrating into a flow — three ways (the leanest needs no adapter)
 
