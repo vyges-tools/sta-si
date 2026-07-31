@@ -1009,6 +1009,23 @@ fn build_report(
                         if !cell.pins[pin].hold.is_empty() {
                             flop_hold.push((idx, cell.pins[pin].hold.clone(), ck_key.clone()));
                         }
+                        // Asynchronous set/reset. Recovery is setup's counterpart (the
+                        // release must arrive early enough before the capture edge) and
+                        // removal is hold's (it must stay stable long enough after it) —
+                        // same slack arithmetic, different table and different pin, so
+                        // they join the same endpoint lists rather than duplicating it.
+                        //
+                        // Without this an async pin carries no check at all: it has no
+                        // setup/hold groups, so nothing above ever names it. On a real
+                        // block that is not a rounding error — sky130 `dfrtp` reset pins
+                        // account for roughly a fifth of the design's hold checks.
+                        if !cell.pins[pin].recovery.is_empty() {
+                            is_endpoint[idx] = true;
+                            flop_d.push((idx, cell.pins[pin].recovery.clone(), ck_key.clone()));
+                        }
+                        if !cell.pins[pin].removal.is_empty() {
+                            flop_hold.push((idx, cell.pins[pin].removal.clone(), ck_key.clone()));
+                        }
                     }
                 }
                 _ => {}

@@ -1,0 +1,9 @@
+# Async set/reset fixture: exercises recovery (setup-side) and removal (hold-side)
+# checks on RESET_B, which carries neither setup nor hold and so was previously
+# left entirely unchecked.
+design:      async_rst
+netlist:     async_rst.v
+lib:         async_rst.lib
+clock:       clk 2.0
+input_slew:  0.02
+output_load: 0.005
