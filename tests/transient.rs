@@ -2,6 +2,7 @@
 // edge has a 50% delay of 0.69·RC = 0.693 ns — the true step response — versus
 // Elmore's first-moment R·C = 1.0 ns. The transient solver must hit 0.69, and be
 // below Elmore.
+use vyges_sta_si::liberty::Thresholds;
 use vyges_sta_si::spef::Spef;
 
 const SPEF: &str = r#"
@@ -29,7 +30,9 @@ fn single_rc_step_response_is_069_rc() {
     let rc = spef.nets.get("n1").expect("net n1");
 
     // transient with a fast (near-step) driver edge
-    let tr = rc.transient("3:Y", 0.001, 0.0).expect("tree");
+    let tr = // a near-step edge: 0.001 ns of Liberty slew, expanded to a full 0->100% ramp by
+    // the library's own thresholds (20/80 by default -> /0.6)
+    rc.transient("3:Y", 0.001, 0.0, Thresholds::default()).expect("tree");
     let (delay, slew) = tr.get("4:A").copied().expect("sink");
     assert!(
         (delay - 0.693).abs() < 0.03,

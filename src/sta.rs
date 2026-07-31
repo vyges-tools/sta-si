@@ -1444,7 +1444,7 @@ fn build_report(
                 let rc = spef?.nets.get(&net_order[i])?;
                 let (di, dp) = net_drv_ip[i].as_ref()?;
                 let dn = rc.pin_node(di, dp)?;
-                rc.transient(dn, net_slew[i], xc[i])
+                rc.transient(dn, net_slew[i], xc[i], lib.thresholds)
             })
             .collect();
         // each arc -> (net delay, degraded sink slew); slew 0 means "keep driver slew"
