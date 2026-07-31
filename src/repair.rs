@@ -34,6 +34,21 @@ pub struct RepairOpts {
     pub eps: f64,
     /// Instance-name prefix for inserted cells.
     pub prefix: String,
+    /// Try **swapping the endpoint's driver for a slower interchangeable cell** before
+    /// inserting a delay cell. On by default: it adds no instance, so it costs no area and the
+    /// cell keeps its own site instead of overlapping a neighbour.
+    ///
+    /// Deliberately "slower cell", not "smaller cell". Downsizing is the obvious move and often
+    /// the wrong one: a weaker cell also presents **less input capacitance**, which speeds up
+    /// the stage *before* it — sometimes by more than the weaker cell slows this one, making
+    /// hold worse. The reliable version is a **Vt swap**: same size, same load, slower. Both are
+    /// just cells in the same equivalence class, so both are tried and `judge` decides.
+    ///
+    /// Requires the library to carry `function` or `cell_footprint`; without them no cell can
+    /// be shown interchangeable and this silently has no effect.
+    pub prefer_swap: bool,
+    /// How many interchangeable cells to try before falling back to insertion.
+    pub max_candidates: usize,
 }
 
 impl Default for RepairOpts {
@@ -43,6 +58,8 @@ impl Default for RepairOpts {
             max_fixes: 0,
             eps: 1e-9,
             prefix: "vy_hold".into(),
+            prefer_swap: true,
+            max_candidates: 3,
         }
     }
 }
@@ -144,6 +161,76 @@ enum Attempt {
     Exhausted,
 }
 
+/// Try to fix `target`'s hold violation by swapping its **driver** for a slower cell.
+///
+/// The endpoint of a hold violation is a sink pin, so the cell to slow down is whatever drives
+/// its net — not the endpoint's own instance.
+///
+/// Every interchangeable cell is a candidate, cheapest (smallest) first, and `judge` decides.
+/// That breadth matters: a plain downsize is the obvious move and often the wrong one, because
+/// the weaker cell also presents less input capacitance and can speed the *previous* stage up
+/// more than it slows this one. A same-size, same-load, higher-Vt cell has no such side effect.
+///
+/// Returns `None` when nothing is interchangeable — including any library with no `function`
+/// or `cell_footprint` — or when no candidate earns its place, leaving insertion as the
+/// fallback.
+fn attempt_hold_swap(
+    t: &mut Timer,
+    opts: &RepairOpts,
+    target: &PinSite,
+) -> Result<Option<Fix>, StaError> {
+    let Some(net) = target.net.clone() else {
+        return Ok(None);
+    };
+    // the driver is the instance with an output pin on this net
+    let driver = t.netlist().insts.iter().find_map(|i| {
+        let drives = i.conns.iter().any(|(pin, n)| {
+            *n == net
+                && t.lib()
+                    .cells
+                    .get(&i.cell)
+                    .and_then(|c| c.pins.get(pin))
+                    .map(|p| p.direction == crate::liberty::Dir::Out)
+                    .unwrap_or(false)
+        });
+        drives.then(|| (i.name.clone(), i.cell.clone()))
+    });
+    let Some((inst, master)) = driver else {
+        return Ok(None);
+    };
+
+    let candidates: Vec<String> = t
+        .lib()
+        .equivalence_class(&master)
+        .into_iter()
+        .filter(|c| c.name != master) // the identity swap is not a fix
+        .take(if opts.max_candidates == 0 { usize::MAX } else { opts.max_candidates })
+        .map(|c| c.name.clone())
+        .collect();
+
+    for cell in candidates {
+        let before = t.report().clone();
+        let snapshot = t.checkpoint();
+        let mv = Move::Resize { inst: inst.clone(), cell };
+        if !t.stage(mv.clone()) {
+            continue;
+        }
+        t.update()?;
+        let after = t.report().clone();
+        if let Verdict::Keep = judge(&before, &after, Check::Hold, opts.eps) {
+            return Ok(Some(Fix {
+                mv,
+                target: target.clone(),
+                check: Check::Hold,
+                slack_before: before.whs,
+                slack_after: after.whs,
+            }));
+        }
+        t.restore(snapshot);
+    }
+    Ok(None)
+}
+
 /// Try to improve the worst remaining hold violation by one fix.
 ///
 /// `tried` blacklists sites already given up on — the "never loop forever" rule. `seq` names
@@ -167,6 +254,16 @@ fn attempt_hold(
     };
 
     let target = v.site.clone();
+
+    // Prefer downsizing the driver of this endpoint: a weaker cell is slower, which is what
+    // hold wants, and it adds no instance — no area, and the cell keeps its own site rather
+    // than overlapping a neighbour. Falls through to insertion if nothing smaller works.
+    if opts.prefer_swap {
+        if let Some(fix) = attempt_hold_swap(t, opts, &target)? {
+            return Ok(Attempt::Kept(fix));
+        }
+    }
+
     let mv = Move::InsertDelay {
         inst: target.inst.clone().unwrap(),
         pin: target.pin.clone().unwrap(),

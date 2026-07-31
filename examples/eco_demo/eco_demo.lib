@@ -160,4 +160,24 @@ library (eco_demo) {
       }
     }
   }
+
+  /* High-Vt sibling of INV_X4: same footprint, same area, SAME input capacitance, ~2x slower.
+     The classic hold fix — a plain downsize also lightens the load on the previous stage, which
+     can speed the path up more than the weaker cell slows it down. A Vt swap does not. */
+  cell (INV_X4_HVT) {
+    cell_footprint : "inv";
+    area : 4.0;
+    pin (A) { direction : input; capacitance : 0.0060; }
+    pin (Y) {
+      direction : output;
+      function : "!A";
+      timing () {
+        related_pin : "A";
+        cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.0400, 0.1000", "0.0600, 0.1400" ); }
+        cell_fall (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.0350, 0.0900", "0.0550, 0.1300" ); }
+        rise_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.0150, 0.0450", "0.0200, 0.0550" ); }
+        fall_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.0150, 0.0400", "0.0200, 0.0500" ); }
+      }
+    }
+  }
 }
