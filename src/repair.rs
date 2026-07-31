@@ -85,6 +85,33 @@ pub struct Plan {
 }
 
 impl Plan {
+    /// A plan that changes nothing, carrying the timer's current metrics as the baseline.
+    fn baseline(t: &Timer) -> Plan {
+        Plan {
+            fixes: Vec::new(),
+            rejected: Vec::new(),
+            whs_before: t.whs(),
+            whs_after: t.whs(),
+            ths_before: t.ths(),
+            ths_after: t.ths(),
+            wns_before: t.wns(),
+            wns_after: t.wns(),
+        }
+    }
+
+    /// Record an accepted fix and refresh the "after" metrics from the timer.
+    fn keep(&mut self, t: &Timer, fix: Fix) {
+        self.fixes.push(fix);
+        self.whs_after = t.whs();
+        self.ths_after = t.ths();
+        self.wns_after = t.wns();
+        // a site that now works should not still be listed as rejected
+        if let Some(last) = self.fixes.last() {
+            let label = last.target.label.clone();
+            self.rejected.retain(|r| r.target.label != label);
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.fixes.is_empty()
     }
@@ -107,71 +134,94 @@ impl Plan {
 /// Termination is by construction: every round either accepts a fix (progress, bounded by
 /// `max_fixes` and by slack becoming non-negative) or blacklists an endpoint (a finite set).
 /// An endpoint that cannot be improved is never retried — the "never loop forever" rule.
-pub fn plan_hold_repair(t: &mut Timer, opts: &RepairOpts) -> Result<Plan, StaError> {
-    let mut plan = Plan {
-        fixes: Vec::new(),
-        rejected: Vec::new(),
-        whs_before: t.whs(),
-        whs_after: t.whs(),
-        ths_before: t.ths(),
-        ths_after: t.ths(),
-        wns_before: t.wns(),
-        wns_after: t.wns(),
-    };
-    if opts.delay_cell.is_empty() {
-        return Ok(plan);
-    }
+/// The outcome of trying to fix one site.
+enum Attempt {
+    /// A fix was accepted.
+    Kept(Fix),
+    /// A candidate was tried and judged not worth keeping; the site is now blacklisted.
+    Rejected(Rejection),
+    /// Nothing left to try for this check.
+    Exhausted,
+}
 
-    let mut tried: Vec<String> = Vec::new();
+/// Try to improve the worst remaining hold violation by one fix.
+///
+/// `tried` blacklists sites already given up on — the "never loop forever" rule. `seq` names
+/// inserted cells and must be owned by the caller, so that a combined run does not restart the
+/// numbering and collide with a cell it inserted earlier.
+fn attempt_hold(
+    t: &mut Timer,
+    opts: &RepairOpts,
+    tried: &mut Vec<String>,
+    seq: &mut usize,
+) -> Result<Attempt, StaError> {
+    if opts.delay_cell.is_empty() {
+        return Ok(Attempt::Exhausted);
+    }
+    let Some(v) = t
+        .violations(Check::Hold, 0)
+        .into_iter()
+        .find(|v| v.site.is_instance_pin() && !tried.contains(&v.site.label))
+    else {
+        return Ok(Attempt::Exhausted);
+    };
+
+    let target = v.site.clone();
+    let mv = Move::InsertDelay {
+        inst: target.inst.clone().unwrap(),
+        pin: target.pin.clone().unwrap(),
+        cell: opts.delay_cell.clone(),
+        name: format!("{}{}", opts.prefix, seq),
+    };
+
+    let before = t.report().clone();
+    let snapshot = t.checkpoint();
+    if !t.stage(mv.clone()) {
+        // did not apply at all (bad cell, name clash) — do not retry this site
+        tried.push(target.label.clone());
+        return Ok(Attempt::Rejected(Rejection { target, reason: RevertReason::NoImprovement }));
+    }
+    t.update()?;
+    let after = t.report().clone();
+
+    match judge(&before, &after, Check::Hold, opts.eps) {
+        Verdict::Keep => {
+            *seq += 1;
+            Ok(Attempt::Kept(Fix {
+                mv,
+                target,
+                check: Check::Hold,
+                slack_before: before.whs,
+                slack_after: after.whs,
+            }))
+        }
+        Verdict::Revert(reason) => {
+            t.restore(snapshot);
+            tried.push(target.label.clone());
+            Ok(Attempt::Rejected(Rejection { target, reason }))
+        }
+    }
+}
+
+/// Plan a hold repair.
+///
+/// Walks failing hold endpoints worst-first, proposes a delay insertion at each, and keeps it
+/// only if [`judge`] agrees. The timer is left holding the **repaired** netlist; rejected
+/// candidates are rolled back as they are tried.
+///
+/// Termination is by construction: every round either accepts a fix (bounded by `max_fixes` and
+/// by slack reaching zero) or blacklists an endpoint, and the set of endpoints is finite.
+pub fn plan_hold_repair(t: &mut Timer, opts: &RepairOpts) -> Result<Plan, StaError> {
+    let mut plan = Plan::baseline(t);
+    let (mut tried, mut seq) = (Vec::new(), 0usize);
     loop {
         if opts.max_fixes != 0 && plan.fixes.len() >= opts.max_fixes {
             break;
         }
-        // worst failing hold endpoint we have not already given up on
-        let Some(v) = t
-            .violations(Check::Hold, 0)
-            .into_iter()
-            .find(|v| v.site.is_instance_pin() && !tried.contains(&v.site.label))
-        else {
-            break;
-        };
-
-        let target = v.site.clone();
-        let mv = Move::InsertDelay {
-            inst: target.inst.clone().unwrap(),
-            pin: target.pin.clone().unwrap(),
-            cell: opts.delay_cell.clone(),
-            name: format!("{}{}", opts.prefix, plan.fixes.len()),
-        };
-
-        let before = t.report().clone();
-        let snapshot = t.checkpoint();
-        if !t.stage(mv.clone()) {
-            // the move did not apply at all (bad cell, name clash) — do not retry this endpoint
-            tried.push(target.label.clone());
-            continue;
-        }
-        t.update()?;
-        let after = t.report().clone();
-
-        match judge(&before, &after, Check::Hold, opts.eps) {
-            Verdict::Keep => {
-                plan.fixes.push(Fix {
-                    mv,
-                    target,
-                    check: Check::Hold,
-                    slack_before: before.whs,
-                    slack_after: after.whs,
-                });
-                plan.whs_after = after.whs;
-                plan.ths_after = after.ths;
-                plan.wns_after = after.wns;
-            }
-            Verdict::Revert(reason) => {
-                t.restore(snapshot);
-                tried.push(target.label.clone());
-                plan.rejected.push(Rejection { target, reason });
-            }
+        match attempt_hold(t, opts, &mut tried, &mut seq)? {
+            Attempt::Kept(fix) => plan.keep(t, fix),
+            Attempt::Rejected(r) => plan.rejected.push(r),
+            Attempt::Exhausted => break,
         }
     }
     Ok(plan)
@@ -302,109 +352,181 @@ impl Default for SetupRepairOpts {
 ///
 /// Termination is by construction: each round either accepts a fix (bounded by `max_fixes` and
 /// by WNS reaching zero) or blacklists a site, and the set of sites on a path is finite.
-pub fn plan_setup_repair(t: &mut Timer, opts: &SetupRepairOpts) -> Result<Plan, StaError> {
-    let mut plan = Plan {
-        fixes: Vec::new(),
-        rejected: Vec::new(),
-        whs_before: t.whs(),
-        whs_after: t.whs(),
-        ths_before: t.ths(),
-        ths_after: t.ths(),
-        wns_before: t.wns(),
-        wns_after: t.wns(),
+/// Try to improve setup by one fix: upsize the instance driving the most expensive arc on the
+/// critical path.
+fn attempt_setup(
+    t: &mut Timer,
+    opts: &SetupRepairOpts,
+    tried: &mut Vec<String>,
+) -> Result<Attempt, StaError> {
+    if t.wns() >= 0.0 {
+        return Ok(Attempt::Exhausted);
+    }
+    // `stage_delay` is the arrival delta into this pin — what that arc cost.
+    let Some(stage) = t
+        .worst_path_stages()
+        .into_iter()
+        .filter(|s| s.site.is_instance_pin() && !tried.contains(&s.site.label))
+        .max_by(|a, b| {
+            a.stage_delay.partial_cmp(&b.stage_delay).unwrap_or(std::cmp::Ordering::Equal)
+        })
+    else {
+        return Ok(Attempt::Exhausted);
     };
 
-    let mut tried: Vec<String> = Vec::new();
+    let target = stage.site.clone();
+    let inst = target.inst.clone().unwrap();
+    let Some(master) = target.master.clone() else {
+        tried.push(target.label.clone());
+        return Ok(Attempt::Rejected(Rejection { target, reason: RevertReason::NoImprovement }));
+    };
+
+    // Collect names up front: the library borrow must end before staging.
+    let candidates: Vec<String> = t
+        .lib()
+        .upsize_candidates(&master)
+        .into_iter()
+        .take(if opts.max_candidates == 0 { usize::MAX } else { opts.max_candidates })
+        .map(|c| c.name.clone())
+        .collect();
+
+    if candidates.is_empty() {
+        // No interchangeable larger cell — usually a library with no `function` or
+        // `cell_footprint`, where equivalence is unknowable and guessing would change what the
+        // design computes.
+        tried.push(target.label.clone());
+        return Ok(Attempt::Rejected(Rejection { target, reason: RevertReason::NoImprovement }));
+    }
+
+    let mut last = RevertReason::NoImprovement;
+    for cell in candidates {
+        let before = t.report().clone();
+        let snapshot = t.checkpoint();
+        let mv = Move::Resize { inst: inst.clone(), cell };
+        if !t.stage(mv.clone()) {
+            continue;
+        }
+        t.update()?;
+        let after = t.report().clone();
+        match judge(&before, &after, Check::Setup, opts.eps) {
+            Verdict::Keep => {
+                return Ok(Attempt::Kept(Fix {
+                    mv,
+                    target,
+                    check: Check::Setup,
+                    slack_before: before.wns,
+                    slack_after: after.wns,
+                }))
+            }
+            Verdict::Revert(reason) => {
+                t.restore(snapshot);
+                last = reason;
+            }
+        }
+    }
+    tried.push(target.label.clone());
+    Ok(Attempt::Rejected(Rejection { target, reason: last }))
+}
+
+/// Plan a setup repair by **upsizing** cells on the critical path.
+///
+/// Where hold repair works from a list of failing endpoints, setup repair works from the
+/// critical *path*: the fix that helps is a bigger drive on whichever **arc** is costing the
+/// most, and a long path is rarely uniformly slow. So each round takes the worst path, picks
+/// its most expensive stage, and tries progressively larger interchangeable cells for the
+/// instance driving it.
+///
+/// Candidates come from [`Lib::upsize_candidates`](crate::liberty::Lib::upsize_candidates),
+/// which returns nothing for a library carrying no `function` or `cell_footprint` — equivalence
+/// is not knowable there, and a repair that cannot prove a replacement is safe declines to make
+/// one.
+///
+/// Upsizing is **not** monotonic: a larger cell drives its own load faster but presents more
+/// capacitance to the stage before it, so the smallest upsize is not reliably best and
+/// sometimes none help. Hence `max_candidates`, and hence judging every candidate.
+pub fn plan_setup_repair(t: &mut Timer, opts: &SetupRepairOpts) -> Result<Plan, StaError> {
+    let mut plan = Plan::baseline(t);
+    let mut tried = Vec::new();
     loop {
         if opts.max_fixes != 0 && plan.fixes.len() >= opts.max_fixes {
             break;
         }
-        if t.wns() >= 0.0 {
-            break; // setup is met — nothing to repair
+        match attempt_setup(t, opts, &mut tried)? {
+            Attempt::Kept(fix) => plan.keep(t, fix),
+            Attempt::Rejected(r) => plan.rejected.push(r),
+            Attempt::Exhausted => break,
         }
+    }
+    Ok(plan)
+}
 
-        // The most expensive stage on the critical path that we have not already given up on.
-        // `stage_delay` is the arrival delta into this pin, i.e. what this arc cost.
-        let Some(stage) = t
-            .worst_path_stages()
-            .into_iter()
-            .filter(|s| s.site.is_instance_pin() && !tried.contains(&s.site.label))
-            .max_by(|a, b| {
-                a.stage_delay.partial_cmp(&b.stage_delay).unwrap_or(std::cmp::Ordering::Equal)
-            })
-        else {
-            break; // nothing left on the path to try
+/// How to repair both checks together.
+#[derive(Debug, Clone, Default)]
+pub struct CombinedOpts {
+    pub hold: RepairOpts,
+    pub setup: SetupRepairOpts,
+    /// Total accepted fixes across both checks. `0` means no limit.
+    pub max_fixes: usize,
+}
+
+/// Repair **setup and hold together**, worst-violation first.
+///
+/// A real block needs both, and they pull against each other: upsizing shortens paths and eats
+/// hold margin, inserting delay lengthens them and eats setup margin. Running one rule to
+/// completion and then the other lets the second undo the first's headroom.
+///
+/// So this attacks whichever check is *further* into violation each round. What stops the two
+/// from fighting is not the ordering but [`judge`], which already refuses any fix that pushes
+/// the other check into violation or deepens an existing one — so a repair that would start an
+/// oscillation is rejected before it happens.
+///
+/// A check is set aside when it runs out of sites, and reconsidered as soon as the *other* one
+/// lands a fix, since that changes the timing it gave up on. Termination: every round either
+/// accepts a fix (bounded by `max_fixes`, and by both checks meeting) or sets a check aside,
+/// and a check can only be revived by a fix.
+pub fn plan_repair(t: &mut Timer, opts: &CombinedOpts) -> Result<Plan, StaError> {
+    let mut plan = Plan::baseline(t);
+    let (mut hold_tried, mut setup_tried) = (Vec::new(), Vec::new());
+    let (mut hold_done, mut setup_done) = (false, false);
+    let mut seq = 0usize;
+
+    loop {
+        if opts.max_fixes != 0 && plan.fixes.len() >= opts.max_fixes {
+            break;
+        }
+        let (wns, whs) = (t.wns(), t.whs());
+        // whichever is further into violation; a met check is never chosen
+        let want_hold = whs < 0.0 && (wns >= 0.0 || whs <= wns);
+        let want_setup = wns < 0.0 && !want_hold;
+
+        let check = match (want_hold && !hold_done, want_setup && !setup_done) {
+            (true, _) => Check::Hold,
+            (_, true) => Check::Setup,
+            // the preferred check is set aside — fall back to the other if it is still violating
+            _ if whs < 0.0 && !hold_done => Check::Hold,
+            _ if wns < 0.0 && !setup_done => Check::Setup,
+            _ => break, // both met, or both set aside
         };
 
-        let target = stage.site.clone();
-        let inst = target.inst.clone().unwrap();
-        let Some(master) = target.master.clone() else {
-            tried.push(target.label.clone());
-            continue;
+        let attempt = match check {
+            Check::Hold => attempt_hold(t, &opts.hold, &mut hold_tried, &mut seq)?,
+            Check::Setup => attempt_setup(t, &opts.setup, &mut setup_tried)?,
         };
 
-        // Collect candidate names up front: the library borrow has to end before staging.
-        let candidates: Vec<String> = t
-            .lib()
-            .upsize_candidates(&master)
-            .into_iter()
-            .take(if opts.max_candidates == 0 { usize::MAX } else { opts.max_candidates })
-            .map(|c| c.name.clone())
-            .collect();
-
-        if candidates.is_empty() {
-            // No interchangeable larger cell — often because the library carries no `function`
-            // or `cell_footprint`, in which case equivalence is unknowable and we decline.
-            tried.push(target.label.clone());
-            plan.rejected.push(Rejection { target, reason: RevertReason::NoImprovement });
-            continue;
-        }
-
-        let mut accepted = false;
-        for cell in candidates {
-            let before = t.report().clone();
-            let snapshot = t.checkpoint();
-            let mv = Move::Resize { inst: inst.clone(), cell: cell.clone() };
-            if !t.stage(mv.clone()) {
-                continue;
-            }
-            t.update()?;
-            let after = t.report().clone();
-
-            match judge(&before, &after, Check::Setup, opts.eps) {
-                Verdict::Keep => {
-                    plan.fixes.push(Fix {
-                        mv,
-                        target: target.clone(),
-                        check: Check::Setup,
-                        slack_before: before.wns,
-                        slack_after: after.wns,
-                    });
-                    plan.wns_after = after.wns;
-                    plan.whs_after = after.whs;
-                    plan.ths_after = after.ths;
-                    accepted = true;
-                    break;
-                }
-                Verdict::Revert(reason) => {
-                    t.restore(snapshot);
-                    // Remember the last reason only if we end up giving up on this site.
-                    if plan.rejected.last().map(|r| r.target.label != target.label).unwrap_or(true)
-                    {
-                        plan.rejected.push(Rejection { target: target.clone(), reason });
-                    } else if let Some(last) = plan.rejected.last_mut() {
-                        last.reason = reason;
-                    }
+        match attempt {
+            Attempt::Kept(fix) => {
+                plan.keep(t, fix);
+                // the other check may now be fixable where it was not — give it another go
+                match check {
+                    Check::Hold => setup_done = false,
+                    Check::Setup => hold_done = false,
                 }
             }
-        }
-
-        if accepted {
-            // A kept fix may have moved the critical path elsewhere; re-query rather than
-            // assume this site is done.
-            plan.rejected.retain(|r| r.target.label != target.label);
-        } else {
-            tried.push(target.label.clone());
+            Attempt::Rejected(r) => plan.rejected.push(r),
+            Attempt::Exhausted => match check {
+                Check::Hold => hold_done = true,
+                Check::Setup => setup_done = true,
+            },
         }
     }
     Ok(plan)
