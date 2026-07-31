@@ -121,6 +121,80 @@ pub struct PathNode {
     pub slew: f64,
 }
 
+/// Where a timing pin actually **is** in the design.
+///
+/// [`PinId`] is an index into the timing graph and `label` is display text; neither can be used
+/// to look an object up in a physical database. A `PinSite` carries the identity a downstream
+/// consumer — an ECO, a report, a viewer — needs to act on the pin: the instance, its library
+/// cell, the pin, and the net it sits on.
+///
+/// Kept separate from [`PathNode`] on purpose: resolution costs a netlist lookup, and the
+/// one-shot `analyze` path never pays for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PinSite {
+    pub pin_id: PinId,
+    /// The timing graph's own label: `"inst/pin"`, or the port name for a primary port.
+    pub label: String,
+    /// Instance name — `None` for a primary port. May itself contain `/` when hierarchical.
+    pub inst: Option<String>,
+    /// Pin name on that instance — `None` for a primary port.
+    pub pin: Option<String>,
+    /// The net this pin connects to. Known for instance pins and primary ports alike.
+    pub net: Option<String>,
+    /// The instance's current library cell — the thing a resize move replaces.
+    pub master: Option<String>,
+    pub is_port: bool,
+}
+
+impl PinSite {
+    /// True when the site resolved to a real instance pin, i.e. an ECO can address it.
+    pub fn is_instance_pin(&self) -> bool {
+        self.inst.is_some() && self.pin.is_some()
+    }
+}
+
+/// Which timing check a [`Violation`] came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Check {
+    /// Late / max-delay path — fixed by making the path faster (resize, buffer).
+    Setup,
+    /// Early / min-delay path — fixed by adding delay at the endpoint.
+    Hold,
+}
+
+/// A failing (or near-failing) endpoint, resolved to something actionable.
+///
+/// This is the hand-off record between the timer and anything that wants to *change* the
+/// design: it pairs the numbers with the identity, so a consumer never has to reverse-engineer
+/// a label.
+#[derive(Debug, Clone)]
+pub struct Violation {
+    pub check: Check,
+    pub site: PinSite,
+    /// Negative means failing. Worst (most negative) first when returned by
+    /// [`Timer::violations`].
+    pub slack: f64,
+    pub arrival: f64,
+    pub required: Option<f64>,
+    pub slew: f64,
+    /// Capacitive load on the pin — the quantity a resize or buffer move is trying to move.
+    pub load: f64,
+}
+
+/// One stage of a resolved path: the pin, plus what that stage *cost*.
+///
+/// `stage_delay` is the arrival delta from the previous node, which is what identifies the arc
+/// worth attacking — the worst path is a list of stages, and only some of them are worth fixing.
+#[derive(Debug, Clone)]
+pub struct PathStage {
+    pub site: PinSite,
+    pub arrival: f64,
+    pub slew: f64,
+    pub load: f64,
+    /// Arrival delta from the previous stage; `0.0` for the launch point.
+    pub stage_delay: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct TimingReport {
     pub wns: f64, // setup worst negative slack (ns); >0 means met
@@ -255,6 +329,9 @@ pub struct Timer {
     pending: HashMap<String, (String, String)>,
     n_inc: u64,  // updates served by the cone-localized fast path
     n_full: u64, // updates that fell back to a full re-analysis
+    // instance name -> position in `nl.insts`, for O(1) site resolution and staging. Stable:
+    // `stage` only rewrites an instance's `cell` in place, never adds, removes or reorders.
+    inst_idx: HashMap<String, usize>,
 }
 
 impl Timer {
@@ -278,6 +355,12 @@ impl Timer {
             pending: HashMap::new(),
             n_inc: 0,
             n_full: 0,
+            inst_idx: nl
+                .insts
+                .iter()
+                .enumerate()
+                .map(|(i, inst)| (inst.name.clone(), i))
+                .collect(),
         })
     }
 
@@ -374,6 +457,123 @@ impl Timer {
         v
     }
 
+    // ---- addressability: turning timing results into things you can act on ----
+
+    /// Resolve a [`PinId`] to **where it is** — instance, library cell, pin and net.
+    ///
+    /// This is the bridge from timing results to a physical database: `PinId` is a graph index
+    /// and `pin_label` is display text, but a `PinSite` names objects a netlist or an `.odb`
+    /// can look up.
+    ///
+    /// Labels are `"inst/pin"`, and an instance name may itself contain `/` when the design is
+    /// hierarchical — so the split is on the **last** separator, and the result is confirmed
+    /// against the netlist rather than trusted. Anything that does not resolve to a known
+    /// instance is reported as a primary port (ports drive a net of the same name).
+    pub fn pin_site(&self, p: PinId) -> PinSite {
+        let label = self.timing.labels[p].clone();
+        if let Some(cut) = label.rfind('/') {
+            let (inst_name, pin_name) = (&label[..cut], &label[cut + 1..]);
+            if let Some(&i) = self.inst_idx.get(inst_name) {
+                let inst = &self.nl.insts[i];
+                return PinSite {
+                    pin_id: p,
+                    inst: Some(inst.name.clone()),
+                    pin: Some(pin_name.to_string()),
+                    net: inst
+                        .conns
+                        .iter()
+                        .find(|(pin, _)| pin == pin_name)
+                        .map(|(_, net)| net.clone()),
+                    master: Some(inst.cell.clone()),
+                    is_port: false,
+                    label,
+                };
+            }
+        }
+        PinSite {
+            pin_id: p,
+            net: Some(label.clone()), // a primary port drives a net of the same name
+            label,
+            inst: None,
+            pin: None,
+            master: None,
+            is_port: true,
+        }
+    }
+
+    /// Failing endpoints for `check`, worst first, resolved to actionable sites.
+    ///
+    /// Only endpoints with **negative** slack are returned — this answers "what is broken",
+    /// not "what is the ranking". `limit` caps the result (`0` means no cap); the ordering is
+    /// the same worst-first order [`endpoint_slacks`](Self::endpoint_slacks) and
+    /// [`hold_endpoint_slacks`](Self::hold_endpoint_slacks) already guarantee, so taking the
+    /// first N is taking the N worst.
+    pub fn violations(&self, check: Check, limit: usize) -> Vec<Violation> {
+        let ranked = match check {
+            Check::Setup => self.endpoint_slacks(),
+            Check::Hold => self.hold_endpoint_slacks(),
+        };
+        let mut out = Vec::new();
+        for (p, slack) in ranked {
+            if slack >= 0.0 {
+                break; // sorted worst-first: the first non-negative ends the failing run
+            }
+            out.push(Violation {
+                check,
+                site: self.pin_site(p),
+                slack,
+                arrival: match check {
+                    Check::Setup => self.arrival(p),
+                    Check::Hold => self.arrival_min(p),
+                },
+                required: self.required(p),
+                slew: self.slew(p),
+                load: self.load(p),
+            });
+            if limit != 0 && out.len() >= limit {
+                break;
+            }
+        }
+        out
+    }
+
+    /// The critical setup path as resolved stages, each carrying what it cost.
+    ///
+    /// [`worst_path`](Self::worst_path) gives labels and arrivals; this adds identity and the
+    /// per-stage delay, which is what picks the arc worth attacking — a long path is rarely
+    /// uniformly slow.
+    pub fn worst_path_stages(&self) -> Vec<PathStage> {
+        let mut prev: Option<f64> = None;
+        self.report
+            .worst_path
+            .iter()
+            .map(|n| {
+                let stage_delay = prev.map_or(0.0, |a| n.arrival - a);
+                prev = Some(n.arrival);
+                // the report's path carries labels; recover the graph id to reach the site
+                let pin_id = self.timing.label2idx.get(&n.label).copied();
+                PathStage {
+                    site: pin_id.map_or_else(
+                        || PinSite {
+                            pin_id: usize::MAX,
+                            label: n.label.clone(),
+                            inst: None,
+                            pin: None,
+                            net: None,
+                            master: None,
+                            is_port: false,
+                        },
+                        |p| self.pin_site(p),
+                    ),
+                    arrival: n.arrival,
+                    slew: n.slew,
+                    load: pin_id.map_or(0.0, |p| self.load(p)),
+                    stage_delay,
+                }
+            })
+            .collect()
+    }
+
     // ---- mutation + update (Phase 2) ----
 
     /// The current (possibly mutated) working netlist — materialize the resized design.
@@ -387,7 +587,9 @@ impl Timer {
     pub fn stage(&mut self, m: Move) -> bool {
         match m {
             Move::Resize { inst, cell } => {
-                match self.nl.insts.iter_mut().find(|i| i.name == inst) {
+                // O(1) via the same index `pin_site` uses, instead of scanning every instance
+                // on every staged move.
+                match self.inst_idx.get(&inst).map(|&i| &mut self.nl.insts[i]) {
                     Some(i) => {
                         let old = i.cell.clone();
                         i.cell = cell.clone();
