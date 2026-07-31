@@ -4,9 +4,12 @@ library (eco_demo) {
   capacitive_load_unit (1, "pf");
 
   cell (INV) {
+    cell_footprint : "inv";
+    area : 1.0;
     pin (A) { direction : input; capacitance : 0.0015; }
     pin (Y) {
       direction : output;
+      function : "!A";
       timing () {
         related_pin : "A";
         cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.08, 0.20", "0.12, 0.28" ); }
@@ -21,9 +24,12 @@ library (eco_demo) {
   // minimal, but a hold repair has to insert something that does not invert the data, so a
   // buffer has to exist for the repair examples/tests to be honest.
   cell (BUF) {
+    cell_footprint : "buf";
+    area : 1.5;
     pin (A) { direction : input; capacitance : 0.0015; }
     pin (Y) {
       direction : output;
+      function : "A";
       timing () {
         related_pin : "A";
         cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.08, 0.20", "0.12, 0.28" ); }
@@ -35,6 +41,8 @@ library (eco_demo) {
   }
 
   cell (DFF) {
+    cell_footprint : "dff";
+    area : 5.0;
     ff (IQ, IQN) { clocked_on : "CK"; next_state : "D"; }
     pin (CK) { direction : input; clock : true; capacitance : 0.001; }
     pin (D) {
@@ -62,6 +70,93 @@ library (eco_demo) {
         cell_fall (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.10, 0.22", "0.14, 0.30" ); }
         rise_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.09", "0.04, 0.11" ); }
         fall_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.09", "0.04, 0.11" ); }
+      }
+    }
+  }
+
+  cell (INV_X2) {
+    cell_footprint : "inv";
+    area : 2.0;
+    pin (A) { direction : input; capacitance : 0.0030; }
+    pin (Y) {
+      direction : output;
+      function : "!A";
+      timing () {
+        related_pin : "A";
+        cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.0400, 0.1000", "0.0600, 0.1400" ); }
+        cell_fall (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.0350, 0.0900", "0.0550, 0.1300" ); }
+        rise_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.0150, 0.0450", "0.0200, 0.0550" ); }
+        fall_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.0150, 0.0400", "0.0200, 0.0500" ); }
+      }
+    }
+  }
+
+  cell (INV_X4) {
+    cell_footprint : "inv";
+    area : 4.0;
+    pin (A) { direction : input; capacitance : 0.0060; }
+    pin (Y) {
+      direction : output;
+      function : "!A";
+      timing () {
+        related_pin : "A";
+        cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.0200, 0.0500", "0.0300, 0.0700" ); }
+        cell_fall (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.0175, 0.0450", "0.0275, 0.0650" ); }
+        rise_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.0075, 0.0225", "0.0100, 0.0275" ); }
+        fall_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.0075, 0.0200", "0.0100, 0.0250" ); }
+      }
+    }
+  }
+
+  cell (BUF_X2) {
+    cell_footprint : "buf";
+    area : 3.0;
+    pin (A) { direction : input; capacitance : 0.0030; }
+    pin (Y) {
+      direction : output;
+      function : "A";
+      timing () {
+        related_pin : "A";
+        cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.0400, 0.1000", "0.0600, 0.1400" ); }
+        cell_fall (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.0350, 0.0900", "0.0550, 0.1300" ); }
+        rise_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.0150, 0.0450", "0.0200, 0.0550" ); }
+        fall_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.0150, 0.0400", "0.0200, 0.0500" ); }
+      }
+    }
+  }
+
+  /* Faster sibling of DFF, same footprint: half the clock-to-Q, twice the input capacitance.
+     A setup repair upsizes to this; the extra cap is what stops upsizing being free. */
+  cell (DFF_X2) {
+    cell_footprint : "dff";
+    area : 9.0;
+    ff (IQ, IQN) { clocked_on : "CK"; next_state : "D"; }
+    pin (CK) { direction : input; clock : true; capacitance : 0.002; }
+    pin (D) {
+      direction : input;
+      capacitance : 0.002;
+      timing () {
+        related_pin : "CK";
+        timing_type : setup_rising;
+        rise_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.05" ); }
+        fall_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.05" ); }
+      }
+      timing () {
+        related_pin : "CK";
+        timing_type : hold_rising;
+        rise_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.02" ); }
+        fall_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.02" ); }
+      }
+    }
+    pin (Q) {
+      direction : output;
+      timing () {
+        related_pin : "CK";
+        timing_type : rising_edge;
+        cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.05, 0.11", "0.07, 0.15" ); }
+        cell_fall (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.05, 0.11", "0.07, 0.15" ); }
+        rise_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.02, 0.05", "0.02, 0.06" ); }
+        fall_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.02, 0.05", "0.02, 0.06" ); }
       }
     }
   }

@@ -51,11 +51,14 @@ impl Default for RepairOpts {
 #[derive(Debug, Clone)]
 pub struct Fix {
     pub mv: Move,
-    /// The failing endpoint this was aimed at.
+    /// The failing endpoint (hold) or critical-path stage (setup) this was aimed at.
     pub target: PinSite,
-    /// Worst hold slack before and after, so a reviewer can see what it bought.
-    pub whs_before: f64,
-    pub whs_after: f64,
+    /// Which check the fix was aimed at — and therefore which metric `slack_*` reports.
+    pub check: Check,
+    /// The targeted metric before and after: WHS for a hold fix, WNS for a setup fix. A
+    /// reviewer needs to see what each fix actually bought, not just the total.
+    pub slack_before: f64,
+    pub slack_after: f64,
 }
 
 /// A rejected candidate and why — kept because "the loop did nothing" is not a useful report.
@@ -156,8 +159,9 @@ pub fn plan_hold_repair(t: &mut Timer, opts: &RepairOpts) -> Result<Plan, StaErr
                 plan.fixes.push(Fix {
                     mv,
                     target,
-                    whs_before: before.whs,
-                    whs_after: after.whs,
+                    check: Check::Hold,
+                    slack_before: before.whs,
+                    slack_after: after.whs,
                 });
                 plan.whs_after = after.whs;
                 plan.ths_after = after.ths;
@@ -231,8 +235,15 @@ impl Plan {
                     s.push_str(&format!("\"cell\":{cell:?},"));
                 }
             }
-            s.push_str(&format!("\"whs_before_ns\":{},", num(f.whs_before)));
-            s.push_str(&format!("\"whs_after_ns\":{}", num(f.whs_after)));
+            s.push_str(&format!(
+                "\"check\":{:?},",
+                match f.check {
+                    Check::Setup => "setup",
+                    Check::Hold => "hold",
+                }
+            ));
+            s.push_str(&format!("\"slack_before_ns\":{},", num(f.slack_before)));
+            s.push_str(&format!("\"slack_after_ns\":{}", num(f.slack_after)));
             s.push('}');
         }
         s.push_str("],");
@@ -250,4 +261,151 @@ impl Plan {
         s.push_str("]}");
         s
     }
+}
+
+/// How to repair setup, and how hard to try.
+#[derive(Debug, Clone)]
+pub struct SetupRepairOpts {
+    /// Stop after this many accepted fixes. `0` means no limit.
+    pub max_fixes: usize,
+    /// Improvement below this is treated as noise rather than progress (ns).
+    pub eps: f64,
+    /// How many larger cells to try at each site before giving up on it. Upsizing is not
+    /// monotonic in slack — a bigger cell is faster but loads its own driver more — so the
+    /// smallest upsize is not always the best one, and occasionally none of them help.
+    pub max_candidates: usize,
+}
+
+impl Default for SetupRepairOpts {
+    fn default() -> Self {
+        Self { max_fixes: 0, eps: 1e-9, max_candidates: 3 }
+    }
+}
+
+/// Plan a setup repair by **upsizing** cells on the critical path.
+///
+/// Where hold repair works from a list of failing endpoints, setup repair works from the
+/// critical *path*: the fix that helps is a bigger drive on whichever **arc** is costing the
+/// most, and a long path is rarely uniformly slow. So each round takes the worst path, picks
+/// its most expensive stage, and tries progressively larger interchangeable cells for the
+/// instance driving it.
+///
+/// Candidates come from [`Lib::upsize_candidates`](crate::liberty::Lib::upsize_candidates),
+/// which will return nothing at all for a timing-only library — equivalence is not knowable
+/// without `function` or `cell_footprint`, and guessing would swap in a cell that computes
+/// something else. A repair that cannot prove a replacement is safe declines to make one.
+///
+/// Upsizing is **not** monotonic: a larger cell drives its own load faster but presents more
+/// capacitance to the stage before it, so the smallest upsize is not reliably the best and
+/// sometimes none help. Hence `max_candidates`, and hence every candidate being judged rather
+/// than assumed.
+///
+/// Termination is by construction: each round either accepts a fix (bounded by `max_fixes` and
+/// by WNS reaching zero) or blacklists a site, and the set of sites on a path is finite.
+pub fn plan_setup_repair(t: &mut Timer, opts: &SetupRepairOpts) -> Result<Plan, StaError> {
+    let mut plan = Plan {
+        fixes: Vec::new(),
+        rejected: Vec::new(),
+        whs_before: t.whs(),
+        whs_after: t.whs(),
+        ths_before: t.ths(),
+        ths_after: t.ths(),
+        wns_before: t.wns(),
+        wns_after: t.wns(),
+    };
+
+    let mut tried: Vec<String> = Vec::new();
+    loop {
+        if opts.max_fixes != 0 && plan.fixes.len() >= opts.max_fixes {
+            break;
+        }
+        if t.wns() >= 0.0 {
+            break; // setup is met — nothing to repair
+        }
+
+        // The most expensive stage on the critical path that we have not already given up on.
+        // `stage_delay` is the arrival delta into this pin, i.e. what this arc cost.
+        let Some(stage) = t
+            .worst_path_stages()
+            .into_iter()
+            .filter(|s| s.site.is_instance_pin() && !tried.contains(&s.site.label))
+            .max_by(|a, b| {
+                a.stage_delay.partial_cmp(&b.stage_delay).unwrap_or(std::cmp::Ordering::Equal)
+            })
+        else {
+            break; // nothing left on the path to try
+        };
+
+        let target = stage.site.clone();
+        let inst = target.inst.clone().unwrap();
+        let Some(master) = target.master.clone() else {
+            tried.push(target.label.clone());
+            continue;
+        };
+
+        // Collect candidate names up front: the library borrow has to end before staging.
+        let candidates: Vec<String> = t
+            .lib()
+            .upsize_candidates(&master)
+            .into_iter()
+            .take(if opts.max_candidates == 0 { usize::MAX } else { opts.max_candidates })
+            .map(|c| c.name.clone())
+            .collect();
+
+        if candidates.is_empty() {
+            // No interchangeable larger cell — often because the library carries no `function`
+            // or `cell_footprint`, in which case equivalence is unknowable and we decline.
+            tried.push(target.label.clone());
+            plan.rejected.push(Rejection { target, reason: RevertReason::NoImprovement });
+            continue;
+        }
+
+        let mut accepted = false;
+        for cell in candidates {
+            let before = t.report().clone();
+            let snapshot = t.checkpoint();
+            let mv = Move::Resize { inst: inst.clone(), cell: cell.clone() };
+            if !t.stage(mv.clone()) {
+                continue;
+            }
+            t.update()?;
+            let after = t.report().clone();
+
+            match judge(&before, &after, Check::Setup, opts.eps) {
+                Verdict::Keep => {
+                    plan.fixes.push(Fix {
+                        mv,
+                        target: target.clone(),
+                        check: Check::Setup,
+                        slack_before: before.wns,
+                        slack_after: after.wns,
+                    });
+                    plan.wns_after = after.wns;
+                    plan.whs_after = after.whs;
+                    plan.ths_after = after.ths;
+                    accepted = true;
+                    break;
+                }
+                Verdict::Revert(reason) => {
+                    t.restore(snapshot);
+                    // Remember the last reason only if we end up giving up on this site.
+                    if plan.rejected.last().map(|r| r.target.label != target.label).unwrap_or(true)
+                    {
+                        plan.rejected.push(Rejection { target: target.clone(), reason });
+                    } else if let Some(last) = plan.rejected.last_mut() {
+                        last.reason = reason;
+                    }
+                }
+            }
+        }
+
+        if accepted {
+            // A kept fix may have moved the critical path elsewhere; re-query rather than
+            // assume this site is done.
+            plan.rejected.retain(|r| r.target.label != target.label);
+        } else {
+            tried.push(target.label.clone());
+        }
+    }
+    Ok(plan)
 }

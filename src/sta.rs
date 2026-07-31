@@ -687,6 +687,12 @@ impl Timer {
         &self.nl
     }
 
+    /// The merged Liberty the timer is working from — what a repair rule queries for
+    /// interchangeable cells (`Lib::upsize_candidates` and friends).
+    pub fn lib(&self) -> &Lib {
+        &self.lib
+    }
+
     /// Stage a netlist mutation. Returns `false` if it doesn't apply (e.g. unknown instance).
     /// Nothing is recomputed until [`update`](Self::update); the cached report/queries reflect
     /// the *last updated* state until then.

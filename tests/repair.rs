@@ -86,7 +86,8 @@ fn every_move_in_a_plan_is_addressable_and_uses_the_requested_cell() {
             "plan targets pin {pin} which {inst} does not have"
         );
         // the fix must record what it bought
-        assert!(fix.whs_after > fix.whs_before, "a kept fix must have improved hold");
+        assert!(fix.slack_after > fix.slack_before, "a kept fix must have improved hold");
+        assert_eq!(fix.check, Check::Hold, "a hold fix must be labelled as one");
         assert!(fix.target.is_instance_pin());
     }
 }

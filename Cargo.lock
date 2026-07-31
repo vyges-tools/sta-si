@@ -103,8 +103,8 @@ dependencies = [
 
 [[package]]
 name = "vyges-loom"
-version = "0.1.12"
-source = "git+https://github.com/vyges-tools/loom?branch=main#aa19cebb4bebf0bbcc9bf54362db87515af05d84"
+version = "0.1.18"
+source = "git+https://github.com/vyges-tools/loom?branch=main#2a90ded011ac95390a34641712679689060b7af2"
 
 [[package]]
 name = "vyges-sta-si"
