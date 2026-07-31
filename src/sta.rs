@@ -181,6 +181,93 @@ pub struct Violation {
     pub load: f64,
 }
 
+/// What a candidate fix did to the design's timing — `after - before`, so **positive is
+/// better** for every field.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TimingDelta {
+    pub wns: f64,
+    pub tns: f64,
+    pub whs: f64,
+    pub ths: f64,
+}
+
+/// Why a candidate fix was rejected. Kept explicit so a run is auditable — "reverted" on its
+/// own tells you nothing when you are trying to understand why a loop failed to converge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RevertReason {
+    /// The metric the fix was aimed at did not move (or moved the wrong way).
+    NoImprovement,
+    /// It helped its target but broke setup — pushed WNS below zero, or made an existing
+    /// setup violation worse.
+    BrokeSetup,
+    /// Same, for hold.
+    BrokeHold,
+}
+
+/// The verdict on a speculative fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+    Keep,
+    Revert(RevertReason),
+}
+
+impl Verdict {
+    pub fn keep(&self) -> bool {
+        matches!(self, Verdict::Keep)
+    }
+}
+
+/// `after - before` for each headline metric.
+pub fn timing_delta(before: &TimingReport, after: &TimingReport) -> TimingDelta {
+    TimingDelta {
+        wns: after.wns - before.wns,
+        tns: after.tns - before.tns,
+        whs: after.whs - before.whs,
+        ths: after.ths - before.ths,
+    }
+}
+
+/// Decide whether a fix aimed at `check` earned its place.
+///
+/// Two conditions, and the second is the interesting one:
+///
+/// 1. **It must help.** The targeted metric (WNS for setup, WHS for hold) must improve by more
+///    than `eps`. A fix that changes nothing is not free — it costs area and a legalization
+///    disturbance — so "no worse" is not good enough.
+/// 2. **It must not break the other check.** Deliberately this is *not* "must not regress":
+///    trading setup margin for a hold fix is normal and correct, and forbidding it would reject
+///    most real hold repairs. What is forbidden is doing *harm* — pushing a met check into
+///    violation, or deepening a violation that already exists.
+///
+/// `eps` guards against accepting floating-point noise as progress; `1e-9` (1 ps at ns units)
+/// is a sane default.
+pub fn judge(before: &TimingReport, after: &TimingReport, check: Check, eps: f64) -> Verdict {
+    let d = timing_delta(before, after);
+
+    // "harm" = the check ends up violating AND worse than it was
+    let harmed = |before_v: f64, after_v: f64| after_v < 0.0 && after_v < before_v - eps;
+
+    match check {
+        Check::Setup => {
+            if d.wns <= eps {
+                return Verdict::Revert(RevertReason::NoImprovement);
+            }
+            if harmed(before.whs, after.whs) {
+                return Verdict::Revert(RevertReason::BrokeHold);
+            }
+        }
+        Check::Hold => {
+            if d.whs <= eps {
+                return Verdict::Revert(RevertReason::NoImprovement);
+            }
+            if harmed(before.wns, after.wns) {
+                return Verdict::Revert(RevertReason::BrokeSetup);
+            }
+        }
+    }
+    Verdict::Keep
+}
+
 /// One stage of a resolved path: the pin, plus what that stage *cost*.
 ///
 /// `stage_delay` is the arrival delta from the previous node, which is what identifies the arc
