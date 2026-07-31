@@ -372,12 +372,28 @@ impl Timing {
     }
 }
 
-/// A netlist edit an optimizer stages on a [`Timer`]. (v0: cell swap — resize / Vt-swap;
-/// buffer insertion and removal land with the topology-aware recompute.)
+/// A netlist edit an optimizer stages on a [`Timer`]. (Cell swap — resize / Vt-swap — and
+/// delay insertion; removal lands with the topology-aware recompute.)
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Move {
     /// Replace an instance's library cell with another (same logic function): the resize /
     /// Vt-swap move. `inst` is the instance name; `cell` the new library cell name.
     Resize { inst: String, cell: String },
+    /// Splice a delay element into the net feeding `inst`/`pin` — the hold-repair move.
+    ///
+    /// The sink is re-pointed at a new net driven by a new instance of `cell`, so the
+    /// topology becomes `driver -> (old net) -> new cell -> (new net) -> inst/pin`. Nothing
+    /// else on the old net moves, so only this one sink gets the extra delay.
+    ///
+    /// `cell` must be non-inverting for the result to be logically equivalent — the timer
+    /// does not check that (it has no notion of function), so the caller owns it.
+    InsertDelay {
+        inst: String,
+        pin: String,
+        cell: String,
+        /// Instance name for the new cell. Must not already exist.
+        name: String,
+    },
 }
 
 /// An opaque saved state for speculative apply/undo: `checkpoint()` captures it, `restore()`
@@ -385,6 +401,9 @@ pub enum Move {
 /// state, when present, rolls back with it so speculation stays cheap).
 pub struct Checkpoint {
     nl: Netlist,
+    // must travel WITH `nl`: a rolled-back InsertDelay removes an instance, and an index still
+    // naming it would resolve to the wrong element (or past the end) on the next lookup.
+    inst_idx: HashMap<String, usize>,
     report: TimingReport,
     timing: Timing,
     dirty: bool,
@@ -692,6 +711,56 @@ impl Timer {
                     None => false,
                 }
             }
+            Move::InsertDelay { inst, pin, cell, name } => {
+                if self.inst_idx.contains_key(&name) {
+                    return false; // the new instance name is already taken
+                }
+                // the delay cell's own pins come from the library, not from a naming convention
+                let Some(lib_cell) = self.lib.cells.get(&cell) else {
+                    return false;
+                };
+                let pin_named = |d: crate::liberty::Dir| {
+                    lib_cell
+                        .pins
+                        .values()
+                        .find(|p| p.direction == d && !p.clock)
+                        .map(|p| p.name.clone())
+                };
+                let (Some(cell_in), Some(cell_out)) =
+                    (pin_named(crate::liberty::Dir::In), pin_named(crate::liberty::Dir::Out))
+                else {
+                    return false; // not usable as a delay element
+                };
+
+                // find the sink and the net it currently sits on
+                let Some(&si) = self.inst_idx.get(&inst) else {
+                    return false;
+                };
+                let Some(ci) = self.nl.insts[si].conns.iter().position(|(p, _)| *p == pin) else {
+                    return false;
+                };
+                let old_net = self.nl.insts[si].conns[ci].1.clone();
+
+                // a fresh net between the new cell and the sink; derived from the instance name
+                // so a plan replayed elsewhere produces the same names.
+                let new_net = format!("{name}_n");
+                if self.nl.insts.iter().any(|i| i.conns.iter().any(|(_, n)| *n == new_net)) {
+                    return false; // refuse to collide rather than silently merge two nets
+                }
+
+                self.nl.insts[si].conns[ci].1 = new_net.clone();
+                self.nl.insts.push(crate::netlist::Inst {
+                    cell,
+                    name: name.clone(),
+                    conns: vec![(cell_in, old_net), (cell_out, new_net)],
+                });
+                self.inst_idx.insert(name, self.nl.insts.len() - 1);
+                // topology changed, so the cone-localized incremental path cannot be trusted:
+                // drop it and let `update` fall back to a full re-analysis.
+                self.inc = None;
+                self.dirty = true;
+                true
+            }
         }
     }
 
@@ -762,6 +831,7 @@ impl Timer {
     pub fn checkpoint(&self) -> Checkpoint {
         Checkpoint {
             nl: self.nl.clone(),
+            inst_idx: self.inst_idx.clone(),
             report: self.report.clone(),
             timing: self.timing.clone(),
             dirty: self.dirty,
@@ -777,6 +847,7 @@ impl Timer {
     /// recompute.
     pub fn restore(&mut self, c: Checkpoint) {
         self.nl = c.nl;
+        self.inst_idx = c.inst_idx;
         self.report = c.report;
         self.timing = c.timing;
         self.dirty = c.dirty;
