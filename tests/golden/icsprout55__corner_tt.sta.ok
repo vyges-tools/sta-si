@@ -1,0 +1,27 @@
+$ vyges-sta-si run examples/icsprout55/corner_tt.sta
+exit: 0
+--- stdout ---
+STA report — design tt_typ
+  clock clk  period 2.000 ns   xtalk_miller 2.00
+  OCV: flat derate — late 1.000 / early 1.000   CRPR: on
+  endpoints: 3
+  WNS: 1.8281 ns    TNS: 0.0000 ns    [MET]
+
+  worst path to r1/D  (slack 1.8281 ns):
+      arrival     slew   node
+       0.0000   0.0500   clk
+       0.0000   0.0500   r2/CK
+       0.1481   0.0721   r2/Q
+       0.1481   0.0721   r1/D
+
+  hold endpoints: 2    WHS: 0.1124 ns    THS: 0.0000 ns    [MET]
+  worst hold path to r1/D  (slack 0.1124 ns):
+      arrival     slew   node
+       0.0000   0.0500   clk
+       0.0000   0.0500   r2/CK
+       0.1211   0.0633   r2/Q
+       0.1211   0.0633   r1/D
+
+  achievable: ~0.172 ns → ~5817.6 MHz   (target 2.000 ns → ~500.0 MHz)
+--- stderr ---
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.8281 ns, TNS 0.0000 ns, WHS 0.1124 ns — 0 violation(s)"}

@@ -1,0 +1,28 @@
+$ vyges-sta-si run examples/async_rst/async_rst.sta
+exit: 0
+--- stdout ---
+STA report — design async_rst
+  clock clk  period 2.000 ns   xtalk_miller 2.00
+  OCV: flat derate — late 1.000 / early 1.000   CRPR: on
+  endpoints: 3
+  WNS: 1.6873 ns    TNS: 0.0000 ns    [MET]
+
+  worst path to q_o  (slack 1.6873 ns):
+      arrival     slew   node
+       0.0000   0.0200   clk
+       0.0000   0.0200   r1/CLK
+       0.3127   0.0460   r1/Q
+       0.3127   0.0460   q_o
+
+  hold endpoints: 2    WHS: -0.0167 ns    THS: -0.0167 ns    [VIOLATED]
+  worst hold path to r1/RESET_B  (slack -0.0167 ns):
+      arrival     slew   node
+       0.0000   0.0200   rst_n_i
+       0.0000   0.0200   b1/A
+       0.0533   0.0211   b1/X
+       0.0533   0.0211   r1/RESET_B
+
+  achievable: ~0.313 ns → ~3197.8 MHz   (target 2.000 ns → ~500.0 MHz)
+--- stderr ---
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-HOLD","raw_msg":"hold violation at r1/RESET_B: WHS -0.0167 ns (THS -0.0167 ns over 2 endpoint(s))","objects":["net:r1/RESET_B","clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-DONE","raw_msg":"sta complete: WNS 1.6873 ns, TNS 0.0000 ns, WHS -0.0167 ns — 1 violation(s)"}

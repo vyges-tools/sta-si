@@ -1,0 +1,27 @@
+$ vyges-sta-si run examples/icsprout55/regreg_pocv.sta
+exit: 0
+--- stdout ---
+STA report — design ics55_regreg
+  clock clk  period 2.000 ns   xtalk_miller 2.00
+  OCV: POCV — per-stage sigma 0.060, 3.0-sigma band   CRPR: on
+  endpoints: 3
+  WNS: 1.8015 ns    TNS: 0.0000 ns    [MET]
+
+  worst path to r1/D  (slack 1.8015 ns):
+      arrival     slew   node
+       0.0000   0.0500   clk
+       0.0000   0.0500   r2/CK
+       0.1747   0.0721   r2/Q
+       0.1747   0.0721   r1/D
+
+  hold endpoints: 2    WHS: 0.0906 ns    THS: 0.0000 ns    [MET]
+  worst hold path to r1/D  (slack 0.0906 ns):
+      arrival     slew   node
+       0.0000   0.0500   clk
+       0.0000   0.0500   r2/CK
+       0.0993   0.0633   r2/Q
+       0.0993   0.0633   r1/D
+
+  achievable: ~0.199 ns → ~5036.7 MHz   (target 2.000 ns → ~500.0 MHz)
+--- stderr ---
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.8015 ns, TNS 0.0000 ns, WHS 0.0906 ns — 0 violation(s)"}

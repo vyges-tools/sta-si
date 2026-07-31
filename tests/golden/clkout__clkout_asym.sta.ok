@@ -1,0 +1,27 @@
+$ vyges-sta-si run examples/clkout/clkout_asym.sta
+exit: 0
+--- stdout ---
+STA report — design clkout_asym
+  clock clk  period 2.000 ns   xtalk_miller 2.00
+  OCV: flat derate — late 1.000 / early 1.000   CRPR: on
+  endpoints: 3
+  WNS: 0.6807 ns    TNS: 0.0000 ns    [MET]
+
+  worst path to clk_o  (slack 0.6807 ns):
+      arrival     slew   node
+       1.0000   0.0200   clk
+       1.0000   0.0200   cb0/A
+       1.0557   0.0223   cb0/X
+       1.0557   0.0223   ob0/A
+       1.1193   0.0264   ob0/X
+       1.1193   0.0264   clk_o
+
+  hold endpoints: 1    WHS: 0.0243 ns    THS: 0.0000 ns    [MET]
+  worst hold path to r0/D  (slack 0.0243 ns):
+      arrival     slew   node
+       0.1000   0.0200   d_i
+       0.1000   0.0200   r0/D
+
+  achievable: ~1.319 ns → ~758.0 MHz   (target 2.000 ns → ~500.0 MHz)
+--- stderr ---
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 0.6807 ns, TNS 0.0000 ns, WHS 0.0243 ns — 0 violation(s)"}

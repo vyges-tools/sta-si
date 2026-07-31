@@ -1,0 +1,17 @@
+$ vyges-sta-si run examples/icsprout55/mcmm.sta
+exit: 0
+--- stdout ---
+MCMM report — design ics55_regreg_mcmm
+  scenarios: 3
+
+  scenario               period     WNS setup      WHS hold   verdict
+  corner_ss               2.000        1.6963        0.1800   MET
+  corner_tt               2.000        1.8281        0.1124   MET
+  corner_ff               2.000        1.8746        0.0769   MET
+
+  worst setup: 1.6963 ns  (scenario corner_ss)   [MET]
+  worst hold:  0.0769 ns  (scenario corner_ff)   [MET]
+--- stderr ---
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.6963 ns, TNS 0.0000 ns, WHS 0.1800 ns — 0 violation(s)"}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.8281 ns, TNS 0.0000 ns, WHS 0.1124 ns — 0 violation(s)"}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.8746 ns, TNS 0.0000 ns, WHS 0.0769 ns — 0 violation(s)"}

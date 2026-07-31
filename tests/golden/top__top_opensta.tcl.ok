@@ -1,0 +1,29 @@
+$ vyges-sta-si tcl examples/top/top_opensta.tcl
+exit: 0
+--- stdout ---
+# vyges-sta-si <VERSION> — OpenSTA-compatible adapter (Vyges engine)
+# design top   clock clk @ 1.0000 ns
+
+Path Type: max (Setup)
+  Startpoint: a
+  Endpoint:   y
+  Path Group: clk
+       Arrival      Slew   Node
+        0.1000    0.0200   a
+        0.1000    0.0200   g1/A
+        0.3220    0.0929   g1/Y
+        0.3295    0.0929   g2/A
+        0.6025    0.1100   g2/Y
+        0.6100    0.1100   g3/A
+        0.8107    0.0711   g3/Y
+        0.8107    0.0711   y
+    slack -0.0107 (VIOLATED)
+
+Path Type: min (Hold)
+  (no constrained paths)
+
+wns -0.0107
+tns -0.0107
+--- stderr ---
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-SETUP","raw_msg":"setup violation at y: WNS -0.0107 ns (TNS -0.0107 ns over 1 endpoint(s))","objects":["net:y","clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-DONE","raw_msg":"sta complete: WNS -0.0107 ns, TNS -0.0107 ns, WHS inf ns — 1 violation(s)"}

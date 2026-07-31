@@ -1,0 +1,29 @@
+$ vyges-sta-si run examples/seq/seq.sta
+exit: 0
+--- stdout ---
+STA report — design seq
+  clock clk  period 1.000 ns   xtalk_miller 2.00
+  OCV: flat derate — late 1.000 / early 1.000   CRPR: on
+  endpoints: 3
+  WNS: 0.7431 ns    TNS: 0.0000 ns    [MET]
+
+  worst path to r2/D  (slack 0.7431 ns):
+      arrival     slew   node
+       0.0000   0.0200   clk
+       0.0000   0.0200   r1/CK
+       0.1127   0.0348   r1/Q
+       0.1127   0.0348   g1/A
+       0.2069   0.0335   g1/Y
+       0.2069   0.0335   r2/D
+
+  hold endpoints: 2    WHS: 0.1556 ns    THS: 0.0000 ns    [MET]
+  worst hold path to r1/D  (slack 0.1556 ns):
+      arrival     slew   node
+       0.0000   0.0200   clk
+       0.0000   0.0200   r2/CK
+       0.1756   0.0656   r2/Q
+       0.1756   0.0656   r1/D
+
+  achievable: ~0.257 ns → ~3892.7 MHz   (target 1.000 ns → ~1000.0 MHz)
+--- stderr ---
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 0.7431 ns, TNS 0.0000 ns, WHS 0.1556 ns — 0 violation(s)"}

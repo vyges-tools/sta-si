@@ -1,0 +1,23 @@
+$ vyges-sta-si run examples/top/top_json.sta
+exit: 0
+--- stdout ---
+STA report — design top
+  clock clk  period 1.000 ns   xtalk_miller 2.00
+  OCV: flat derate — late 1.000 / early 1.000   CRPR: on
+  endpoints: 1
+  WNS: 0.3225 ns    TNS: 0.0000 ns    [MET]
+
+  worst path to y  (slack 0.3225 ns):
+      arrival     slew   node
+       0.0000   0.0200   a
+       0.0000   0.0200   g1/A
+       0.2114   0.0929   g1/Y
+       0.2189   0.0929   g2/A
+       0.4789   0.1100   g2/Y
+       0.4864   0.1100   g3/A
+       0.6775   0.0711   g3/Y
+       0.6775   0.0711   y
+
+  achievable: ~0.678 ns → ~1475.9 MHz   (target 1.000 ns → ~1000.0 MHz)
+--- stderr ---
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 0.3225 ns, TNS 0.0000 ns, WHS inf ns — 0 violation(s)"}
