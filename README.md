@@ -116,11 +116,29 @@ accuracy — the **`.spef`** from `vyges-extract`. What it gives you is the
 **answer to "does it meet timing, and if not, where?"** — the worst path tells
 you the exact gates and arrival times.
 
+### Capability at a glance
+
+The axes usually cited when comparing an open timer against a commercial sign-off tool, and
+where this engine actually stands on each. Two of them are the reason it exists; the others are
+stated as gaps rather than papered over.
+
+| Axis | `vyges-sta-si` | What that means concretely |
+| --- | --- | --- |
+| **Statistical STA / on-chip variation** | **yes** | Flat derate, **AOCV** (depth-dependent derate table), and **POCV** — a per-stage sigma with an N-sigma band growing as √depth (RSS), not linearly. Auto-enables from Liberty **LVF** `ocv_sigma_*` tables when the library carries them. **CRPR** credits back shared launch/capture clock pessimism. |
+| **SI and crosstalk analysis** | **yes** | Coupling capacitance from SPEF with a Miller multiplier, filtered by **switching-window overlap** and iterated to convergence. **CCS** current-source delay when the Liberty has it, **effective capacitance** with resistive shielding (π-model reduction, Ceff iteration), and a **waveform-into-RC transient** for net delay and sink-slew degradation, measured at the library's own slew thresholds. |
+| **Very large designs (>10 M gates)** | **not proven** | Runs a post-route block with a 25 MB netlist and 20 MB of parasitics in seconds, and keeps a persistent timing graph so an optimizer re-times only the cone it changed. Nothing at 10 M gates has been measured, so nothing is claimed. |
+| **Fits an existing flow** | **partial** | Standard formats end to end: Liberty (NLDM/CCS/LVF), gate-level Verilog or Yosys JSON, SPEF, SDC in; SDF back-annotation and JSON reports out. Driven by a declarative job file, or an **experimental** OpenSTA-style Tcl subset. That subset is not a drop-in for a Tcl-driven sign-off flow, and is not meant to be — see below. |
+
+The first two are the point: they are the margins the open baseline does not give you, and they
+are why running this **alongside** an open sign-off timer tells you something new rather than
+repeating it. The last two are honest limits, not roadmap promises.
+
 ### Where it sits vs OpenSTA / the commercial signoff timer — run it *first*, not *instead*
 
 `vyges-sta-si` is an **early-flow and complementary** engine, **not a tapeout
 sign-off replacement** for OpenSTA or the commercial signoff timer. It is *correlated to* OpenSTA
-(within ~0.6 % of WNS on a routed sky130 block), i.e. one tier below it in
+— on a routed sky130 block, WNS agrees within **~1 %**, on the same critical path the sign-off
+timer reports — i.e. one tier below it in
 maturity — so it runs **upstream of**, and **alongside**, the signoff tool, never
 in lieu of it for tape-out:
 
@@ -475,7 +493,23 @@ edges rather than taking `max(rise,fall)` per stage, matching how real paths beh
 **Correlated against OpenSTA 2.7.0** on a sky130 design: single-arc paths match to
 4 decimals (global WNS 9.3760 ns, DFF CK→Q 0.6240 ns), and a multi-stage reg→reg
 path agrees within **~3%** (down from ~7% before unate-split), staying slightly
-conservative — the residual is second-order slew propagation. On a real routed sky130 block (post-route netlist + OpenRCX SPEF) the reg→reg setup slack matches OpenSTA within ~0.6% of the clock period.
+conservative — the residual is second-order slew propagation.
+
+On a **real routed sky130 block** (post-route netlist + OpenRCX SPEF), measured against the
+sign-off timer's own checked-in results rather than a re-run:
+
+| | agreement |
+| --- | --- |
+| **Per-arc delay** — median over ~58 000 back-annotated rise/fall arcs | **~2 %** |
+| **Setup WNS**, on the same critical path the sign-off timer reports | **~1 %** |
+| A reg→reg-class path both timers rank near the top | **~0.7 %** (~0.3 % of the clock period) |
+| **Hold** — every check the sign-off timer reports, matched, and consistently on the pessimistic side | **sub-nanosecond** |
+
+Per-arc delay is the sharpest of these, because it depends on neither path search nor
+constraints — it isolates the delay calculator from everything else. The WNS figure is quoted
+last on purpose: a slack number only means something once both timers are reporting the *same
+path*, and reaching that took closing check-coverage gaps (recovery/removal checks, constant
+propagation, clock-source→output-port paths) rather than touching the delay engine.
 
 When a pin carries a CCS **receiver_capacitance** model (emitted by `vyges-char`),
 the driver is loaded with the Miller-aware effective input cap (the C1/C2 segments)
