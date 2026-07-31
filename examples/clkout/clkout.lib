@@ -1,0 +1,53 @@
+/* Fixture: a clock forwarded to an output port.
+
+   BUF is deliberately symmetric (cell_rise == cell_fall) so a test can assert the
+   launch offset exactly; BUFA is deliberately asymmetric, with the RISING edge the
+   slower one, so a test can tell "we launched the falling edge at half a period"
+   apart from "we added half a period to whichever edge was already worst". */
+library(clkout) {
+  time_unit : "1ns";
+  capacitive_load_unit (1, pf);
+  slew_lower_threshold_pct_rise : 20.0;
+  slew_upper_threshold_pct_rise : 80.0;
+  slew_lower_threshold_pct_fall : 20.0;
+  slew_upper_threshold_pct_fall : 80.0;
+  cell (BUF) {
+    area : 2.0;
+    pin(A) { direction : input; capacitance : 0.001; }
+    pin(X) { direction : output; function : "A";
+      timing () { related_pin : "A"; timing_type : combinational; timing_sense : "positive_unate";
+        cell_rise(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.05, 0.07", "0.08, 0.11"); }
+        cell_fall(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.05, 0.07", "0.08, 0.11"); }
+        rise_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.02, 0.03", "0.03, 0.05"); }
+        fall_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.02, 0.03", "0.03, 0.05"); } } }
+  }
+  cell (BUFA) {
+    /* same shape as BUF, but rising is much slower than falling */
+    area : 2.0;
+    pin(A) { direction : input; capacitance : 0.001; }
+    pin(X) { direction : output; function : "A";
+      timing () { related_pin : "A"; timing_type : combinational; timing_sense : "positive_unate";
+        cell_rise(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.45, 0.47", "0.48, 0.51"); }
+        cell_fall(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.05, 0.07", "0.08, 0.11"); }
+        rise_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.02, 0.03", "0.03, 0.05"); }
+        fall_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.02, 0.03", "0.03, 0.05"); } } }
+  }
+  cell (DFF) {
+    area : 6.0;
+    ff (IQ, IQN) { clocked_on : "CLK"; next_state : "D"; }
+    pin(CLK) { direction : input; clock : true; capacitance : 0.001; }
+    pin(D) { direction : input; capacitance : 0.001;
+      timing () { related_pin : "CLK"; timing_type : setup_rising;
+        rise_constraint(s) { index_1("0.01, 0.1"); index_2("0.01, 0.1"); values("0.05, 0.05", "0.05, 0.05"); }
+        fall_constraint(s) { index_1("0.01, 0.1"); index_2("0.01, 0.1"); values("0.05, 0.05", "0.05, 0.05"); } }
+      timing () { related_pin : "CLK"; timing_type : hold_rising;
+        rise_constraint(s) { index_1("0.01, 0.1"); index_2("0.01, 0.1"); values("0.02, 0.02", "0.02, 0.02"); }
+        fall_constraint(s) { index_1("0.01, 0.1"); index_2("0.01, 0.1"); values("0.02, 0.02", "0.02, 0.02"); } } }
+    pin(Q) { direction : output; function : "IQ";
+      timing () { related_pin : "CLK"; timing_type : rising_edge;
+        cell_rise(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.10, 0.12", "0.13, 0.16"); }
+        cell_fall(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.10, 0.12", "0.13, 0.16"); }
+        rise_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.02, 0.03", "0.03, 0.05"); }
+        fall_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.02, 0.03", "0.03, 0.05"); } } }
+  }
+}

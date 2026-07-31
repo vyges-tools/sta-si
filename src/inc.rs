@@ -141,6 +141,10 @@ pub(crate) struct IncState {
     pub slew_min: Vec<f64>,
     pub from_min: Vec<Option<usize>>,
     pub endpoint_req: Vec<f64>, // output ports (constant) + flop D (recomputed via setup_recs)
+    /// Clock-source-launched arrivals (see `sta::Timing::clk_arrival`). Invariant here: an
+    /// edit anywhere on a clock-launched path bails to the full pass below, so this is
+    /// carried forward rather than recomputed.
+    pub clk_arrival: Vec<f64>,
     /// swapped-in cell arcs for resized output nodes (overrides `IncTopo::in_edges`).
     pub overrides: HashMap<usize, Vec<InEdge>>,
 }
@@ -395,6 +399,19 @@ impl IncGraph {
             if self.topo.is_ck[u] {
                 return None; // clock-network edit
             }
+            // A node on a clock-source-launched path (e.g. the branch that forwards the
+            // clock to an output port) would need that pass rerun, which this fast path
+            // does not do. Ordinary data nodes are unaffected: a flop's Q is not on one.
+            if self
+                .state
+                .clk_arrival
+                .get(u)
+                .copied()
+                .unwrap_or(f64::NEG_INFINITY)
+                .is_finite()
+            {
+                return None;
+            }
             cone.push(u);
             for &w in &self.topo.succ[u] {
                 if !in_cone[w] {
@@ -459,14 +476,26 @@ impl IncGraph {
         let mut worst = None;
         let mut endpoints = 0;
         for v in 0..n {
-            if !self.topo.is_endpoint[v]
-                || arrival[v] == f64::NEG_INFINITY
-                || self.topo.excluded_setup[v]
-            {
+            // `is_endpoint` is sized to the current topology; the cached state arrays can
+            // be shorter after a rebuild added nodes (an inserted delay cell is never an
+            // endpoint), so this test must stay first and the reads below stay guarded.
+            if !self.topo.is_endpoint[v] || self.topo.excluded_setup[v] {
+                continue;
+            }
+            // same two launch models as the full pass: delay from the launch edge, and
+            // an absolute time carried from a clock source's own edge.
+            let clk_a = self
+                .state
+                .clk_arrival
+                .get(v)
+                .copied()
+                .unwrap_or(f64::NEG_INFINITY);
+            let arr_v = arrival[v].max(clk_a);
+            if !arr_v.is_finite() {
                 continue;
             }
             endpoints += 1;
-            let slack = endpoint_req[v] - arrival[v];
+            let slack = endpoint_req[v] - arr_v;
             if slack < 0.0 {
                 tns += slack;
             }
@@ -525,6 +554,7 @@ impl IncGraph {
             &self.topo.is_endpoint,
             &self.topo.excluded_setup,
             &arrival,
+            &self.state.clk_arrival,
             &slew,
             &arr_min,
             &self.state.node_load,

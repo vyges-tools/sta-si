@@ -1,0 +1,11 @@
+# Clock-source -> output-port paths. `clk_o` carries the clock itself off the block, so
+# its launch is the clock edge (rise at 0, fall at half the period) rather than a delay
+# measured from the launch edge. Symmetric buffers: the offset is exactly period/2.
+design:      clkout
+netlist:     clkout.v
+lib:         clkout.lib
+clock:       clk 2.0
+input_delay:  0.1
+output_delay: 0.2
+input_slew:  0.02
+output_load: 0.005

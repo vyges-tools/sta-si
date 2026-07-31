@@ -334,10 +334,15 @@ pub(crate) struct Timing {
     is_endpoint: Vec<bool>,
     excluded_setup: Vec<bool>, // false-path endpoints (no setup check)
     arrival: Vec<f64>,         // latest (setup) arrival, ns
-    slew: Vec<f64>,            // setup-corner output slew, ns
-    arr_min: Vec<f64>,         // earliest (hold) arrival, ns
-    node_load: Vec<f64>,       // driver-node capacitive load, pF
-    endpoint_req: Vec<f64>,    // required time (meaningful at setup endpoints)
+    // Latest arrival carried from a clock SOURCE's own edge (rise at 0, fall at half a
+    // period), stopped at every flop CK pin. `arrival` measures delay from the launch
+    // edge, which cannot express a path that *is* the clock leaving the block; where both
+    // reach an endpoint the later one is the one it has to meet. NEG_INFINITY = no such path.
+    clk_arrival: Vec<f64>,
+    slew: Vec<f64>,         // setup-corner output slew, ns
+    arr_min: Vec<f64>,      // earliest (hold) arrival, ns
+    node_load: Vec<f64>,    // driver-node capacitive load, pF
+    endpoint_req: Vec<f64>, // required time (meaningful at setup endpoints)
 }
 
 impl Timing {
@@ -349,6 +354,7 @@ impl Timing {
         is_endpoint: &[bool],
         excluded_setup: &[bool],
         arrival: &[f64],
+        clk_arrival: &[f64],
         slew: &[f64],
         arr_min: &[f64],
         node_load: &[f64],
@@ -364,6 +370,7 @@ impl Timing {
             is_endpoint: is_endpoint.to_vec(),
             excluded_setup: excluded_setup.to_vec(),
             arrival: arrival.to_vec(),
+            clk_arrival: clk_arrival.to_vec(),
             slew: slew.to_vec(),
             arr_min: arr_min.to_vec(),
             node_load: node_load.to_vec(),
@@ -530,23 +537,41 @@ impl Timer {
     pub fn load(&self, p: PinId) -> f64 {
         self.timing.node_load.get(p).copied().unwrap_or(0.0)
     }
+    /// The arrival a setup check at `p` must meet: the later of the launch-edge-relative
+    /// arrival and a clock-source-launched one. See [`Timing::clk_arrival`].
+    pub fn setup_arrival(&self, p: PinId) -> f64 {
+        let a = self.arrival(p);
+        let c = self
+            .timing
+            .clk_arrival
+            .get(p)
+            .copied()
+            .unwrap_or(f64::NEG_INFINITY);
+        if c > a {
+            c
+        } else {
+            a
+        }
+    }
     /// Required time at `p` — `Some` only at a reached, non-false-path setup endpoint.
     pub fn required(&self, p: PinId) -> Option<f64> {
         let excluded = self.timing.excluded_setup.get(p).copied().unwrap_or(false);
-        (self.is_endpoint(p) && self.arrival(p).is_finite() && !excluded)
+        (self.is_endpoint(p) && self.setup_arrival(p).is_finite() && !excluded)
             .then(|| self.timing.endpoint_req[p])
     }
     /// Setup slack at `p` (`required − arrival`) — `Some` only at a setup endpoint.
     pub fn slack(&self, p: PinId) -> Option<f64> {
-        self.required(p).map(|r| r - self.arrival(p))
+        self.required(p).map(|r| r - self.setup_arrival(p))
     }
     /// Every setup endpoint and its slack, worst (most negative) first — the list an
     /// optimizer ranks candidate moves from. Consistent with `wns`/`tns`.
     pub fn endpoint_slacks(&self) -> Vec<(PinId, f64)> {
         let t = &self.timing;
         let mut v: Vec<(PinId, f64)> = (0..t.labels.len())
-            .filter(|&p| t.is_endpoint[p] && t.arrival[p].is_finite() && !t.excluded_setup[p])
-            .map(|p| (p, t.endpoint_req[p] - t.arrival[p]))
+            .filter(|&p| {
+                t.is_endpoint[p] && self.setup_arrival(p).is_finite() && !t.excluded_setup[p]
+            })
+            .map(|p| (p, t.endpoint_req[p] - self.setup_arrival(p)))
             .collect();
         v.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         v
@@ -1232,6 +1257,39 @@ fn build_report(
         }
     };
 
+    // Which nodes are flop clock (CK) pins. Needed by the clock-launched pass below
+    // (which stops at them) as well as by CRPR further down.
+    let mut is_ck = vec![false; n];
+    for &i in &ck_node_list {
+        is_ck[i] = true;
+    }
+
+    // ---- per-lane launch times -------------------------------------------
+    // The main pass measures every delay *from the launching clock edge*, so both
+    // lanes of a source start at the same time and a flop's Q arrival is already
+    // relative to edge 0. A **clock source** is different: it is not a source of
+    // relative delay but of the edges themselves, and its rising and falling edges
+    // happen at different absolute times. `seed_clk` starts a second pass at those
+    // times so a path that runs from a clock port out through the clock network
+    // carries the launch edge it actually left on. See `clk_arr` below.
+    let seed_main: Vec<[f64; 2]> = seed.iter().map(|&s| [s; 2]).collect();
+    let period_of_src = |name: &str| -> f64 {
+        job.clocks
+            .iter()
+            .find(|(_, s, _)| s == name)
+            .map(|(_, _, p)| *p)
+            .unwrap_or(period)
+    };
+    let mut seed_clk = vec![[f64::NEG_INFINITY; 2]; n]; // unreached unless a clock source
+    let mut have_clock_launch = false;
+    for (idx, name) in &input_ports {
+        if clock_srcs.contains(name) {
+            // 50 % duty: the rising edge at t=0, the falling edge half a period later.
+            seed_clk[*idx] = [0.0, period_of_src(name) / 2.0];
+            have_clock_launch = true;
+        }
+    }
+
     // ---- forward propagation, reusable over a net-delay table ------------
     // Rise and fall propagate as **separate lanes** (0=rise, 1=fall): a cell arc
     // maps input→output edges by its unateness (negative_unate inverts: out-rise
@@ -1245,9 +1303,14 @@ fn build_report(
     let input_slew = job.input_slew;
     // `nd` = per-arc net delay, `ns` = per-arc degraded sink slew (0 = keep driver slew).
     #[allow(clippy::type_complexity)]
+    // `seed_l` gives each source node its per-lane start time; `block_seq` stops
+    // propagation at a flop's clock pin, which is what keeps the clock-launched pass
+    // (below) free of paths a flop launched.
     let relax = |nd: &[f64],
                  ns: &[f64],
-                 late: bool|
+                 late: bool,
+                 seed_l: &[[f64; 2]],
+                 block_seq: bool|
      -> (
         Vec<f64>,
         Vec<f64>,
@@ -1282,8 +1345,8 @@ fn build_report(
                 // It is still pushed, so the topological walk stays consistent and a gate
                 // with one constant input still times correctly through its other inputs.
                 if !const_driver.get(v).copied().unwrap_or(false) {
-                    arr[v] = [seed[v]; 2]; // input ports seed with their SDC arrival delay
-                    arr_nom[v] = [seed[v]; 2];
+                    arr[v] = seed_l[v]; // input ports seed with their SDC arrival delay
+                    arr_nom[v] = seed_l[v];
                 }
                 order.push(v);
             }
@@ -1295,8 +1358,13 @@ fn build_report(
             for e in &out_edges[u] {
                 let v = e.to;
                 let load = node_load[v];
+                // A flop's CK->Q arc starts a *new* launch, so a pass that is tracking
+                // where a clock edge itself gets to must stop here. The indeg bookkeeping
+                // below still runs — only the value is withheld, so the topological walk
+                // is identical in both passes.
+                let blocked = block_seq && is_ck[u];
                 match &e.kind {
-                    EdgeKind::Net(i) => {
+                    EdgeKind::Net(i) if !blocked => {
                         // interconnect: rise->rise, fall->fall, same delay, no derate.
                         // The sink slew is the transient-degraded value when available
                         // (>0), else the driver slew passes through unchanged.
@@ -1327,7 +1395,7 @@ fn build_report(
                             }
                         }
                     }
-                    EdgeKind::Cell(arc) => {
+                    EdgeKind::Cell(arc) if !blocked => {
                         for ol in 0..2 {
                             let (dt, st) = if ol == 0 {
                                 (&arc.cell_rise, &arc.rise_transition)
@@ -1414,6 +1482,7 @@ fn build_report(
                             }
                         }
                     }
+                    _ => {} // blocked: bookkeeping only, no value propagated
                 }
                 indeg_work[v] -= 1;
                 if indeg_work[v] == 0 {
@@ -1527,7 +1596,7 @@ fn build_report(
     let mut arc_s = nom_s.clone();
     let mut cycle_checked = false;
     for _ in 0..MAX_SI_ITERS {
-        let (arr, slw, _f, ord, _, _, _) = relax(&arc_d, &arc_s, true);
+        let (arr, slw, _f, ord, _, _, _) = relax(&arc_d, &arc_s, true, &seed_main, false);
         if !cycle_checked {
             if ord.len() != n {
                 return Err(StaError::CombinationalLoop);
@@ -1553,9 +1622,29 @@ fn build_report(
     // final late propagation consistent with the converged per-arc delays, and the
     // early (min-delay) propagation used for hold and for early clock arrivals.
     let (arrival, slew, from, order_late, late_arr, late_slew, late_from) =
-        relax(&arc_d, &arc_s, true);
+        relax(&arc_d, &arc_s, true, &seed_main, false);
     let (arr_min, slew_min, from_min, _ord_min, early_arr, early_slew, early_from) =
-        relax(&nom_d, &nom_s, false);
+        relax(&nom_d, &nom_s, false, &seed_main, false);
+
+    // Clock-launched arrivals: the same late propagation, but started at the clock
+    // source's own edge times and stopped at every flop CK pin. A clock port driving
+    // an output port (a clock forwarded off-chip) is a real timed path, and it is one
+    // the main pass cannot see: there the falling edge leaves at half a period, so its
+    // arrival is that much later than a delay measured from the launch edge. On a block
+    // with a forwarded clock this is routinely the critical path.
+    let (clk_arr, clk_slew, clk_from, _clk_ord, _, _, _) = if have_clock_launch {
+        relax(&arc_d, &arc_s, true, &seed_clk, true)
+    } else {
+        (
+            vec![f64::NEG_INFINITY; n],
+            vec![input_slew; n],
+            vec![None; n],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    };
 
     // ---- clock paths + CRPR ---------------------------------------------
     // Proper OCV uses opposite clock corners on launch vs capture (setup: late
@@ -1563,10 +1652,6 @@ fn build_report(
     // capture clock paths share a segment from the root to their common point;
     // deriving that shared segment two ways is unphysical pessimism, so CRPR credits
     // back its OCV spread (late arrival − early arrival at the common point).
-    let mut is_ck = vec![false; n];
-    for &i in &ck_node_list {
-        is_ck[i] = true;
-    }
     let ck_node = |k: &Option<String>| -> Option<usize> {
         k.as_deref().and_then(|s| key2idx.get(s)).copied()
     };
@@ -1778,19 +1863,32 @@ fn build_report(
     let mut wns = f64::INFINITY;
     let mut tns = 0.0;
     let mut worst = None;
+    let mut worst_is_clk_launched = false;
     let mut endpoints = 0;
     for v in 0..n {
-        if !is_endpoint[v] || arrival[v] == f64::NEG_INFINITY || excluded_setup[v] {
-            continue; // unreached or false-path-excluded
+        if !is_endpoint[v] || excluded_setup[v] {
+            continue; // not an endpoint, or false-path-excluded
         }
+        // Worst of the two launch models: a delay measured from the launch edge
+        // (flops, input ports) and an absolute time carried from a clock source's own
+        // edge. Whichever arrives later is the one this endpoint has to meet.
+        let main_a = arrival[v];
+        let clk_a = clk_arr[v];
+        let (arr_v, clk_launched) = match (main_a.is_finite(), clk_a.is_finite()) {
+            (true, true) if clk_a > main_a => (clk_a, true),
+            (true, _) => (main_a, false),
+            (false, true) => (clk_a, true),
+            (false, false) => continue, // unreached by either
+        };
         endpoints += 1;
-        let slack = endpoint_req[v] - arrival[v];
+        let slack = endpoint_req[v] - arr_v;
         if slack < 0.0 {
             tns += slack;
         }
         if slack < wns {
             wns = slack;
             worst = Some(v);
+            worst_is_clk_launched = clk_launched;
         }
     }
 
@@ -1798,8 +1896,15 @@ fn build_report(
     let worst_endpoint = match worst {
         Some(mut v) => {
             let end_label = labels[v].clone();
+            // trace through the pass that produced the reported slack, so the printed
+            // path is the one the number came from
+            let (pred, arr_of, slew_of) = if worst_is_clk_launched {
+                (&clk_from, &clk_arr, &clk_slew)
+            } else {
+                (&from, &arrival, &slew)
+            };
             let mut chain = vec![v];
-            while let Some(u) = from[v] {
+            while let Some(u) = pred[v] {
                 chain.push(u);
                 v = u;
             }
@@ -1807,8 +1912,8 @@ fn build_report(
             for idx in chain {
                 worst_path.push(PathNode {
                     label: labels[idx].clone(),
-                    arrival: arrival[idx],
-                    slew: slew[idx],
+                    arrival: arr_of[idx],
+                    slew: slew_of[idx],
                 });
             }
             end_label
@@ -2030,6 +2135,7 @@ fn build_report(
         &is_endpoint,
         &excluded_setup,
         &arrival,
+        &clk_arr,
         &slew,
         &arr_min,
         &node_load,
@@ -2103,6 +2209,7 @@ fn build_report(
             slew_min: slew_min.clone(),
             from_min: from_min.clone(),
             endpoint_req: endpoint_req.clone(),
+            clk_arrival: clk_arr.clone(),
             overrides: HashMap::new(),
         };
         Some(IncGraph { topo, state })
