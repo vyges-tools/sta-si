@@ -99,9 +99,33 @@ pub struct Plan {
     /// reviewer sees the price.
     pub wns_before: f64,
     pub wns_after: f64,
+    /// Re-timings this plan cost, split by how they were served: cone-localized incremental
+    /// vs full re-analysis. Planning is dominated by re-timing — every candidate is judged, not
+    /// assumed — so this is the plan's own cost, reported rather than guessed at.
+    ///
+    /// Two misses are expected and principled: inserting a cell changes topology, and resizing
+    /// a **sequential** cell touches the clock network. Both fall back to a full analysis by
+    /// design; the incremental path validates itself against the netlist and degrades rather
+    /// than risking a wrong answer.
+    pub updates_incremental: u64,
+    pub updates_full: u64,
 }
 
 impl Plan {
+    /// Total re-timings this plan cost.
+    pub fn updates(&self) -> u64 {
+        self.updates_incremental + self.updates_full
+    }
+
+    /// Fraction of re-timings served by the incremental path, in `0.0..=1.0`. `1.0` when the
+    /// plan cost no re-timing at all (nothing to do is not a slow answer).
+    pub fn incremental_rate(&self) -> f64 {
+        match self.updates() {
+            0 => 1.0,
+            n => self.updates_incremental as f64 / n as f64,
+        }
+    }
+
     /// A plan that changes nothing, carrying the timer's current metrics as the baseline.
     fn baseline(t: &Timer) -> Plan {
         Plan {
@@ -113,7 +137,18 @@ impl Plan {
             ths_after: t.ths(),
             wns_before: t.wns(),
             wns_after: t.wns(),
+            // recorded as deltas against the timer's running counters, so a Plan reports what
+            // IT cost rather than everything the timer has ever done
+            updates_incremental: t.update_stats().0,
+            updates_full: t.update_stats().1,
         }
+    }
+
+    /// Convert the baseline's absolute counters into this plan's own cost.
+    fn finish(&mut self, t: &Timer) {
+        let (inc, full) = t.update_stats();
+        self.updates_incremental = inc.saturating_sub(self.updates_incremental);
+        self.updates_full = full.saturating_sub(self.updates_full);
     }
 
     /// Record an accepted fix and refresh the "after" metrics from the timer.
@@ -321,6 +356,7 @@ pub fn plan_hold_repair(t: &mut Timer, opts: &RepairOpts) -> Result<Plan, StaErr
             Attempt::Exhausted => break,
         }
     }
+    plan.finish(t);
     Ok(plan)
 }
 
@@ -361,6 +397,12 @@ impl Plan {
         s.push_str(&format!("\"wns_before_ns\":{},", num(self.wns_before)));
         s.push_str(&format!("\"wns_after_ns\":{}", num(self.wns_after)));
         s.push_str("},");
+        s.push_str(&format!(
+            "\"cost\":{{\"retimings\":{},\"incremental\":{},\"full\":{}}},",
+            self.updates(),
+            self.updates_incremental,
+            self.updates_full
+        ));
         s.push_str("\"fixes\":[");
         for (i, f) in self.fixes.iter().enumerate() {
             if i > 0 {
@@ -554,6 +596,7 @@ pub fn plan_setup_repair(t: &mut Timer, opts: &SetupRepairOpts) -> Result<Plan, 
             Attempt::Exhausted => break,
         }
     }
+    plan.finish(t);
     Ok(plan)
 }
 
@@ -626,5 +669,6 @@ pub fn plan_repair(t: &mut Timer, opts: &CombinedOpts) -> Result<Plan, StaError>
             },
         }
     }
+    plan.finish(t);
     Ok(plan)
 }
