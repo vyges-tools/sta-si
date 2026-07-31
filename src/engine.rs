@@ -167,7 +167,10 @@ pub fn sdf_for_job_opts(
         Some(p) => Some(Spef::load(&job.resolve(p)).map_err(|e| StaError::Parse(e.to_string()))?),
         None => None,
     };
-    Ok(crate::sdf::emit(&job.design, &nl, &lib, spef.as_ref()))
+    // Build the timer and emit from IT: the SDF must be a serialization of the analysis,
+    // not a second derivation of delay. See the note in `sdf.rs`.
+    let t = sta::Timer::build(&nl, &lib, job, spef.as_ref())?;
+    Ok(crate::sdf::emit(&job.design, &nl, &lib, spef.as_ref(), &t))
 }
 
 /// Emit the shared Liberty IR (merged across the job's libs) as JSON — the
