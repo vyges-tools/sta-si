@@ -86,6 +86,10 @@ pub struct StaJob {
     /// paths crossing two different groups are cut (setup and hold).
     pub async_groups: Vec<Vec<String>>,
     pub sdc: Option<String>, // optional SDC constraints file (merged at load)
+    /// Optional `vyges-metadata.json`. Only the constraint linter reads it, for the IP's
+    /// declared `clock_domains` — the one input that says how many clocks the design was
+    /// *supposed* to have, which neither the netlist nor the SDC can supply.
+    pub metadata: Option<String>,
     pub base_dir: String,
 }
 
@@ -223,6 +227,7 @@ impl StaJob {
             .unwrap_or_default();
         let mcmm = !scenarios.is_empty();
         let sdc = kv.get("sdc").filter(|s| !s.is_empty()).cloned();
+        let metadata = kv.get("metadata").filter(|s| !s.is_empty()).cloned();
         // clock/netlist/lib are required for a single run, optional for an MCMM job
         // or when an SDC supplies the clock (merged in `load`).
         let (clock_port, period_ns) = match clocks.first() {
@@ -267,6 +272,7 @@ impl StaJob {
             exceptions,
             async_groups: Vec::new(),
             sdc,
+            metadata,
             base_dir: base_dir.to_string(),
         };
         // When an SDC supplies the clock, defer the final validation until after

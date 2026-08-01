@@ -53,6 +53,7 @@ fn job(period: f64) -> StaJob {
         setup_uncertainty: 0.0,
         hold_uncertainty: 0.0,
         sdc: None,
+        metadata: None,
         base_dir: String::new(),
     }
 }

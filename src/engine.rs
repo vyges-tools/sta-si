@@ -7,9 +7,9 @@
 use crate::job::StaJob;
 use crate::liberty::Lib;
 use crate::netlist;
-use crate::yosys_json;
 use crate::spef::Spef;
 use crate::sta::{self, StaError, TimingReport};
+use crate::yosys_json;
 
 const DEMO_LIB: &str = r#"
 library (demo) {
@@ -73,6 +73,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         crpr: true,
         pba: false,
         sdc: None,
+        metadata: None,
         base_dir: String::new(),
     };
     let rep = analyze_inputs(DEMO_NETLIST, DEMO_LIB, &job).unwrap_or(TimingReport {
@@ -133,14 +134,17 @@ pub fn load_netlist(path: &str) -> Result<crate::netlist::Netlist, StaError> {
 fn emit_spef_coverage(job: &StaJob, nl: &netlist::Netlist, spef: &Spef) {
     use vyges_events::{Event, Severity};
     let (attention, msg) = spef_verdict(&coverage::spef(nl, spef));
-    let sev = if attention { Severity::Warn } else { Severity::Info };
+    let sev = if attention {
+        Severity::Warn
+    } else {
+        Severity::Info
+    };
     let mut ev = Event::new("vyges-sta-si", sev, msg).with_code("STA-SPEF");
     if !job.clock_port.is_empty() {
         ev = ev.with_objects(vec![format!("clock:{}", job.clock_port)]);
     }
     vyges_events::emit(&ev);
 }
-
 
 /// for `--liberty-nldm-only`. CCS pruning is a load-time choice (not job state), so
 /// it is a parameter here rather than a field on [`StaJob`].
@@ -250,7 +254,26 @@ pub fn lint_job(job: &StaJob) -> Result<crate::sdclint::LintReport, StaError> {
             s
         }
     };
-    Ok(crate::sdclint::lint(&nl, &sdc, &lib))
+    // The IP's declared clock domains, when the job names a metadata file. A missing or
+    // unreadable one is not fatal: the linter simply has no declaration to check against, and
+    // every other check still runs. Failing the whole lint because an optional input is absent
+    // would be a good way to get the lint switched off.
+    let meta = match &job.metadata {
+        Some(p) => match crate::ipmeta::IpMeta::load(&job.resolve(p)) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                eprintln!("warning: {e} — linting without the IP's declared clock domains");
+                None
+            }
+        },
+        None => None,
+    };
+    Ok(crate::sdclint::lint_with_meta(
+        &nl,
+        &sdc,
+        &lib,
+        meta.as_ref(),
+    ))
 }
 
 /// Design could close at least this many× faster than clocked → "over-margined".
@@ -840,10 +863,22 @@ mod input_coverage_tests {
         // train a reader to ignore the warning — which costs more than not having it.
         let (nl, lib) = tie_fixture();
         let c = coverage::liberty(&nl, &lib);
-        assert!(c.resolved_masters >= 4, "the fixture's cells resolve: {c:?}");
-        assert_eq!(c.driving_without_arcs, 0, "CONB is a tie cell, not a defect: {c:?}");
-        assert_eq!(c.sequential_without_constraints, 0, "DFRTP carries setup/hold: {c:?}");
-        assert!(!liberty_verdict(&c).0, "a healthy library must not ask for attention");
+        assert!(
+            c.resolved_masters >= 4,
+            "the fixture's cells resolve: {c:?}"
+        );
+        assert_eq!(
+            c.driving_without_arcs, 0,
+            "CONB is a tie cell, not a defect: {c:?}"
+        );
+        assert_eq!(
+            c.sequential_without_constraints, 0,
+            "DFRTP carries setup/hold: {c:?}"
+        );
+        assert!(
+            !liberty_verdict(&c).0,
+            "a healthy library must not ask for attention"
+        );
     }
 
     #[test]
@@ -877,8 +912,14 @@ mod input_coverage_tests {
         let (nl, lib) = tie_fixture();
         let c = coverage::netlist(&nl, &lib);
         assert_eq!(c.instances, nl.insts.len());
-        assert_eq!(c.unresolved_signal, 0, "every fixture cell is in the fixture library");
-        assert!(!netlist_verdict(&c).0, "a fully resolved netlist must not warn");
+        assert_eq!(
+            c.unresolved_signal, 0,
+            "every fixture cell is in the fixture library"
+        );
+        assert!(
+            !netlist_verdict(&c).0,
+            "a fully resolved netlist must not warn"
+        );
 
         // drop a cell the design uses and the same instance becomes a demand for attention
         let mut lib2 = lib;
@@ -904,7 +945,11 @@ mod spef_coverage_tests {
     use super::*;
 
     fn cov(design: usize, file: usize, matched: usize) -> coverage::SpefCoverage {
-        coverage::SpefCoverage { design_nets: design, file_nets: file, matched }
+        coverage::SpefCoverage {
+            design_nets: design,
+            file_nets: file,
+            matched,
+        }
     }
 
     #[test]
@@ -918,7 +963,10 @@ mod spef_coverage_tests {
 
         let (attn, m) = spef_verdict(&cov(100, 90, 0));
         assert!(attn);
-        assert!(m.contains("matched none") && m.contains("90 net(s) in the file"), "got: {m}");
+        assert!(
+            m.contains("matched none") && m.contains("90 net(s) in the file"),
+            "got: {m}"
+        );
     }
 
     #[test]
@@ -1045,10 +1093,22 @@ fn emit_input_coverage(job: &StaJob, nl: &netlist::Netlist, lib: &Lib) {
     use vyges_events::{Event, Severity};
     let sev = |a: bool| if a { Severity::Warn } else { Severity::Info };
     let objs = || {
-        if job.clock_port.is_empty() { Vec::new() } else { vec![format!("clock:{}", job.clock_port)] }
+        if job.clock_port.is_empty() {
+            Vec::new()
+        } else {
+            vec![format!("clock:{}", job.clock_port)]
+        }
     };
     let (a, m) = netlist_verdict(&coverage::netlist(nl, lib));
-    vyges_events::emit(&Event::new("vyges-sta-si", sev(a), m).with_code("STA-NETLIST").with_objects(objs()));
+    vyges_events::emit(
+        &Event::new("vyges-sta-si", sev(a), m)
+            .with_code("STA-NETLIST")
+            .with_objects(objs()),
+    );
     let (a, m) = liberty_verdict(&coverage::liberty(nl, lib));
-    vyges_events::emit(&Event::new("vyges-sta-si", sev(a), m).with_code("STA-LIBERTY").with_objects(objs()));
+    vyges_events::emit(
+        &Event::new("vyges-sta-si", sev(a), m)
+            .with_code("STA-LIBERTY")
+            .with_objects(objs()),
+    );
 }

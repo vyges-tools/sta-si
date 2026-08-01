@@ -158,6 +158,21 @@ impl LintReport {
 /// Lint the SDC against the design. `lib` lets the linter tell registers from
 /// combinational cells (so "registers but no clock" is real, not a guess).
 pub fn lint(nl: &Netlist, sdc: &Sdc, lib: &Lib) -> LintReport {
+    lint_with_meta(nl, sdc, lib, None)
+}
+
+/// As [`lint`], plus the IP's **declared** clock domains from `vyges-metadata.json`.
+///
+/// Everything else here reasons from the netlist and the SDC, which between them cannot answer
+/// "how many clocks *should* this design have had?" — a netlist has no opinion about intent. The
+/// declaration supplies that, and it is the only way to catch a flow config that named one
+/// `CLOCK_PORT` on a three-clock IP before the block is hardened rather than after.
+pub fn lint_with_meta(
+    nl: &Netlist,
+    sdc: &Sdc,
+    lib: &Lib,
+    meta: Option<&crate::ipmeta::IpMeta>,
+) -> LintReport {
     let mut f = Vec::new();
 
     let inputs: BTreeSet<&str> = nl.inputs.iter().map(String::as_str).collect();
@@ -310,6 +325,39 @@ pub fn lint(nl: &Netlist, sdc: &Sdc, lib: &Lib) -> LintReport {
             "delay-unknown-port",
             format!("set_output_delay targets `{p}`, not an output of the design"),
         ));
+    }
+
+    // --- the IP's own declaration, if we were given it -----------------------
+    if let Some(m) = meta.filter(|m| !m.is_empty()) {
+        let declared_clocks: BTreeSet<&str> =
+            sdc.clocks.iter().map(|c| c.source.as_str()).collect();
+        for d in &m.domains {
+            if !declared_clocks.contains(d.clock.as_str()) {
+                f.push(Finding::err(
+                    "domain-not-constrained",
+                    format!(
+                        "the IP declares clock domain `{}` on port `{}`, and the SDC defines no \
+                         clock there — every register in that domain is untimed",
+                        d.name, d.clock
+                    ),
+                ));
+            }
+        }
+        // A declared async relationship the SDC does not express means cross-domain paths get
+        // timed against an edge relation that does not exist, which produces violations that
+        // are not real. Distinct from the above and only a warning: the timing is pessimistic
+        // rather than absent.
+        if m.async_groups.len() > 1 && sdc.async_groups.len() < 2 {
+            f.push(Finding::warn(
+                "async-groups-not-declared",
+                format!(
+                    "the IP declares {} mutually asynchronous clock domains; the SDC has no \
+                     set_clock_groups -asynchronous, so paths between them are timed as if \
+                     related",
+                    m.async_groups.len()
+                ),
+            ));
+        }
     }
 
     // --- depth passes: clock reach, exception reachability, coverage ---------
@@ -1116,5 +1164,113 @@ mod glob_tests {
             "and it constrains them: {:?}",
             r.findings
         );
+    }
+}
+
+#[cfg(test)]
+mod declared_domain_tests {
+    use super::*;
+    use crate::ipmeta::IpMeta;
+
+    fn lib() -> Lib {
+        Lib::load("examples/seq/seq.lib").expect("seq.lib")
+    }
+    fn nl() -> Netlist {
+        crate::netlist::parse(
+            "module t(clk,pclk,din,dout);\ninput clk,pclk,din; output dout;\n\
+             DFF r(.CK(clk),.D(din),.Q(dout));\nendmodule\n",
+        )
+        .unwrap()
+    }
+    const TWO_DOMAINS: &str = r#"{"clock_domains":[
+        {"name":"core","clock":"clk"},{"name":"apb","clock":"pclk"}],
+        "clock_domain_relations":{"asynchronous_groups":[["core"],["apb"]]}}"#;
+
+    #[test]
+    fn a_declared_domain_the_sdc_never_constrains_is_an_error() {
+        // Exactly the fft_top defect: the IP has two clock domains, the flow config named one,
+        // and timing passes while half the design is untimed. Only the declaration catches it.
+        let sdc = Sdc::parse(
+            "create_clock -name clk -period 10 [get_ports clk]\n\
+             set_input_delay 1 -clock clk [all_inputs]\n\
+             set_output_delay 1 -clock clk [all_outputs]\n",
+        )
+        .unwrap();
+        let m = IpMeta::parse(TWO_DOMAINS).unwrap();
+        let r = lint_with_meta(&nl(), &sdc, &lib(), Some(&m));
+        let f = r
+            .findings
+            .iter()
+            .find(|f| f.code == "domain-not-constrained")
+            .expect("the undeclared domain must be reported");
+        assert_eq!(f.severity, Severity::Error);
+        assert!(
+            f.message.contains("apb") && f.message.contains("pclk"),
+            "{}",
+            f.message
+        );
+    }
+
+    #[test]
+    fn constraining_every_declared_domain_is_quiet() {
+        let sdc = Sdc::parse(
+            "create_clock -name clk -period 10 [get_ports clk]\n\
+             create_clock -name pclk -period 10 [get_ports pclk]\n\
+             set_clock_groups -asynchronous -group {clk} -group {pclk}\n\
+             set_input_delay 1 -clock clk [all_inputs]\n\
+             set_output_delay 1 -clock clk [all_outputs]\n",
+        )
+        .unwrap();
+        let m = IpMeta::parse(TWO_DOMAINS).unwrap();
+        let r = lint_with_meta(&nl(), &sdc, &lib(), Some(&m));
+        assert!(
+            !r.findings.iter().any(
+                |f| f.code == "domain-not-constrained" || f.code == "async-groups-not-declared"
+            ),
+            "a correct SDC must stay quiet: {:?}",
+            r.findings
+        );
+    }
+
+    #[test]
+    fn declared_async_domains_with_no_clock_groups_warn_but_do_not_error() {
+        // Both domains constrained, but the SDC does not say they are unrelated — the paths
+        // between them get timed against an edge relation that does not exist. Pessimistic,
+        // not absent, so it is a warning.
+        let sdc = Sdc::parse(
+            "create_clock -name clk -period 10 [get_ports clk]\n\
+             create_clock -name pclk -period 10 [get_ports pclk]\n\
+             set_input_delay 1 -clock clk [all_inputs]\n\
+             set_output_delay 1 -clock clk [all_outputs]\n",
+        )
+        .unwrap();
+        let m = IpMeta::parse(TWO_DOMAINS).unwrap();
+        let r = lint_with_meta(&nl(), &sdc, &lib(), Some(&m));
+        let f = r
+            .findings
+            .iter()
+            .find(|f| f.code == "async-groups-not-declared")
+            .expect("reported");
+        assert_eq!(f.severity, Severity::Warning);
+        assert!(!r
+            .findings
+            .iter()
+            .any(|f| f.code == "domain-not-constrained"));
+    }
+
+    #[test]
+    fn without_metadata_the_check_does_not_run_at_all() {
+        // Most IPs carry no clock_domains yet. Absence of a declaration is not a finding.
+        let sdc = Sdc::parse(
+            "create_clock -name clk -period 10 [get_ports clk]\n\
+             set_input_delay 1 -clock clk [all_inputs]\n\
+             set_output_delay 1 -clock clk [all_outputs]\n",
+        )
+        .unwrap();
+        let r = lint(&nl(), &sdc, &lib());
+        assert!(!r
+            .findings
+            .iter()
+            .any(|f| f.code == "domain-not-constrained"));
     }
 }

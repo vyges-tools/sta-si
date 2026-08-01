@@ -23,6 +23,8 @@ vyges-sta-si — sign-off static timing analysis with signal integrity
 usage:
   vyges-sta-si run      JOB    [-o OUT] [--json] [--fail-on-violation] [--sdf FILE]
   vyges-sta-si sdc-lint JOB    [-o OUT] [--json] [--fail-on-violation]
+                               (a job with `metadata: vyges-metadata.json` also checks the
+                                SDC against the IP's declared clock_domains)
   vyges-sta-si check    JOB
   vyges-sta-si demo            [-o OUT] [--json]
   vyges-sta-si tcl      SCRIPT [-o OUT] [--json] [--fail-on-violation]   (experimental)

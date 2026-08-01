@@ -261,6 +261,7 @@ fn base_job(
         exceptions: Vec::new(),
         async_groups: Vec::new(),
         sdc: None,
+        metadata: None,
         base_dir: base_dir.to_string(),
     }
 }

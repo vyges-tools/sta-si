@@ -17,6 +17,7 @@
 //! layer), SPEF-driven net delay, and sequential (register) timing build on the
 //! same graph; the engine reserves the SI hook (`StaError::SiNotModeled`).
 
+pub mod ipmeta; // the clock_domains slice of vyges-metadata.json
 pub mod job;
 // Parsers + CCS data model now come from the shared vyges-loom foundation
 // (sta-si was loom's seed — these originated here). Re-exported under the crate

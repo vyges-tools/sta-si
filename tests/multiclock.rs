@@ -88,6 +88,7 @@ fn job(clocks: Vec<(String, String, f64)>) -> StaJob {
         setup_uncertainty: 0.0,
         hold_uncertainty: 0.0,
         sdc: None,
+        metadata: None,
         base_dir: String::new(),
     }
 }
