@@ -54,6 +54,44 @@ impl Severity {
     }
 }
 
+/// Does a `get_ports` pattern match a port name? SDC object patterns are globs — `paddr_i[*]`
+/// names a whole bus — so an exact-string comparison reports every bus-wide constraint in a
+/// real SDC as targeting a port that does not exist. That is a false positive on valid input,
+/// which is the one thing a linter cannot afford.
+///
+/// `*` matches any run of characters, `?` any single one. Anything without a metacharacter
+/// compares exactly, so the common case costs nothing.
+fn glob_match(pat: &str, name: &str) -> bool {
+    if !pat.contains('*') && !pat.contains('?') {
+        return pat == name;
+    }
+    let (p, n): (Vec<char>, Vec<char>) = (pat.chars().collect(), name.chars().collect());
+    // Backtracking matcher: `star` remembers the last `*` so a failed tail can retry one
+    // character later, which is what makes `a*b*c` work without regex.
+    let (mut pi, mut ni) = (0usize, 0usize);
+    let (mut star, mut retry) = (usize::MAX, 0usize);
+    while ni < n.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = pi;
+            retry = ni;
+            pi += 1;
+        } else if star != usize::MAX {
+            pi = star + 1;
+            retry += 1;
+            ni = retry;
+        } else {
+            return false;
+        }
+    }
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
 /// How many individual ports/registers a per-object finding lists before collapsing into a
 /// count. The findings that matter are lost in a list of hundreds, and the count is what a
 /// reader acts on anyway.
@@ -220,13 +258,15 @@ pub fn lint(nl: &Netlist, sdc: &Sdc, lib: &Lib) -> LintReport {
         .inputs
         .iter()
         .map(String::as_str)
-        .filter(|p| !clock_ports.contains(p) && !in_default && !in_ports.contains(p))
+        .filter(|p| {
+            !clock_ports.contains(p) && !in_default && !in_ports.iter().any(|q| glob_match(q, p))
+        })
         .collect();
     let bare_out: Vec<&str> = nl
         .outputs
         .iter()
         .map(String::as_str)
-        .filter(|p| !out_default && !out_ports.contains(p))
+        .filter(|p| !out_default && !out_ports.iter().any(|q| glob_match(q, p)))
         .collect();
     for (code, kind, cmd, list) in [
         ("unconstrained-input", "input", "set_input_delay", &bare_in),
@@ -253,13 +293,19 @@ pub fn lint(nl: &Netlist, sdc: &Sdc, lib: &Lib) -> LintReport {
     }
 
     // an explicit delay targeting a port the design doesn't have
-    for p in in_ports.iter().filter(|p| !inputs.contains(**p)) {
+    for p in in_ports
+        .iter()
+        .filter(|p| !inputs.iter().any(|i| glob_match(p, i)))
+    {
         f.push(Finding::warn(
             "delay-unknown-port",
             format!("set_input_delay targets `{p}`, not an input of the design"),
         ));
     }
-    for p in out_ports.iter().filter(|p| !outputs.contains(**p)) {
+    for p in out_ports
+        .iter()
+        .filter(|p| !outputs.iter().any(|o| glob_match(p, o)))
+    {
         f.push(Finding::warn(
             "delay-unknown-port",
             format!("set_output_delay targets `{p}`, not an output of the design"),
@@ -409,7 +455,7 @@ pub fn lint(nl: &Netlist, sdc: &Sdc, lib: &Lib) -> LintReport {
     let out_covered = nl
         .outputs
         .iter()
-        .filter(|p| out_default || out_ports.contains(p.as_str()))
+        .filter(|p| out_default || out_ports.iter().any(|q| glob_match(q, p)))
         .count();
     let total = seq_total + nl.outputs.len();
     let covered = clocked + out_covered;
@@ -1013,5 +1059,62 @@ mod noise_tests {
             .collect();
         assert_eq!(outs.len(), 3, "three ports, three named findings");
         assert!(outs.iter().all(|f| !f.message.contains("in total")));
+    }
+}
+
+#[cfg(test)]
+mod glob_tests {
+    use super::*;
+
+    #[test]
+    fn bus_wildcards_match_their_members() {
+        // `[get_ports {paddr_i[*]}]` is how a real SDC constrains a whole bus. Comparing it
+        // as a literal string reported every such line as targeting a nonexistent port.
+        assert!(glob_match("paddr_i[*]", "paddr_i[0]"));
+        assert!(glob_match("paddr_i[*]", "paddr_i[15]"));
+        assert!(!glob_match("paddr_i[*]", "pwdata_i[0]"));
+        assert!(glob_match("axi_*_i", "axi_awvalid_i"));
+        assert!(glob_match("?clk_i", "pclk_i"));
+        assert!(!glob_match("?clk_i", "axi_aclk_i"));
+    }
+
+    #[test]
+    fn a_pattern_with_no_metacharacter_is_an_exact_match() {
+        assert!(glob_match("clk_i", "clk_i"));
+        assert!(!glob_match("clk_i", "clk_ii"));
+        assert!(!glob_match("clk_i", "xclk_i"));
+    }
+
+    #[test]
+    fn backtracking_handles_more_than_one_star() {
+        assert!(glob_match("a*b*c", "axxbyyc"));
+        assert!(!glob_match("a*b*c", "axxbyy"));
+        assert!(glob_match("*", "anything"));
+    }
+
+    #[test]
+    fn a_bus_wide_input_delay_no_longer_reports_a_missing_port() {
+        let n = crate::netlist::parse(
+            "module t(clk,paddr_i,dout);\ninput clk; input [1:0] paddr_i; output dout;\n\
+             DFF r(.CK(clk),.D(paddr_i[0]),.Q(dout));\nendmodule\n",
+        )
+        .unwrap();
+        let sdc = Sdc::parse(
+            "create_clock -name clk -period 10 [get_ports clk]\n\
+             set_input_delay 1 -clock clk [get_ports {paddr_i[*]}]\n\
+             set_output_delay 1 -clock clk [all_outputs]\n",
+        )
+        .unwrap();
+        let r = lint(&n, &sdc, &Lib::load("examples/seq/seq.lib").unwrap());
+        assert!(
+            !r.findings.iter().any(|f| f.code == "delay-unknown-port"),
+            "a bus wildcard names real ports: {:?}",
+            r.findings
+        );
+        assert!(
+            !r.findings.iter().any(|f| f.code == "unconstrained-input"),
+            "and it constrains them: {:?}",
+            r.findings
+        );
     }
 }
