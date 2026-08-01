@@ -119,6 +119,76 @@ pub fn load_netlist(path: &str) -> Result<crate::netlist::Netlist, StaError> {
     res.map_err(|e| StaError::Parse(e.to_string()))
 }
 
+/// Report how much of the design the parasitics actually cover.
+///
+/// A SPEF that reads without error but matches no net is indistinguishable, from the outside,
+/// from having no SPEF at all: the run reports success and prints a plausible WNS, and the only
+/// way to notice is to run twice and see that nothing moved. That failure has happened here —
+/// a reader that resolved only `*NAME_MAP`-indexed names silently discarded a 1.3 GB literally
+/// named file, and it took a benchmark run to find. This makes it announce itself.
+///
+/// Coverage is nets-matched over nets-in-the-design, because that is the number a user can act
+/// on; the file's own net count is reported alongside so "we read nothing" and "we read plenty
+/// and none of it is yours" are distinguishable.
+#[derive(Debug, PartialEq)]
+pub(crate) struct SpefCoverage {
+    pub design_nets: usize,
+    pub file_nets: usize,
+    pub matched: usize,
+}
+
+impl SpefCoverage {
+    pub fn percent(&self) -> f64 {
+        if self.design_nets == 0 { 0.0 } else { 100.0 * self.matched as f64 / self.design_nets as f64 }
+    }
+    /// The message a user can act on, and whether it deserves attention.
+    pub fn verdict(&self) -> (bool, String) {
+        if self.file_nets == 0 {
+            (true, "SPEF parsed to zero nets — the file was read but yielded nothing, so this \
+                    run is the ideal-interconnect answer".to_string())
+        } else if self.matched == 0 {
+            (true, format!(
+                "SPEF matched none of the design's {} net(s) ({} net(s) in the file) — names do \
+                 not correspond, so this run is the ideal-interconnect answer",
+                self.design_nets, self.file_nets))
+        } else {
+            (self.percent() < 50.0, format!(
+                "SPEF covers {} of {} design net(s) ({:.1}%); {} net(s) in the file",
+                self.matched, self.design_nets, self.percent(), self.file_nets))
+        }
+    }
+}
+
+pub(crate) fn spef_coverage(nl: &netlist::Netlist, spef: &Spef) -> SpefCoverage {
+    use std::collections::BTreeSet;
+    let mut design: BTreeSet<&str> = BTreeSet::new();
+    for i in &nl.insts {
+        for (_pin, net) in &i.conns {
+            design.insert(net.as_str());
+        }
+    }
+    for p in nl.inputs.iter().chain(nl.outputs.iter()) {
+        design.insert(p.as_str());
+    }
+    SpefCoverage {
+        matched: design.iter().filter(|n| spef.nets.contains_key(**n)).count(),
+        design_nets: design.len(),
+        file_nets: spef.nets.len(),
+    }
+}
+
+fn emit_spef_coverage(job: &StaJob, nl: &netlist::Netlist, spef: &Spef) {
+    use vyges_events::{Event, Severity};
+    let (attention, msg) = spef_coverage(nl, spef).verdict();
+    let sev = if attention { Severity::Warn } else { Severity::Info };
+    let mut ev = Event::new("vyges-sta-si", sev, msg).with_code("STA-SPEF");
+    if !job.clock_port.is_empty() {
+        ev = ev.with_objects(vec![format!("clock:{}", job.clock_port)]);
+    }
+    vyges_events::emit(&ev);
+}
+
+
 /// for `--liberty-nldm-only`. CCS pruning is a load-time choice (not job state), so
 /// it is a parameter here rather than a field on [`StaJob`].
 pub fn analyze_job_opts(
@@ -139,6 +209,9 @@ pub fn analyze_job_opts(
         Some(p) => Some(Spef::load(&job.resolve(p)).map_err(|e| StaError::Parse(e.to_string()))?),
         None => None,
     };
+    if let Some(s) = spef.as_ref() {
+        emit_spef_coverage(job, &nl, s);
+    }
     sta::analyze(&nl, &lib, job, spef.as_ref())
 }
 
@@ -792,4 +865,51 @@ pub fn analyze_inputs(
     let nl = netlist::parse(nl_text).map_err(|e| StaError::Parse(e.to_string()))?;
     let lib = Lib::parse(lib_text).map_err(|e| StaError::Parse(e.to_string()))?;
     sta::analyze(&nl, &lib, job, None)
+}
+
+#[cfg(test)]
+mod spef_coverage_tests {
+    use super::*;
+
+    fn cov(design: usize, file: usize, matched: usize) -> SpefCoverage {
+        SpefCoverage { design_nets: design, file_nets: file, matched }
+    }
+
+    #[test]
+    fn a_file_that_parsed_to_nothing_and_one_that_matched_nothing_are_told_apart() {
+        // The distinction is the whole diagnostic: "we could not read it" and "we read it and
+        // none of it is yours" have different causes and different fixes, and both otherwise
+        // present as a run that succeeded with no parasitics applied.
+        let (attn, m) = cov(100, 0, 0).verdict();
+        assert!(attn);
+        assert!(m.contains("zero nets"), "got: {m}");
+
+        let (attn, m) = cov(100, 90, 0).verdict();
+        assert!(attn);
+        assert!(m.contains("matched none") && m.contains("90 net(s) in the file"), "got: {m}");
+    }
+
+    #[test]
+    fn ordinary_coverage_is_reported_without_demanding_attention() {
+        let (attn, m) = cov(100, 95, 94).verdict();
+        assert!(!attn, "94% coverage is not a problem to raise");
+        assert!(m.contains("94 of 100") && m.contains("94.0%"), "got: {m}");
+    }
+
+    #[test]
+    fn thin_coverage_still_asks_for_attention() {
+        // Partial extraction is a real and quieter failure than none at all — the numbers move,
+        // just not by as much as they should, so nothing looks wrong.
+        let (attn, _) = cov(100, 100, 40).verdict();
+        assert!(attn, "40% of the design unextracted deserves a warning");
+        let (attn, _) = cov(100, 100, 60).verdict();
+        assert!(!attn);
+    }
+
+    #[test]
+    fn a_design_with_no_nets_does_not_divide_by_zero() {
+        assert_eq!(cov(0, 0, 0).percent(), 0.0);
+        let (attn, _) = cov(0, 0, 0).verdict();
+        assert!(attn);
+    }
 }

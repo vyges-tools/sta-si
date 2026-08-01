@@ -25,5 +25,6 @@ Path Type: min (Hold)
 wns -0.0107
 tns -0.0107
 --- stderr ---
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-SPEF","raw_msg":"SPEF covers 2 of 4 design net(s) (50.0%); 2 net(s) in the file","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-SETUP","raw_msg":"setup violation at y: WNS -0.0107 ns (TNS -0.0107 ns over 1 endpoint(s))","objects":["net:y","clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-DONE","raw_msg":"sta complete: WNS -0.0107 ns, TNS -0.0107 ns, WHS inf ns — 1 violation(s)"}
