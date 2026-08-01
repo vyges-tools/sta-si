@@ -209,6 +209,7 @@ pub fn analyze_job_opts(
         Some(p) => Some(Spef::load(&job.resolve(p)).map_err(|e| StaError::Parse(e.to_string()))?),
         None => None,
     };
+    emit_input_coverage(job, &nl, &lib);
     if let Some(s) = spef.as_ref() {
         emit_spef_coverage(job, &nl, s);
     }
@@ -868,6 +869,84 @@ pub fn analyze_inputs(
 }
 
 #[cfg(test)]
+mod input_coverage_tests {
+    use super::*;
+
+    fn tie_fixture() -> (netlist::Netlist, Lib) {
+        let d = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/tie/");
+        let nl = netlist::load(&format!("{d}tie.v")).unwrap();
+        let lib = Lib::load(&format!("{d}tie.lib")).unwrap();
+        (nl, lib)
+    }
+
+    #[test]
+    fn cells_that_are_legitimately_arc_less_do_not_raise_a_warning() {
+        // The calibration that decides whether this event is a signal or noise. A tie cell has
+        // constant outputs and no timing BY DESIGN; so do decaps, antenna diodes and fill. On a
+        // real routed block they are most of what is arc-less, and warning about them would
+        // train a reader to ignore the warning — which costs more than not having it.
+        let (nl, lib) = tie_fixture();
+        let c = liberty_coverage(&nl, &lib);
+        assert!(c.resolved_masters >= 4, "the fixture's cells resolve: {c:?}");
+        assert_eq!(c.without_arcs, 0, "CONB is a tie cell, not a defect: {c:?}");
+        assert_eq!(c.seq_without_constraints, 0, "DFRTP carries setup/hold: {c:?}");
+        assert!(!c.verdict().0, "a healthy library must not ask for attention");
+    }
+
+    #[test]
+    fn a_sequential_cell_with_no_constraints_is_reported() {
+        // The shape of a real defect: async set/reset pins carry `recovery`/`removal` and
+        // nothing else, and a reader that discarded those timing types left those paths
+        // unchecked while every other number looked correct.
+        let (nl, mut lib) = tie_fixture();
+        for c in lib.cells.values_mut() {
+            if c.is_seq {
+                for p in c.pins.values_mut() {
+                    p.setup.clear();
+                    p.hold.clear();
+                    p.recovery.clear();
+                    p.removal.clear();
+                }
+            }
+        }
+        let c = liberty_coverage(&nl, &lib);
+        assert!(c.seq_without_constraints > 0, "{c:?}");
+        let (attention, msg) = c.verdict();
+        assert!(attention);
+        assert!(msg.contains("cannot be checked"), "got: {msg}");
+    }
+
+    #[test]
+    fn the_netlist_split_matches_what_the_timer_actually_skips() {
+        // Physical-only is not a complaint — on a post-route design most instances are fill and
+        // tap. It is reported as fact so the *timed* count is legible, and only an instance with
+        // real signal pins and no Liberty cell demands attention.
+        let (nl, lib) = tie_fixture();
+        let c = netlist_coverage(&nl, &lib);
+        assert_eq!(c.instances, nl.insts.len());
+        assert_eq!(c.unresolved_signal, 0, "every fixture cell is in the fixture library");
+        assert!(!c.verdict().0, "a fully resolved netlist must not warn");
+
+        // drop a cell the design uses and the same instance becomes a demand for attention
+        let mut lib2 = lib;
+        lib2.cells.remove("BUF");
+        let c2 = netlist_coverage(&nl, &lib2);
+        assert!(c2.unresolved_signal > 0, "{c2:?}");
+        let (attention, msg) = c2.verdict();
+        assert!(attention);
+        assert!(msg.contains("NO Liberty cell"), "got: {msg}");
+    }
+
+    #[test]
+    fn an_empty_netlist_asks_for_attention_rather_than_reporting_success() {
+        let c = NetlistCoverage { instances: 0, masters: 0, physical_only: 0, unresolved_signal: 0 };
+        let (attention, msg) = c.verdict();
+        assert!(attention);
+        assert!(msg.contains("zero instances"), "got: {msg}");
+    }
+}
+
+#[cfg(test)]
 mod spef_coverage_tests {
     use super::*;
 
@@ -912,4 +991,179 @@ mod spef_coverage_tests {
         let (attn, _) = cov(0, 0, 0).verdict();
         assert!(attn);
     }
+}
+
+// ---- netlist and Liberty coverage ---------------------------------------------------------------
+// The same argument as `spef_coverage`, applied to the other two readers. A file that parses
+// without error but yields less than the design needs produces a run that succeeds and reports
+// numbers, and nothing anywhere says a part of the design was not timed.
+//
+// These target the SILENT cases specifically. An unknown cell that the timer cannot skip is
+// already a hard error; a cell it *can* skip, or a cell that resolves but carries no timing, is
+// not — and that is the shape both real defects on this engine have taken.
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct NetlistCoverage {
+    pub instances: usize,
+    pub masters: usize,
+    /// Instances the timer will skip as physical-only: no connections, or power/ground only.
+    /// Fill, tap, decap and antenna diodes are legitimately here — a large count is normal on a
+    /// post-route design and is reported as fact, not as a complaint.
+    pub physical_only: usize,
+    /// Instances whose master is absent from the Liberty *and* which carry real signal pins.
+    /// These are the ones a run cannot be trusted without.
+    pub unresolved_signal: usize,
+}
+
+impl NetlistCoverage {
+    pub fn verdict(&self) -> (bool, String) {
+        if self.instances == 0 {
+            return (true, "netlist parsed to zero instances".to_string());
+        }
+        let timed = self.instances - self.physical_only - self.unresolved_signal;
+        if self.unresolved_signal > 0 {
+            return (
+                true,
+                format!(
+                    "netlist: {} instance(s) of {} master(s); {} timed, {} physical-only, \
+                     {} with signal pins have NO Liberty cell",
+                    self.instances, self.masters, timed, self.physical_only, self.unresolved_signal
+                ),
+            );
+        }
+        (
+            false,
+            format!(
+                "netlist: {} instance(s) of {} master(s); {} timed, {} physical-only",
+                self.instances, self.masters, timed, self.physical_only
+            ),
+        )
+    }
+}
+
+pub(crate) fn netlist_coverage(nl: &netlist::Netlist, lib: &Lib) -> NetlistCoverage {
+    use std::collections::BTreeSet;
+    let mut masters: BTreeSet<&str> = BTreeSet::new();
+    let (mut physical_only, mut unresolved_signal) = (0usize, 0usize);
+    for i in &nl.insts {
+        masters.insert(i.cell.as_str());
+        if lib.cell(&i.cell).is_some() {
+            continue;
+        }
+        // exactly the test the timer applies before skipping one
+        if i.conns.is_empty() || i.conns.iter().all(|(p, _)| crate::sta::is_power_pin(p)) {
+            physical_only += 1;
+        } else {
+            unresolved_signal += 1;
+        }
+    }
+    NetlistCoverage {
+        instances: nl.insts.len(),
+        masters: masters.len(),
+        physical_only,
+        unresolved_signal,
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) struct LibertyCoverage {
+    pub cells_in_lib: usize,
+    /// Distinct masters the design instantiates that the Liberty defines.
+    pub resolved_masters: usize,
+    /// Resolved masters that **drive something and yet carry no delay arc** — nothing can
+    /// propagate through them, so a path routed through one is timed as if it were free.
+    ///
+    /// Cells that are *legitimately* arc-less are excluded, and getting that exclusion right is
+    /// the difference between a signal and noise: a tie cell (constant output), a decap, an
+    /// antenna diode and fill all have no timing by design, and on a real routed block they are
+    /// the majority of what is arc-less. The test is therefore "has a non-constant output pin
+    /// but no arcs", not "has no arcs".
+    pub without_arcs: usize,
+    /// Sequential masters with **no setup, hold, recovery or removal constraint anywhere** — a
+    /// flop whose pins can never become endpoints, so its paths are never checked at all.
+    ///
+    /// This is the shape of a real defect: async set/reset pins carry `recovery`/`removal` and
+    /// nothing else, and a reader that discarded those timing types left those paths silently
+    /// unchecked while every other number looked right.
+    pub seq_without_constraints: usize,
+}
+
+impl LibertyCoverage {
+    pub fn verdict(&self) -> (bool, String) {
+        let mut notes = Vec::new();
+        if self.without_arcs > 0 {
+            notes.push(format!(
+                "{} that drive an output but carry no delay arc",
+                self.without_arcs
+            ));
+        }
+        if self.seq_without_constraints > 0 {
+            notes.push(format!(
+                "{} sequential with no timing constraints (their paths cannot be checked)",
+                self.seq_without_constraints
+            ));
+        }
+        let base = format!(
+            "liberty: {} cell(s) loaded, {} used by the design",
+            self.cells_in_lib, self.resolved_masters
+        );
+        if notes.is_empty() {
+            (false, base)
+        } else {
+            (true, format!("{base} — {}", notes.join("; ")))
+        }
+    }
+}
+
+pub(crate) fn liberty_coverage(nl: &netlist::Netlist, lib: &Lib) -> LibertyCoverage {
+    use std::collections::BTreeSet;
+    let masters: BTreeSet<&str> = nl.insts.iter().map(|i| i.cell.as_str()).collect();
+    let (mut resolved, mut without_arcs, mut seq_without) = (0usize, 0usize, 0usize);
+    for m in masters {
+        let Some(c) = lib.cell(m) else { continue };
+        resolved += 1;
+        let drives = c
+            .pins
+            .values()
+            .any(|p| p.direction == crate::liberty::Dir::Out && !p.is_constant());
+        if drives && !c.pins.values().any(|p| !p.arcs.is_empty()) {
+            without_arcs += 1;
+        }
+        if c.is_seq
+            && !c.pins.values().any(|p| {
+                !p.setup.is_empty()
+                    || !p.hold.is_empty()
+                    || !p.recovery.is_empty()
+                    || !p.removal.is_empty()
+            })
+        {
+            seq_without += 1;
+        }
+    }
+    LibertyCoverage {
+        cells_in_lib: lib.cells.len(),
+        resolved_masters: resolved,
+        without_arcs,
+        seq_without_constraints: seq_without,
+    }
+}
+
+fn emit_input_coverage(job: &StaJob, nl: &netlist::Netlist, lib: &Lib) {
+    use vyges_events::{Event, Severity};
+    let sev = |attention: bool| if attention { Severity::Warn } else { Severity::Info };
+    let objs = || {
+        if job.clock_port.is_empty() {
+            Vec::new()
+        } else {
+            vec![format!("clock:{}", job.clock_port)]
+        }
+    };
+    let (a, m) = netlist_coverage(nl, lib).verdict();
+    vyges_events::emit(
+        &Event::new("vyges-sta-si", sev(a), m).with_code("STA-NETLIST").with_objects(objs()),
+    );
+    let (a, m) = liberty_coverage(nl, lib).verdict();
+    vyges_events::emit(
+        &Event::new("vyges-sta-si", sev(a), m).with_code("STA-LIBERTY").with_objects(objs()),
+    );
 }

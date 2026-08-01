@@ -24,4 +24,6 @@ STA report — design clkout
 
   achievable: ~1.319 ns → ~758.0 MHz   (target 2.000 ns → ~500.0 MHz)
 --- stderr ---
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 4 instance(s) of 2 master(s); 4 timed, 0 physical-only","objects":["clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 3 cell(s) loaded, 2 used by the design","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 0.6807 ns, TNS 0.0000 ns, WHS 0.0243 ns — 0 violation(s)"}

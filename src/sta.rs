@@ -73,7 +73,7 @@ impl std::error::Error for StaError {}
 /// fallbacks catch VDD*/VSS*/VPWR*/VGND* variants (VDD_CORE, VSSIO2, …) in any
 /// PDK. Logic cells always carry signal pins (A/B/Y/Q/…), so broadening the rail
 /// set cannot mask a genuinely missing logic library.
-fn is_power_pin(pin: &str) -> bool {
+pub(crate) fn is_power_pin(pin: &str) -> bool {
     let p = pin.trim_start_matches('\\').to_ascii_uppercase();
     const RAILS: &[&str] = &[
         "VPWR", "VGND", "VPB", "VNB", // sky130 std cell

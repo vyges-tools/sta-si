@@ -26,5 +26,7 @@ STA report — design eco_demo
 
   achievable: ~0.257 ns → ~3892.7 MHz   (target 1.000 ns → ~1000.0 MHz)
 --- stderr ---
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 3 instance(s) of 2 master(s); 3 timed, 0 physical-only","objects":["clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 9 cell(s) loaded, 2 used by the design","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-HOLD","raw_msg":"hold violation at r1/D: WHS -0.0944 ns (THS -0.1676 ns over 2 endpoint(s))","objects":["net:r1/D","clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-DONE","raw_msg":"sta complete: WNS 0.7431 ns, TNS 0.0000 ns, WHS -0.0944 ns — 1 violation(s)"}

@@ -20,5 +20,7 @@ STA report — design top
 
   achievable: ~0.678 ns → ~1475.9 MHz   (target 1.000 ns → ~1000.0 MHz)
 --- stderr ---
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 3 instance(s) of 1 master(s); 3 timed, 0 physical-only","objects":["clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 1 cell(s) loaded, 1 used by the design","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-SPEF","raw_msg":"SPEF covers 2 of 4 design net(s) (50.0%); 2 net(s) in the file","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 0.3225 ns, TNS 0.0000 ns, WHS inf ns — 0 violation(s)"}
