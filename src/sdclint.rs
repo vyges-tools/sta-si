@@ -339,26 +339,56 @@ pub fn lint(nl: &Netlist, sdc: &Sdc, lib: &Lib) -> LintReport {
                 ));
             }
         }
-        // Reachability, pair by pair. Reporting only "some pair is unreachable" would hide
-        // which one, and the answer a reader needs is the specific dead endpoint.
-        let mut dead = Vec::new();
-        for from in e
+        // Reachability. Pair by pair when both sides are named, because the answer a reader
+        // needs is the specific dead pair rather than that some pair is dead.
+        //
+        // One-sided exceptions are checked too, and they are the common case in real SDCs —
+        // `set_false_path -from [list ...]` with no `-to` at all. An earlier version skipped
+        // them, which meant this check quietly did nothing on exactly the shape most designs
+        // write. For those, dead means the named object sits on no timing path at all, so
+        // cutting it cuts nothing.
+        let named_from: Vec<&String> = e
             .from
             .iter()
             .filter(|o| o.as_str() != "*" && known_object(o))
-        {
-            for to in e.to.iter().filter(|o| o.as_str() != "*" && known_object(o)) {
-                if !g.reaches(from, to) {
-                    dead.push(format!("{from} -> {to}"));
+            .collect();
+        let named_to: Vec<&String> =
+            e.to.iter()
+                .filter(|o| o.as_str() != "*" && known_object(o))
+                .collect();
+        let mut dead = Vec::new();
+        match (named_from.is_empty(), named_to.is_empty()) {
+            (false, false) => {
+                for from in &named_from {
+                    for to in &named_to {
+                        if !g.reaches(from, to) {
+                            dead.push(format!("`{from}` -> `{to}`: no structural path"));
+                        }
+                    }
                 }
             }
+            (false, true) => {
+                for from in &named_from {
+                    if !g.launches_anything(from) {
+                        dead.push(format!("`{from}` launches no timing path"));
+                    }
+                }
+            }
+            (true, false) => {
+                for to in &named_to {
+                    if !g.captures_anything(to) {
+                        dead.push(format!("`{to}` captures no timing path"));
+                    }
+                }
+            }
+            (true, true) => {}
         }
-        for pair in dead.iter().take(PORT_LIST_CAP) {
+        for what in dead.iter().take(PORT_LIST_CAP) {
             f.push(Finding::warn(
                 "exception-unreachable",
                 format!(
-                    "{kind} `{pair}`: no structural path between them — that pair is dead, \
-                     and any path the author meant is still timed"
+                    "{kind} {what} — that part of the exception is dead, and any path the \
+                     author meant is still timed"
                 ),
             ));
         }
@@ -366,7 +396,7 @@ pub fn lint(nl: &Netlist, sdc: &Sdc, lib: &Lib) -> LintReport {
             f.push(Finding::warn(
                 "exception-unreachable",
                 format!(
-                    "... and {} more dead {kind} pairs ({} in total)",
+                    "... and {} more dead {kind} endpoints ({} in total)",
                     dead.len() - PORT_LIST_CAP,
                     dead.len()
                 ),
@@ -416,6 +446,8 @@ struct Graph {
     sinks: BTreeMap<String, Vec<usize>>,     // net -> instances with it on an input pin
     is_seq: Vec<bool>,
     known: BTreeSet<String>, // every net, port and instance name that exists
+    inputs: BTreeSet<String>,
+    outputs: BTreeSet<String>,
     inst_index: BTreeMap<String, usize>,
     conns: Vec<Vec<(String, String)>>,
     out_pins: Vec<Vec<String>>,
@@ -428,6 +460,8 @@ impl Graph {
             sinks: BTreeMap::new(),
             is_seq: Vec::new(),
             known: BTreeSet::new(),
+            inputs: nl.inputs.iter().cloned().collect(),
+            outputs: nl.outputs.iter().cloned().collect(),
             inst_index: BTreeMap::new(),
             conns: Vec::new(),
             out_pins: Vec::new(),
@@ -512,6 +546,76 @@ impl Graph {
             return vec![obj.to_string()];
         }
         Vec::new()
+    }
+
+    /// Does `from` launch any timing path at all — reaching a register or an output port?
+    ///
+    /// A `-from` naming an object that drives nothing cuts nothing. This is what makes a
+    /// one-sided exception checkable, and one-sided is how real SDCs are usually written.
+    fn launches_anything(&self, from: &str) -> bool {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let mut stack = self.start_nets(from);
+        while let Some(n) = stack.pop() {
+            if !seen.insert(n.clone()) {
+                continue;
+            }
+            if self.outputs.contains(&n) {
+                return true;
+            }
+            for &i in self.sinks.get(&n).into_iter().flatten() {
+                if self.is_seq[i] {
+                    return true; // reached a register: a real endpoint
+                }
+                for (pin, nn) in &self.conns[i] {
+                    if self.out_pins[i].contains(pin) {
+                        stack.push(nn.clone());
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Is `to` reached by any timing path — walking back to a register or a primary input?
+    fn captures_anything(&self, to: &str) -> bool {
+        let base = to.rsplit_once('/').map(|(i, _)| i).unwrap_or(to);
+        // Start from the object's input nets (an instance) or the net itself (a port).
+        let mut stack: Vec<String> = match self.inst_index.get(base) {
+            Some(&i) => self.conns[i]
+                .iter()
+                .filter(|(p, _)| !self.out_pins[i].contains(p))
+                .map(|(_, n)| n.clone())
+                .collect(),
+            None => vec![to.to_string()],
+        };
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        while let Some(n) = stack.pop() {
+            if !seen.insert(n.clone()) {
+                continue;
+            }
+            match self.driver.get(&n) {
+                // An undriven net is only a launch point if it is a primary INPUT. An output
+                // port with no driver is dangling — nothing reaches it, which is exactly the
+                // case worth reporting rather than passing.
+                Some(None) => {
+                    if self.inputs.contains(&n) {
+                        return true;
+                    }
+                }
+                Some(Some(i)) => {
+                    if self.is_seq[*i] {
+                        return true; // a register launches
+                    }
+                    for (pin, nn) in &self.conns[*i] {
+                        if !self.out_pins[*i].contains(pin) {
+                            stack.push(nn.clone());
+                        }
+                    }
+                }
+                None => {}
+            }
+        }
+        false
     }
 
     /// Is there a structural path from `from` to `to`? Forward through combinational logic,
@@ -746,6 +850,69 @@ mod depth_tests {
             .unwrap();
         assert_eq!(cov.severity, Severity::Warning);
         assert!(!cov.message.contains("100.0%"), "{}", cov.message);
+    }
+
+    #[test]
+    fn a_one_sided_exception_on_a_dead_port_is_reported() {
+        // The shape real SDCs actually write: `-from [list ...]` with no `-to`. An earlier
+        // version only checked when BOTH sides were named, so this — the common case — was
+        // silently never checked at all.
+        let n = crate::netlist::parse(
+            "module t(clk,din,unused,dout);\ninput clk,din,unused; output dout;\n\
+             DFF ra(.CK(clk),.D(din),.Q(dout));\nendmodule\n",
+        )
+        .unwrap();
+        let sdc = Sdc::parse(&format!(
+            "{}set_false_path -from [get_ports {{unused}}]\n",
+            base_sdc()
+        ))
+        .unwrap();
+        let r = lint(&n, &sdc, &lib());
+        assert!(
+            has(&r, "exception-unreachable"),
+            "`unused` drives nothing, so cutting it cuts nothing: {:?}",
+            r.findings
+        );
+    }
+
+    #[test]
+    fn a_one_sided_exception_on_a_live_port_is_quiet() {
+        let n = crate::netlist::parse(
+            "module t(clk,din,dout);\ninput clk,din; output dout;\n\
+             DFF ra(.CK(clk),.D(din),.Q(dout));\nendmodule\n",
+        )
+        .unwrap();
+        let sdc = Sdc::parse(&format!(
+            "{}set_false_path -from [get_ports {{din}}]\n",
+            base_sdc()
+        ))
+        .unwrap();
+        let r = lint(&n, &sdc, &lib());
+        assert!(
+            !has(&r, "exception-unreachable"),
+            "`din` reaches a register — a real cut, not a dead one: {:?}",
+            r.findings
+        );
+    }
+
+    #[test]
+    fn a_one_sided_to_exception_is_checked_from_the_other_direction() {
+        let n = crate::netlist::parse(
+            "module t(clk,din,dangling,dout);\ninput clk,din; output dangling,dout;\n\
+             DFF ra(.CK(clk),.D(din),.Q(dout));\nendmodule\n",
+        )
+        .unwrap();
+        let sdc = Sdc::parse(&format!(
+            "{}set_false_path -to [get_ports {{dangling}}]\n",
+            base_sdc()
+        ))
+        .unwrap();
+        let r = lint(&n, &sdc, &lib());
+        assert!(
+            has(&r, "exception-unreachable"),
+            "`dangling` is driven by nothing, so nothing is cut: {:?}",
+            r.findings
+        );
     }
 
     #[test]
