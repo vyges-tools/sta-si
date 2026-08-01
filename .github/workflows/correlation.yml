@@ -1,0 +1,100 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Correlation against a signed-off routed sky130 block.
+#
+# Separate from ci.yml on purpose. `ci.yml` runs on every push and compares the engine against
+# ITSELF — fixtures assert numbers the engine produced, which cannot catch a behaviour that was
+# never implemented. This job compares against an artifact from OUTSIDE: a sign-off timer's own
+# reports on a real design, with a real PDK and real parasitics. That comparison is what has
+# actually found defects.
+#
+# It is not on `push` because it downloads ~180 MB (a PDK slice and a design) and there is no
+# point paying that on every commit — the sign-off side is a frozen artifact, so the result only
+# changes when the engine does. Monthly catches slow drift; dispatch covers "I touched the delay
+# calculator and want to know now".
+name: correlation (sky130 block)
+
+on:
+  workflow_dispatch: # run it from the Actions tab whenever you want
+  schedule:
+    - cron: "17 6 1 * *" # 06:17 UTC on the 1st of each month
+
+# Never let two of these overlap; the later one is the one worth having.
+concurrency:
+  group: correlation-sky130
+  cancel-in-progress: true
+
+# Pinned once, used by both the cache key and the download. The point of this job is to detect a
+# change in the ENGINE, so every other input is frozen: a moving PDK would make a real regression
+# and a library update produce the same red X.
+env:
+  PDK_RELEASE: sky130-8810d893525d268924398a7d0837ef8c1b28d475
+
+jobs:
+  correlate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # The design is public and large; take only the three paths this needs, at depth 1.
+      # A full clone is multi-gigabyte and almost all of it is history we will never read.
+      - name: Fetch the design (sparse)
+        run: |
+          git clone --filter=blob:none --sparse --depth 1 \
+            https://github.com/vyges/vyges-edge-sensor-soc.git design
+          cd design
+          git sparse-checkout set \
+            verilog/gl/fft_ctrl_tlul.v \
+            spef/fft_ctrl_tlul.nom.spef \
+            signoff/fft_ctrl_tlul/openlane-signoff/timing-reports/nom_tt_025C_1v80
+          ls -lh verilog/gl/fft_ctrl_tlul.v spef/fft_ctrl_tlul.nom.spef
+
+      # Our own pinned mirror rather than a live PDK build (see the env block above).
+      - name: Cache the PDK slice
+        id: pdk-cache
+        uses: actions/cache@v4
+        with:
+          path: pdk
+          key: sky130-fd-sc-hd-${{ env.PDK_RELEASE }}
+
+      - name: Download the sky130 standard-cell library
+        if: steps.pdk-cache.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p pdk && cd pdk
+          curl -sSfL -o sc_hd.tar.zst \
+            "https://github.com/vyges-tools/pdk-releases/releases/download/${PDK_RELEASE}/sky130_fd_sc_hd.tar.zst"
+          sudo apt-get update -qq && sudo apt-get install -y -qq zstd
+          tar --use-compress-program=unzstd -xf sc_hd.tar.zst
+          rm sc_hd.tar.zst
+
+      - name: Locate the Liberty for the correlated corner
+        run: |
+          lib=$(find pdk -name 'sky130_fd_sc_hd__tt_025C_1v80.lib' | head -1)
+          test -n "$lib" || { echo "::error::corner Liberty not found in the PDK slice"; exit 1; }
+          echo "PDK_LIB=$PWD/$lib" >> "$GITHUB_ENV"
+          ls -lh "$lib"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Captured once, not run twice: a second run would double the cost and, worse, could
+      # disagree with the one that decided the job's verdict.
+      - name: Correlate
+        env:
+          DESIGN: ${{ github.workspace }}/design
+        run: |
+          set -o pipefail
+          ./scripts/correlate-sky130.sh 2>&1 | tee correlation.txt
+
+      # The numbers matter even when the job is green — the trend is the interesting part, and a
+      # summary means reading it does not require opening the log.
+      - name: Publish the numbers to the run summary
+        if: always()
+        run: |
+          {
+            echo '## Correlation against sign-off — routed sky130 block'
+            echo '```text'
+            cat correlation.txt 2>/dev/null || echo 'the correlation step produced no output'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
