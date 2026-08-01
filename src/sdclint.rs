@@ -54,6 +54,11 @@ impl Severity {
     }
 }
 
+/// How many individual ports/registers a per-object finding lists before collapsing into a
+/// count. The findings that matter are lost in a list of hundreds, and the count is what a
+/// reader acts on anyway.
+const PORT_LIST_CAP: usize = 20;
+
 #[derive(Debug, Clone)]
 pub struct Finding {
     pub severity: Severity,
@@ -207,24 +212,42 @@ pub fn lint(nl: &Netlist, sdc: &Sdc, lib: &Lib) -> LintReport {
         .flat_map(|d| d.ports.iter().map(String::as_str))
         .collect();
 
-    for p in &nl.inputs {
-        let p = p.as_str();
-        if clock_ports.contains(p) {
-            continue; // a clock input, not a data input
+    // Listed, then capped. A top-level pad wrapper has hundreds of static configuration
+    // outputs that legitimately carry no output delay, and one warning per port buries the
+    // findings that matter under a wall the reader scrolls past — which is how a checker gets
+    // switched off. Same treatment the per-register check gets.
+    let bare_in: Vec<&str> = nl
+        .inputs
+        .iter()
+        .map(String::as_str)
+        .filter(|p| !clock_ports.contains(p) && !in_default && !in_ports.contains(p))
+        .collect();
+    let bare_out: Vec<&str> = nl
+        .outputs
+        .iter()
+        .map(String::as_str)
+        .filter(|p| !out_default && !out_ports.contains(p))
+        .collect();
+    for (code, kind, cmd, list) in [
+        ("unconstrained-input", "input", "set_input_delay", &bare_in),
+        (
+            "unconstrained-output",
+            "output",
+            "set_output_delay",
+            &bare_out,
+        ),
+    ] {
+        for p in list.iter().take(PORT_LIST_CAP) {
+            f.push(Finding::warn(code, format!("{kind} `{p}` has no {cmd}")));
         }
-        if !in_default && !in_ports.contains(p) {
+        if list.len() > PORT_LIST_CAP {
             f.push(Finding::warn(
-                "unconstrained-input",
-                format!("input `{p}` has no set_input_delay"),
-            ));
-        }
-    }
-    for p in &nl.outputs {
-        let p = p.as_str();
-        if !out_default && !out_ports.contains(p) {
-            f.push(Finding::warn(
-                "unconstrained-output",
-                format!("output `{p}` has no set_output_delay"),
+                code,
+                format!(
+                    "... and {} more {kind}s with no {cmd} ({} in total)",
+                    list.len() - PORT_LIST_CAP,
+                    list.len()
+                ),
             ));
         }
     }
@@ -274,18 +297,19 @@ pub fn lint(nl: &Netlist, sdc: &Sdc, lib: &Lib) -> LintReport {
     // Only worth saying per-register when some clock exists; with none the design-wide error
     // above already says it, and repeating it per register is noise.
     if !sdc.clocks.is_empty() {
-        for name in unclocked.iter().take(20) {
+        for name in unclocked.iter().take(PORT_LIST_CAP) {
             f.push(Finding::err(
                 "register-no-clock-reaches",
                 format!("register `{name}`: no SDC clock reaches its clock pin — it is untimed"),
             ));
         }
-        if unclocked.len() > 20 {
+        if unclocked.len() > PORT_LIST_CAP {
             f.push(Finding::err(
                 "register-no-clock-reaches",
                 format!(
-                    "... and {} more registers no clock reaches",
-                    unclocked.len() - 20
+                    "... and {} more registers no clock reaches ({} in total)",
+                    unclocked.len() - PORT_LIST_CAP,
+                    unclocked.len()
                 ),
             ));
         }
@@ -745,5 +769,64 @@ mod accessor_tests {
             findings: vec![Finding::warn("something-else", "unrelated".into())],
         };
         assert_eq!(r.endpoint_coverage_pct(), None);
+    }
+}
+
+#[cfg(test)]
+mod noise_tests {
+    use super::*;
+
+    fn lib() -> Lib {
+        Lib::load("examples/seq/seq.lib").expect("seq.lib")
+    }
+
+    /// A wide top-level wrapper: many outputs, none constrained.
+    fn wide(n: usize) -> Netlist {
+        let ports: Vec<String> = (0..n).map(|i| format!("o{i}")).collect();
+        let decl = ports.join(",");
+        crate::netlist::parse(&format!(
+            "module t(clk,din,{decl});\ninput clk,din; output {decl};\n\
+             DFF r(.CK(clk),.D(din),.Q(o0));\nendmodule\n"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn hundreds_of_unconstrained_ports_collapse_to_a_count() {
+        // Found on a real pad wrapper: 484 unconstrained outputs produced 484 warnings, and
+        // the two findings that mattered were somewhere in the middle of them. A reader
+        // scrolls past that, which is how a checker stops being run.
+        let sdc = Sdc::parse("create_clock -name clk -period 10 [get_ports clk]\n").unwrap();
+        let r = lint(&wide(200), &sdc, &lib());
+        let outs: Vec<_> = r
+            .findings
+            .iter()
+            .filter(|f| f.code == "unconstrained-output")
+            .collect();
+        assert!(
+            outs.len() <= PORT_LIST_CAP + 1,
+            "listed {} findings for 200 ports — the cap is not applied",
+            outs.len()
+        );
+        let summary = outs.last().expect("a summary line");
+        assert!(
+            summary.message.contains("200 in total"),
+            "the count must survive the cap: {}",
+            summary.message
+        );
+    }
+
+    #[test]
+    fn a_small_design_still_names_every_port() {
+        // The cap must not cost detail where detail is usable.
+        let sdc = Sdc::parse("create_clock -name clk -period 10 [get_ports clk]\n").unwrap();
+        let r = lint(&wide(3), &sdc, &lib());
+        let outs: Vec<_> = r
+            .findings
+            .iter()
+            .filter(|f| f.code == "unconstrained-output")
+            .collect();
+        assert_eq!(outs.len(), 3, "three ports, three named findings");
+        assert!(outs.iter().all(|f| !f.message.contains("in total")));
     }
 }
