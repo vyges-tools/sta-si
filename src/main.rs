@@ -229,15 +229,18 @@ fn write_out(text: &str, cli: &Cli) {
 
 fn render_lint(r: &vyges_sta_si::sdclint::LintReport) -> String {
     let mut s = String::new();
-    if r.findings.is_empty() {
+    // Clean means no errors and no warnings — not an empty report. Coverage is emitted on
+    // every run, including a clean one, because "constrained 100%" is the statement worth
+    // having; a report that only speaks up when something is wrong cannot tell you it looked.
+    if r.errors() == 0 && r.warnings() == 0 {
         s.push_str("vyges-sta-si sdc-lint — CLEAN ✓  (no constraint issues)\n");
-        return s;
+    } else {
+        s.push_str(&format!(
+            "vyges-sta-si sdc-lint — {} error(s), {} warning(s)\n",
+            r.errors(),
+            r.warnings()
+        ));
     }
-    s.push_str(&format!(
-        "vyges-sta-si sdc-lint — {} error(s), {} warning(s)\n",
-        r.errors(),
-        r.warnings()
-    ));
     for f in &r.findings {
         s.push_str(&format!(
             "  {:7} [{}] {}\n",
@@ -253,6 +256,11 @@ fn render_lint_json(r: &vyges_sta_si::sdclint::LintReport) -> String {
     let mut s = String::from("{\n");
     s.push_str(&format!("  \"errors\": {},\n", r.errors()));
     s.push_str(&format!("  \"warnings\": {},\n", r.warnings()));
+    // Coverage as a first-class field, not buried in a message string, so a CI gate can read
+    // it without parsing prose.
+    if let Some(p) = r.endpoint_coverage_pct() {
+        s.push_str(&format!("  \"endpoint_coverage_pct\": {p:.1},\n"));
+    }
     s.push_str("  \"findings\": [\n");
     for (i, f) in r.findings.iter().enumerate() {
         let comma = if i + 1 < r.findings.len() { "," } else { "" };
