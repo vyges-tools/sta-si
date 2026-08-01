@@ -44,11 +44,14 @@ jobs:
           git clone --filter=blob:none --sparse --depth 1 \
             https://github.com/vyges/vyges-edge-sensor-soc.git design
           cd design
-          git sparse-checkout set \
-            verilog/gl/fft_ctrl_tlul.v \
-            spef/fft_ctrl_tlul.nom.spef \
-            signoff/fft_ctrl_tlul/openlane-signoff/timing-reports/nom_tt_025C_1v80
+          # --no-cone because cone mode only accepts DIRECTORIES, and the directories these
+          # files live in hold every block in the SoC — hundreds of MB to get three files.
+          git sparse-checkout set --no-cone \
+            /verilog/gl/fft_ctrl_tlul.v \
+            /spef/fft_ctrl_tlul.nom.spef \
+            "/signoff/fft_ctrl_tlul/openlane-signoff/timing-reports/nom_tt_025C_1v80/*"
           ls -lh verilog/gl/fft_ctrl_tlul.v spef/fft_ctrl_tlul.nom.spef
+          du -sh . && echo "fetched only what the correlation needs"
 
       # Our own pinned mirror rather than a live PDK build (see the env block above).
       - name: Cache the PDK slice
