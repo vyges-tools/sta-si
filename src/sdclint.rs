@@ -321,36 +321,54 @@ pub fn lint(nl: &Netlist, sdc: &Sdc, lib: &Lib) -> LintReport {
             crate::sdc::ExcKind::FalsePath => "set_false_path",
             crate::sdc::ExcKind::Multicycle(_) => "set_multicycle_path",
         };
-        let named = |o: &String| {
-            !o.is_empty()
-                && o != "*"
-                && !g.knows(o)
-                && !clock_srcs.contains_key(o.as_str())
-                && !sdc.clocks.iter().any(|c| &c.name == o)
+        // Every named endpoint, not the first — an exception can cut a whole bus, and each
+        // member is separately capable of being a typo or of naming a path that is not there.
+        let known_object = |o: &String| {
+            g.knows(o)
+                || clock_srcs.contains_key(o.as_str())
+                || sdc.clocks.iter().any(|c| &c.name == o)
         };
-        for (side, obj) in [("-from", &e.from), ("-to", &e.to)] {
-            if named(obj) {
+        for (side, obj) in e.named_endpoints() {
+            if !known_object(obj) {
                 f.push(Finding::warn(
                     "exception-unknown-object",
                     format!(
                         "{kind} {side} `{obj}` names nothing in the design — \
-                         the exception does nothing"
+                         that endpoint of the exception does nothing"
                     ),
                 ));
             }
         }
-        if e.from != "*"
-            && e.to != "*"
-            && g.knows(&e.from)
-            && g.knows(&e.to)
-            && !g.reaches(&e.from, &e.to)
+        // Reachability, pair by pair. Reporting only "some pair is unreachable" would hide
+        // which one, and the answer a reader needs is the specific dead endpoint.
+        let mut dead = Vec::new();
+        for from in e
+            .from
+            .iter()
+            .filter(|o| o.as_str() != "*" && known_object(o))
         {
+            for to in e.to.iter().filter(|o| o.as_str() != "*" && known_object(o)) {
+                if !g.reaches(from, to) {
+                    dead.push(format!("{from} -> {to}"));
+                }
+            }
+        }
+        for pair in dead.iter().take(PORT_LIST_CAP) {
             f.push(Finding::warn(
                 "exception-unreachable",
                 format!(
-                    "{kind} -from `{}` -to `{}`: no structural path between them — the \
-                     exception is dead, and any path the author meant is still timed",
-                    e.from, e.to
+                    "{kind} `{pair}`: no structural path between them — that pair is dead, \
+                     and any path the author meant is still timed"
+                ),
+            ));
+        }
+        if dead.len() > PORT_LIST_CAP {
+            f.push(Finding::warn(
+                "exception-unreachable",
+                format!(
+                    "... and {} more dead {kind} pairs ({} in total)",
+                    dead.len() - PORT_LIST_CAP,
+                    dead.len()
                 ),
             ));
         }

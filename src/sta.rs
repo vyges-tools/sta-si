@@ -742,7 +742,12 @@ impl Timer {
                     None => false,
                 }
             }
-            Move::InsertDelay { inst, pin, cell, name } => {
+            Move::InsertDelay {
+                inst,
+                pin,
+                cell,
+                name,
+            } => {
                 if self.inst_idx.contains_key(&name) {
                     return false; // the new instance name is already taken
                 }
@@ -757,9 +762,10 @@ impl Timer {
                         .find(|p| p.direction == d && !p.clock)
                         .map(|p| p.name.clone())
                 };
-                let (Some(cell_in), Some(cell_out)) =
-                    (pin_named(crate::liberty::Dir::In), pin_named(crate::liberty::Dir::Out))
-                else {
+                let (Some(cell_in), Some(cell_out)) = (
+                    pin_named(crate::liberty::Dir::In),
+                    pin_named(crate::liberty::Dir::Out),
+                ) else {
                     return false; // not usable as a delay element
                 };
 
@@ -775,7 +781,12 @@ impl Timer {
                 // a fresh net between the new cell and the sink; derived from the instance name
                 // so a plan replayed elsewhere produces the same names.
                 let new_net = format!("{name}_n");
-                if self.nl.insts.iter().any(|i| i.conns.iter().any(|(_, n)| *n == new_net)) {
+                if self
+                    .nl
+                    .insts
+                    .iter()
+                    .any(|i| i.conns.iter().any(|(_, n)| *n == new_net))
+                {
                     return false; // refuse to collide rather than silently merge two nets
                 }
 
@@ -1806,11 +1817,9 @@ fn build_report(
 
     // timing exceptions, matched on launch/capture instance (or port) names.
     let inst_of = |node: usize| labels[node].split('/').next().unwrap_or("").to_string();
-    let match_exc = |ln: &str, cn: &str| {
-        job.exceptions
-            .iter()
-            .find(|e| (e.from == "*" || e.from == ln) && (e.to == "*" || e.to == cn))
-    };
+    // Membership, not equality: an exception may name a whole bus on either side, and the
+    // rule for that lives once in `Exception::covers` rather than being re-derived here.
+    let match_exc = |ln: &str, cn: &str| job.exceptions.iter().find(|e| e.covers(ln, cn));
     let mut excluded_setup = vec![false; n]; // false-path endpoints (skip setup)
 
     // setup capture uses the EARLY clock; CRPR adds back the shared-path pessimism;

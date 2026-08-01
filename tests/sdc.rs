@@ -54,8 +54,10 @@ fn parses_core_commands() {
     assert_eq!(s.exceptions.len(), 2);
     assert!(matches!(s.exceptions[0].kind, ExcKind::FalsePath));
     assert!(matches!(s.exceptions[1].kind, ExcKind::Multicycle(2)));
-    assert_eq!(s.exceptions[0].from, "test_mode");
-    assert_eq!(s.exceptions[1].from, "a_reg");
+    // Endpoints are sets — an SDC can cut a whole bus with one command.
+    assert_eq!(s.exceptions[0].from, vec!["test_mode"]);
+    assert_eq!(s.exceptions[1].from, vec!["a_reg"]);
+    assert!(s.exceptions[0].from_matches("test_mode"));
     assert!(s.ignored.iter().any(|c| c == "set_propagated_clock"));
 }
 

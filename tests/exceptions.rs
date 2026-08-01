@@ -92,8 +92,8 @@ fn job(exceptions: Vec<Exception>) -> StaJob {
 fn exc(kind: ExcKind, from: &str, to: &str) -> Exception {
     Exception {
         kind,
-        from: from.into(),
-        to: to.into(),
+        from: vec![from.into()],
+        to: vec![to.into()],
     }
 }
 
@@ -134,4 +134,50 @@ fn multicycle_relaxes_the_path() {
         mc.worst_endpoint, "r2/D",
         "multicycle should relax r2/D off the critical path"
     );
+}
+
+/// A `set_false_path` over a list of objects must cut **every** member.
+///
+/// This is the failure that motivated making the endpoints sets: keeping only the first left
+/// the rest of the bus timed against the SDC's explicit statement, and it fails in the worst
+/// direction — the tool reports violations on paths the design has declared unreal.
+#[test]
+fn an_exception_over_a_list_covers_every_member() {
+    use vyges_sta_si::sdc::Sdc;
+    let sdc = Sdc::parse(
+        "create_clock -name clk -period 10 [get_ports clk]\n\
+         set_false_path -from [list [get_ports {a[0]}] [get_ports {a[1]}] [get_ports {a[2]}]] \
+         -to [get_ports {out}]\n",
+    )
+    .unwrap();
+    let e = &sdc.exceptions[0];
+    assert_eq!(e.from.len(), 3, "all three members parsed: {:?}", e.from);
+    for m in ["a[0]", "a[1]", "a[2]"] {
+        assert!(
+            e.covers(m, "out"),
+            "{m} must be cut, not just the first member"
+        );
+    }
+    assert!(
+        !e.covers("b[0]", "out"),
+        "an object not named must not be cut"
+    );
+    assert!(
+        !e.covers("a[0]", "elsewhere"),
+        "the -to side still constrains"
+    );
+}
+
+/// The wildcard behaviour the engine has always relied on must survive the change.
+#[test]
+fn a_missing_side_still_means_any() {
+    use vyges_sta_si::sdc::Sdc;
+    let sdc = Sdc::parse(
+        "create_clock -name clk -period 10 [get_ports clk]\n\
+         set_false_path -from [get_ports {a}]\n",
+    )
+    .unwrap();
+    let e = &sdc.exceptions[0];
+    assert!(e.covers("a", "anything at all"), "-to absent means any");
+    assert!(!e.covers("b", "anything at all"), "-from still constrains");
 }

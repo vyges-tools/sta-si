@@ -182,10 +182,12 @@ impl StaJob {
                 // `false_path: <from> <to>`   `multicycle: <from> <to> <cycles>`
                 let t: Vec<&str> = v.split_whitespace().collect();
                 let exc = match (key.as_str(), t.as_slice()) {
+                    // The job-file form names one object per side; the SDC form can name many
+                    // (`-from [list ...]`), which is why the model holds sets.
                     ("false_path", [from, to]) => Exception {
                         kind: ExcKind::FalsePath,
-                        from: from.to_string(),
-                        to: to.to_string(),
+                        from: vec![from.to_string()],
+                        to: vec![to.to_string()],
                     },
                     ("multicycle", [from, to, n]) => {
                         let cyc: u32 = n
@@ -193,8 +195,8 @@ impl StaJob {
                             .map_err(|_| JobError(format!("bad multicycle count: {n:?}")))?;
                         Exception {
                             kind: ExcKind::Multicycle(cyc),
-                            from: from.to_string(),
-                            to: to.to_string(),
+                            from: vec![from.to_string()],
+                            to: vec![to.to_string()],
                         }
                     }
                     _ => return Err(JobError(format!("bad exception: {line:?}"))),
