@@ -130,56 +130,9 @@ pub fn load_netlist(path: &str) -> Result<crate::netlist::Netlist, StaError> {
 /// Coverage is nets-matched over nets-in-the-design, because that is the number a user can act
 /// on; the file's own net count is reported alongside so "we read nothing" and "we read plenty
 /// and none of it is yours" are distinguishable.
-#[derive(Debug, PartialEq)]
-pub(crate) struct SpefCoverage {
-    pub design_nets: usize,
-    pub file_nets: usize,
-    pub matched: usize,
-}
-
-impl SpefCoverage {
-    pub fn percent(&self) -> f64 {
-        if self.design_nets == 0 { 0.0 } else { 100.0 * self.matched as f64 / self.design_nets as f64 }
-    }
-    /// The message a user can act on, and whether it deserves attention.
-    pub fn verdict(&self) -> (bool, String) {
-        if self.file_nets == 0 {
-            (true, "SPEF parsed to zero nets — the file was read but yielded nothing, so this \
-                    run is the ideal-interconnect answer".to_string())
-        } else if self.matched == 0 {
-            (true, format!(
-                "SPEF matched none of the design's {} net(s) ({} net(s) in the file) — names do \
-                 not correspond, so this run is the ideal-interconnect answer",
-                self.design_nets, self.file_nets))
-        } else {
-            (self.percent() < 50.0, format!(
-                "SPEF covers {} of {} design net(s) ({:.1}%); {} net(s) in the file",
-                self.matched, self.design_nets, self.percent(), self.file_nets))
-        }
-    }
-}
-
-pub(crate) fn spef_coverage(nl: &netlist::Netlist, spef: &Spef) -> SpefCoverage {
-    use std::collections::BTreeSet;
-    let mut design: BTreeSet<&str> = BTreeSet::new();
-    for i in &nl.insts {
-        for (_pin, net) in &i.conns {
-            design.insert(net.as_str());
-        }
-    }
-    for p in nl.inputs.iter().chain(nl.outputs.iter()) {
-        design.insert(p.as_str());
-    }
-    SpefCoverage {
-        matched: design.iter().filter(|n| spef.nets.contains_key(**n)).count(),
-        design_nets: design.len(),
-        file_nets: spef.nets.len(),
-    }
-}
-
 fn emit_spef_coverage(job: &StaJob, nl: &netlist::Netlist, spef: &Spef) {
     use vyges_events::{Event, Severity};
-    let (attention, msg) = spef_coverage(nl, spef).verdict();
+    let (attention, msg) = spef_verdict(&coverage::spef(nl, spef));
     let sev = if attention { Severity::Warn } else { Severity::Info };
     let mut ev = Event::new("vyges-sta-si", sev, msg).with_code("STA-SPEF");
     if !job.clock_port.is_empty() {
@@ -886,11 +839,11 @@ mod input_coverage_tests {
         // real routed block they are most of what is arc-less, and warning about them would
         // train a reader to ignore the warning — which costs more than not having it.
         let (nl, lib) = tie_fixture();
-        let c = liberty_coverage(&nl, &lib);
+        let c = coverage::liberty(&nl, &lib);
         assert!(c.resolved_masters >= 4, "the fixture's cells resolve: {c:?}");
-        assert_eq!(c.without_arcs, 0, "CONB is a tie cell, not a defect: {c:?}");
-        assert_eq!(c.seq_without_constraints, 0, "DFRTP carries setup/hold: {c:?}");
-        assert!(!c.verdict().0, "a healthy library must not ask for attention");
+        assert_eq!(c.driving_without_arcs, 0, "CONB is a tie cell, not a defect: {c:?}");
+        assert_eq!(c.sequential_without_constraints, 0, "DFRTP carries setup/hold: {c:?}");
+        assert!(!liberty_verdict(&c).0, "a healthy library must not ask for attention");
     }
 
     #[test]
@@ -909,9 +862,9 @@ mod input_coverage_tests {
                 }
             }
         }
-        let c = liberty_coverage(&nl, &lib);
-        assert!(c.seq_without_constraints > 0, "{c:?}");
-        let (attention, msg) = c.verdict();
+        let c = coverage::liberty(&nl, &lib);
+        assert!(c.sequential_without_constraints > 0, "{c:?}");
+        let (attention, msg) = liberty_verdict(&c);
         assert!(attention);
         assert!(msg.contains("cannot be checked"), "got: {msg}");
     }
@@ -922,25 +875,25 @@ mod input_coverage_tests {
         // tap. It is reported as fact so the *timed* count is legible, and only an instance with
         // real signal pins and no Liberty cell demands attention.
         let (nl, lib) = tie_fixture();
-        let c = netlist_coverage(&nl, &lib);
+        let c = coverage::netlist(&nl, &lib);
         assert_eq!(c.instances, nl.insts.len());
         assert_eq!(c.unresolved_signal, 0, "every fixture cell is in the fixture library");
-        assert!(!c.verdict().0, "a fully resolved netlist must not warn");
+        assert!(!netlist_verdict(&c).0, "a fully resolved netlist must not warn");
 
         // drop a cell the design uses and the same instance becomes a demand for attention
         let mut lib2 = lib;
         lib2.cells.remove("BUF");
-        let c2 = netlist_coverage(&nl, &lib2);
+        let c2 = coverage::netlist(&nl, &lib2);
         assert!(c2.unresolved_signal > 0, "{c2:?}");
-        let (attention, msg) = c2.verdict();
+        let (attention, msg) = netlist_verdict(&c2);
         assert!(attention);
         assert!(msg.contains("NO Liberty cell"), "got: {msg}");
     }
 
     #[test]
     fn an_empty_netlist_asks_for_attention_rather_than_reporting_success() {
-        let c = NetlistCoverage { instances: 0, masters: 0, physical_only: 0, unresolved_signal: 0 };
-        let (attention, msg) = c.verdict();
+        let c = coverage::NetlistCoverage::default();
+        let (attention, msg) = netlist_verdict(&c);
         assert!(attention);
         assert!(msg.contains("zero instances"), "got: {msg}");
     }
@@ -950,8 +903,8 @@ mod input_coverage_tests {
 mod spef_coverage_tests {
     use super::*;
 
-    fn cov(design: usize, file: usize, matched: usize) -> SpefCoverage {
-        SpefCoverage { design_nets: design, file_nets: file, matched }
+    fn cov(design: usize, file: usize, matched: usize) -> coverage::SpefCoverage {
+        coverage::SpefCoverage { design_nets: design, file_nets: file, matched }
     }
 
     #[test]
@@ -959,18 +912,18 @@ mod spef_coverage_tests {
         // The distinction is the whole diagnostic: "we could not read it" and "we read it and
         // none of it is yours" have different causes and different fixes, and both otherwise
         // present as a run that succeeded with no parasitics applied.
-        let (attn, m) = cov(100, 0, 0).verdict();
+        let (attn, m) = spef_verdict(&cov(100, 0, 0));
         assert!(attn);
         assert!(m.contains("zero nets"), "got: {m}");
 
-        let (attn, m) = cov(100, 90, 0).verdict();
+        let (attn, m) = spef_verdict(&cov(100, 90, 0));
         assert!(attn);
         assert!(m.contains("matched none") && m.contains("90 net(s) in the file"), "got: {m}");
     }
 
     #[test]
     fn ordinary_coverage_is_reported_without_demanding_attention() {
-        let (attn, m) = cov(100, 95, 94).verdict();
+        let (attn, m) = spef_verdict(&cov(100, 95, 94));
         assert!(!attn, "94% coverage is not a problem to raise");
         assert!(m.contains("94 of 100") && m.contains("94.0%"), "got: {m}");
     }
@@ -979,191 +932,123 @@ mod spef_coverage_tests {
     fn thin_coverage_still_asks_for_attention() {
         // Partial extraction is a real and quieter failure than none at all — the numbers move,
         // just not by as much as they should, so nothing looks wrong.
-        let (attn, _) = cov(100, 100, 40).verdict();
+        let (attn, _) = spef_verdict(&cov(100, 100, 40));
         assert!(attn, "40% of the design unextracted deserves a warning");
-        let (attn, _) = cov(100, 100, 60).verdict();
+        let (attn, _) = spef_verdict(&cov(100, 100, 60));
         assert!(!attn);
     }
 
     #[test]
     fn a_design_with_no_nets_does_not_divide_by_zero() {
         assert_eq!(cov(0, 0, 0).percent(), 0.0);
-        let (attn, _) = cov(0, 0, 0).verdict();
+        let (attn, _) = spef_verdict(&cov(0, 0, 0));
         assert!(attn);
     }
 }
 
-// ---- netlist and Liberty coverage ---------------------------------------------------------------
-// The same argument as `spef_coverage`, applied to the other two readers. A file that parses
-// without error but yields less than the design needs produces a run that succeeds and reports
-// numbers, and nothing anywhere says a part of the design was not timed.
-//
-// These target the SILENT cases specifically. An unknown cell that the timer cannot skip is
-// already a hard error; a cell it *can* skip, or a cell that resolves but carries no timing, is
-// not — and that is the shape both real defects on this engine have taken.
+// ---- input coverage -----------------------------------------------------------------------
+// The counting lives in `vyges_loom::coverage` — shared with every other engine on the same
+// data plane, so it cannot drift between them. What stays here is the **verdict**: which counts
+// deserve a reader's attention in a *timing* run, and how to say so. That judgement is not
+// portable — thin parasitic coverage matters to a timer and not to a netlist lint, and
+// instances with no timing view are a fact on any routed design rather than a complaint.
 
-#[derive(Debug, PartialEq)]
-pub(crate) struct NetlistCoverage {
-    pub instances: usize,
-    pub masters: usize,
-    /// Instances the timer will skip as physical-only: no connections, or power/ground only.
-    /// Fill, tap, decap and antenna diodes are legitimately here — a large count is normal on a
-    /// post-route design and is reported as fact, not as a complaint.
-    pub physical_only: usize,
-    /// Instances whose master is absent from the Liberty *and* which carry real signal pins.
-    /// These are the ones a run cannot be trusted without.
-    pub unresolved_signal: usize,
-}
+use vyges_loom::coverage;
 
-impl NetlistCoverage {
-    pub fn verdict(&self) -> (bool, String) {
-        if self.instances == 0 {
-            return (true, "netlist parsed to zero instances".to_string());
-        }
-        let timed = self.instances - self.physical_only - self.unresolved_signal;
-        if self.unresolved_signal > 0 {
-            return (
-                true,
-                format!(
-                    "netlist: {} instance(s) of {} master(s); {} timed, {} physical-only, \
-                     {} with signal pins have NO Liberty cell",
-                    self.instances, self.masters, timed, self.physical_only, self.unresolved_signal
-                ),
-            );
-        }
-        (
-            false,
+fn netlist_verdict(c: &coverage::NetlistCoverage) -> (bool, String) {
+    if c.instances == 0 {
+        return (true, "netlist parsed to zero instances".to_string());
+    }
+    if c.unresolved_signal > 0 {
+        return (
+            true,
             format!(
-                "netlist: {} instance(s) of {} master(s); {} timed, {} physical-only",
-                self.instances, self.masters, timed, self.physical_only
+                "netlist: {} instance(s) of {} master(s); {} timed, {} physical-only, {} with \
+                 signal pins have NO Liberty cell",
+                c.instances,
+                c.masters,
+                c.analysable(),
+                c.physical_only,
+                c.unresolved_signal
             ),
-        )
-    }
-}
-
-pub(crate) fn netlist_coverage(nl: &netlist::Netlist, lib: &Lib) -> NetlistCoverage {
-    use std::collections::BTreeSet;
-    let mut masters: BTreeSet<&str> = BTreeSet::new();
-    let (mut physical_only, mut unresolved_signal) = (0usize, 0usize);
-    for i in &nl.insts {
-        masters.insert(i.cell.as_str());
-        if lib.cell(&i.cell).is_some() {
-            continue;
-        }
-        // exactly the test the timer applies before skipping one
-        if i.conns.is_empty() || i.conns.iter().all(|(p, _)| crate::sta::is_power_pin(p)) {
-            physical_only += 1;
-        } else {
-            unresolved_signal += 1;
-        }
-    }
-    NetlistCoverage {
-        instances: nl.insts.len(),
-        masters: masters.len(),
-        physical_only,
-        unresolved_signal,
-    }
-}
-
-#[derive(Debug, PartialEq)]
-pub(crate) struct LibertyCoverage {
-    pub cells_in_lib: usize,
-    /// Distinct masters the design instantiates that the Liberty defines.
-    pub resolved_masters: usize,
-    /// Resolved masters that **drive something and yet carry no delay arc** — nothing can
-    /// propagate through them, so a path routed through one is timed as if it were free.
-    ///
-    /// Cells that are *legitimately* arc-less are excluded, and getting that exclusion right is
-    /// the difference between a signal and noise: a tie cell (constant output), a decap, an
-    /// antenna diode and fill all have no timing by design, and on a real routed block they are
-    /// the majority of what is arc-less. The test is therefore "has a non-constant output pin
-    /// but no arcs", not "has no arcs".
-    pub without_arcs: usize,
-    /// Sequential masters with **no setup, hold, recovery or removal constraint anywhere** — a
-    /// flop whose pins can never become endpoints, so its paths are never checked at all.
-    ///
-    /// This is the shape of a real defect: async set/reset pins carry `recovery`/`removal` and
-    /// nothing else, and a reader that discarded those timing types left those paths silently
-    /// unchecked while every other number looked right.
-    pub seq_without_constraints: usize,
-}
-
-impl LibertyCoverage {
-    pub fn verdict(&self) -> (bool, String) {
-        let mut notes = Vec::new();
-        if self.without_arcs > 0 {
-            notes.push(format!(
-                "{} that drive an output but carry no delay arc",
-                self.without_arcs
-            ));
-        }
-        if self.seq_without_constraints > 0 {
-            notes.push(format!(
-                "{} sequential with no timing constraints (their paths cannot be checked)",
-                self.seq_without_constraints
-            ));
-        }
-        let base = format!(
-            "liberty: {} cell(s) loaded, {} used by the design",
-            self.cells_in_lib, self.resolved_masters
         );
-        if notes.is_empty() {
-            (false, base)
-        } else {
-            (true, format!("{base} — {}", notes.join("; ")))
-        }
+    }
+    (
+        false,
+        format!(
+            "netlist: {} instance(s) of {} master(s); {} timed, {} physical-only",
+            c.instances,
+            c.masters,
+            c.analysable(),
+            c.physical_only
+        ),
+    )
+}
+
+fn liberty_verdict(c: &coverage::LibertyCoverage) -> (bool, String) {
+    let mut notes = Vec::new();
+    if c.driving_without_arcs > 0 {
+        notes.push(format!(
+            "{} that drive an output but carry no delay arc",
+            c.driving_without_arcs
+        ));
+    }
+    if c.sequential_without_constraints > 0 {
+        notes.push(format!(
+            "{} sequential with no timing constraints (their paths cannot be checked)",
+            c.sequential_without_constraints
+        ));
+    }
+    let base = format!(
+        "liberty: {} cell(s) loaded, {} used by the design",
+        c.cells_in_lib, c.resolved_masters
+    );
+    if notes.is_empty() {
+        (false, base)
+    } else {
+        (true, format!("{base} — {}", notes.join("; ")))
     }
 }
 
-pub(crate) fn liberty_coverage(nl: &netlist::Netlist, lib: &Lib) -> LibertyCoverage {
-    use std::collections::BTreeSet;
-    let masters: BTreeSet<&str> = nl.insts.iter().map(|i| i.cell.as_str()).collect();
-    let (mut resolved, mut without_arcs, mut seq_without) = (0usize, 0usize, 0usize);
-    for m in masters {
-        let Some(c) = lib.cell(m) else { continue };
-        resolved += 1;
-        let drives = c
-            .pins
-            .values()
-            .any(|p| p.direction == crate::liberty::Dir::Out && !p.is_constant());
-        if drives && !c.pins.values().any(|p| !p.arcs.is_empty()) {
-            without_arcs += 1;
-        }
-        if c.is_seq
-            && !c.pins.values().any(|p| {
-                !p.setup.is_empty()
-                    || !p.hold.is_empty()
-                    || !p.recovery.is_empty()
-                    || !p.removal.is_empty()
-            })
-        {
-            seq_without += 1;
-        }
+fn spef_verdict(c: &coverage::SpefCoverage) -> (bool, String) {
+    if c.file_nets == 0 {
+        return (
+            true,
+            "SPEF parsed to zero nets — the file was read but yielded nothing, so this run is \
+             the ideal-interconnect answer"
+                .to_string(),
+        );
     }
-    LibertyCoverage {
-        cells_in_lib: lib.cells.len(),
-        resolved_masters: resolved,
-        without_arcs,
-        seq_without_constraints: seq_without,
+    if c.read_but_unmatched() {
+        return (
+            true,
+            format!(
+                "SPEF matched none of the design's {} net(s) ({} net(s) in the file) — names do \
+                 not correspond, so this run is the ideal-interconnect answer",
+                c.design_nets, c.file_nets
+            ),
+        );
     }
+    (
+        c.percent() < 50.0,
+        format!(
+            "SPEF covers {} of {} design net(s) ({:.1}%); {} net(s) in the file",
+            c.matched,
+            c.design_nets,
+            c.percent(),
+            c.file_nets
+        ),
+    )
 }
 
 fn emit_input_coverage(job: &StaJob, nl: &netlist::Netlist, lib: &Lib) {
     use vyges_events::{Event, Severity};
-    let sev = |attention: bool| if attention { Severity::Warn } else { Severity::Info };
+    let sev = |a: bool| if a { Severity::Warn } else { Severity::Info };
     let objs = || {
-        if job.clock_port.is_empty() {
-            Vec::new()
-        } else {
-            vec![format!("clock:{}", job.clock_port)]
-        }
+        if job.clock_port.is_empty() { Vec::new() } else { vec![format!("clock:{}", job.clock_port)] }
     };
-    let (a, m) = netlist_coverage(nl, lib).verdict();
-    vyges_events::emit(
-        &Event::new("vyges-sta-si", sev(a), m).with_code("STA-NETLIST").with_objects(objs()),
-    );
-    let (a, m) = liberty_coverage(nl, lib).verdict();
-    vyges_events::emit(
-        &Event::new("vyges-sta-si", sev(a), m).with_code("STA-LIBERTY").with_objects(objs()),
-    );
+    let (a, m) = netlist_verdict(&coverage::netlist(nl, lib));
+    vyges_events::emit(&Event::new("vyges-sta-si", sev(a), m).with_code("STA-NETLIST").with_objects(objs()));
+    let (a, m) = liberty_verdict(&coverage::liberty(nl, lib));
+    vyges_events::emit(&Event::new("vyges-sta-si", sev(a), m).with_code("STA-LIBERTY").with_objects(objs()));
 }
