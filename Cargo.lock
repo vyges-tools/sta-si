@@ -108,7 +108,7 @@ source = "git+https://github.com/vyges-tools/loom?branch=main#afab1beedf39f9d617
 
 [[package]]
 name = "vyges-sta-si"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "vyges-events",
  "vyges-loom",
