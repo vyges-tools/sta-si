@@ -347,8 +347,19 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
             .iter()
             .map(|c| (c.name.clone(), c.source.clone(), c.period))
             .collect();
-        job.clock_port = job.clocks[0].1.clone();
-        job.period_ns = job.clocks[0].2;
+        // A VIRTUAL CLOCK HAS NO SOURCE, and that is a legal SDC construct rather than an
+        // omission: `create_clock -name clk -period 1.0` with no object list defines a reference
+        // clock for I/O budgeting that launches nothing inside this design. It carries the
+        // period and the I/O delays, which is exactly what a block constrained only at its
+        // boundary needs, so it must not be rejected for want of a port.
+        //
+        // Its NAME stands in as the clock's identifier. That is also what the reader used to
+        // hand over — it defaulted a sourceless clock's source to its own name — which made a
+        // virtual clock indistinguishable from a real one on a port of that name, and would
+        // silently launch through such a port if the design happened to have one.
+        let c = &job.clocks[0];
+        job.clock_port = if c.1.is_empty() { c.0.clone() } else { c.1.clone() };
+        job.period_ns = c.2;
     }
     // I/O timing: default + per-port. Source latency adds to the I/O budget
     // (an input arrives `latency` later; an output must settle `latency` earlier),

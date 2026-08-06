@@ -944,12 +944,35 @@ mod input_coverage_tests {
 mod spef_coverage_tests {
     use super::*;
 
+    /// A coverage record whose names all correspond — the ordinary case, where the only
+    /// question left is how much of the design the file covers.
     fn cov(design: usize, file: usize, matched: usize) -> coverage::SpefCoverage {
         coverage::SpefCoverage {
             design_nets: design,
             file_nets: file,
             matched,
+            ..Default::default()
         }
+    }
+
+    /// **Names that do not correspond warn whatever the coverage percentage says.** This is the
+    /// shape the netlist escaped-identifier defect took: 94.6 % coverage, and 767 nets with no
+    /// parasitics because the two files spelled them differently.
+    #[test]
+    fn a_file_naming_nets_the_design_does_not_have_warns_however_high_coverage_is() {
+        let c = coverage::SpefCoverage {
+            design_nets: 14341,
+            file_nets: 14238,
+            matched: 13471,
+            file_nets_unmatched: 767,
+            coupling_refs: 177_680,
+            coupling_unresolved: 4527,
+        };
+        assert!(c.percent() > 90.0, "the coverage number is reassuring: {:.1}%", c.percent());
+        let (warn, msg) = spef_verdict(&c);
+        assert!(warn, "and it still has to warn: {msg}");
+        assert!(msg.contains("767"), "naming the count is the point: {msg}");
+        assert!(msg.contains("4527"), "including the coupling: {msg}");
     }
 
     #[test]
@@ -1077,10 +1100,41 @@ fn spef_verdict(c: &coverage::SpefCoverage) -> (bool, String) {
             ),
         );
     }
+    // NAMES THAT DO NOT CORRESPOND ARE THE WARNING, not a coverage percentage.
+    //
+    // A design legitimately has nets a SPEF omits — an extractor skips what it treats as ideal
+    // — so `matched` is always a fraction and any threshold on it is a guess. The converse is
+    // not a guess: a parasitic the file went to the trouble of describing, for a net nothing in
+    // the design is called, means the two files disagree about NAMES, and everything downstream
+    // of that disagreement is missing without a symptom.
+    //
+    // This is not hypothetical and it is why the threshold below is no longer the only check.
+    // On a routed sky130 block whose netlist reader kept the backslash of a Verilog escaped
+    // identifier, coverage read 94.6 % — above any threshold anyone would have set — while 767
+    // nets carried no parasitics and 4527 coupling references were looked up, missed, and
+    // dropped, removing that crosstalk from the analysis entirely.
+    if !c.names_all_correspond() {
+        return (
+            true,
+            format!(
+                "SPEF and netlist disagree about names: {} of {} net(s) in the file name \
+nothing in the design, and {} of {} coupling reference(s) name no aggressor — those nets are \
+timed as ideal wire and that crosstalk is absent from the analysis (SPEF still covers {} of {} \
+design net(s), {:.1}%)",
+                c.file_nets_unmatched,
+                c.file_nets,
+                c.coupling_unresolved,
+                c.coupling_refs,
+                c.matched,
+                c.design_nets,
+                c.percent()
+            ),
+        );
+    }
     (
         c.percent() < 50.0,
         format!(
-            "SPEF covers {} of {} design net(s) ({:.1}%); {} net(s) in the file",
+            "SPEF covers {} of {} design net(s) ({:.1}%); {} net(s) in the file, all named",
             c.matched,
             c.design_nets,
             c.percent(),
