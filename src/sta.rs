@@ -1092,11 +1092,43 @@ fn build_report(
         job.clocks.iter().map(|(_, s, _)| s.clone()).collect()
     };
     let mut seed = vec![0.0f64; n];
+    // A port with no declared arrival is UNCONSTRAINED: it is not a timing start point, so
+    // it is left unreached exactly as a tie cell is (see the indeg-0 loop below). Seeding it
+    // at 0 instead invents a launch at time zero — harmless on setup, where a whole period
+    // absorbs it, and on hold it manufactures a violation the size of the capture clock's
+    // insertion delay plus uncertainty. Measured against OpenSTA on a block whose SDC
+    // constrained no inputs: -1.07 ns here against +0.88 there, and OpenSTA answers
+    // "No paths found" for the endpoint this engine called worst.
+    let mut unconstrained_in = vec![false; n];
+    let mut unconstrained_names: Vec<&str> = Vec::new();
     for (idx, name) in &input_ports {
         if !clock_srcs.contains(name) {
-            seed[*idx] = job.input_delay_for(name);
+            match job.input_delay_for(name) {
+                Some(d) => seed[*idx] = d,
+                None => {
+                    unconstrained_in[*idx] = true;
+                    unconstrained_names.push(name.as_str());
+                }
+            }
         }
     }
+    // Say what was skipped. A path that silently does not exist is indistinguishable from a
+    // path that passes, and the whole point of leaving these unreached is that they no longer
+    // appear in WNS/WHS -- so the count has to be visible or the model just got quieter.
+    if !unconstrained_names.is_empty() {
+        let mut shown: Vec<&str> = unconstrained_names.clone();
+        shown.sort_unstable();
+        shown.dedup();
+        let n_shown = shown.len();
+        let head: Vec<&str> = shown.into_iter().take(5).collect();
+        eprintln!(
+            "note: {n_shown} input port(s) have no declared arrival and start no timed path \
+             ({}{}). Add set_input_delay to time them.",
+            head.join(", "),
+            if n_shown > head.len() { ", …" } else { "" }
+        );
+    }
+
     for (idx, name) in &output_ports {
         endpoint_req[*idx] = period - job.output_delay_for(name) - job.setup_uncertainty;
     }
@@ -1355,7 +1387,9 @@ fn build_report(
                 //
                 // It is still pushed, so the topological walk stays consistent and a gate
                 // with one constant input still times correctly through its other inputs.
-                if !const_driver.get(v).copied().unwrap_or(false) {
+                let untimed = const_driver.get(v).copied().unwrap_or(false)
+                    || unconstrained_in.get(v).copied().unwrap_or(false);
+                if !untimed {
                     arr[v] = seed_l[v]; // input ports seed with their SDC arrival delay
                     arr_nom[v] = seed_l[v];
                 }

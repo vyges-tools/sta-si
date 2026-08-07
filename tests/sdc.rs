@@ -104,7 +104,9 @@ fn merge_overrides_job_clock_and_io() {
     assert!((job.period_ns - 10.0).abs() < 1e-9);
     // default input delay + clock_latency(0) ; per-port override for data_in
     assert!((job.input_delay - 2.0).abs() < 1e-9);
-    assert!((job.input_delay_for("data_in") - 1.5).abs() < 1e-9);
+    assert_eq!(job.input_delay_for("data_in"), Some(1.5));
+    // an SDC that declares a default arrival constrains every other port too
+    assert_eq!(job.input_delay_for("some_other_port"), Some(2.0));
     assert!((job.output_delay_for("any_out") - 3.0).abs() < 1e-9);
     assert!((job.setup_uncertainty - 0.25).abs() < 1e-9);
     assert!((job.input_slew - 0.08).abs() < 1e-9);
@@ -138,7 +140,10 @@ const NL: &str = "module top ( a, y ); input a; output y; wire n1;\n\
 fn run(input_delay: f64, output_delay: f64, unc: f64) -> f64 {
     use vyges_sta_si::engine::analyze_inputs;
     let mut job = base_job();
+    // setting a value IS declaring one — without this the port is unconstrained and starts
+    // no path, which makes the base case a comparison against nothing rather than 0 ns.
     job.input_delay = input_delay;
+    job.input_delay_declared = true;
     job.output_delay = output_delay;
     job.setup_uncertainty = unc;
     analyze_inputs(NL, LIB, &job).unwrap().wns
@@ -173,4 +178,57 @@ fn io_budget_and_uncertainty_eat_slack() {
         (base - with_unc - 0.3).abs() < 1e-6,
         "uncertainty 0.3ns -> 0.3ns less slack"
     );
+}
+
+// ── an unconstrained input port is not a timing start point ──────────────────────────
+
+/// A port with no declared arrival starts **no path**, the way a tie cell does.
+///
+/// OpenSTA reports such a path only under `report_checks -unconstrained`; it is not in
+/// WNS/WHS. This engine used to seed every input port from a job-level default instead,
+/// which invents a launch at time zero — invisible on setup, where a whole period absorbs
+/// it, and on hold it manufactures a violation the size of the capture clock's insertion
+/// delay plus uncertainty. The same argument is already written into the tie-cell handling
+/// in `sta.rs`, for the same reason.
+#[test]
+fn an_undeclared_input_port_starts_no_timed_path() {
+    use vyges_sta_si::engine::analyze_inputs;
+    let declared = {
+        let mut j = base_job();
+        j.input_delay = 0.0;
+        j.input_delay_declared = true;
+        analyze_inputs(NL, LIB, &j).unwrap()
+    };
+    let undeclared = {
+        let mut j = base_job();
+        j.input_delay = 0.0;
+        j.input_delay_declared = false;
+        analyze_inputs(NL, LIB, &j).unwrap()
+    };
+
+    assert!(
+        declared.endpoints > 0,
+        "the fixture must have a port-driven endpoint for this to test anything"
+    );
+    assert!(
+        undeclared.endpoints < declared.endpoints,
+        "an undeclared port must drop its endpoints: declared {} vs undeclared {}",
+        declared.endpoints,
+        undeclared.endpoints
+    );
+}
+
+/// Declaring the arrival as **0** is not the same as not declaring it.
+///
+/// The distinction is the whole point — a job that says `input_delay: 0.0` means "the data
+/// is there at the clock edge", and a job that says nothing means "this port is not
+/// constrained". Collapsing the two is what produced the false hold violations.
+#[test]
+fn zero_is_a_declaration_and_absence_is_not() {
+    let mut j = base_job();
+    j.input_delay = 0.0;
+    j.input_delay_declared = false;
+    assert_eq!(j.input_delay_for("anything"), None);
+    j.input_delay_declared = true;
+    assert_eq!(j.input_delay_for("anything"), Some(0.0));
 }

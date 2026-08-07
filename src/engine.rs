@@ -54,6 +54,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         input_slew: 0.02,
         output_load: 0.005,
         input_delay: 0.0,
+        input_delay_declared: true,
         output_delay: 0.0,
         io_input_delays: vec![],
         io_output_delays: vec![],

@@ -10,3 +10,7 @@ clock:       clk 1.0      # port + period (ns)
 input_slew:  0.02         # ns
 output_load: 0.005        # pF at the primary output
 late_derate: 1.0          # OCV late derate on cell delays
+# Declared so port `a` is a timing start point. Without it the port is UNCONSTRAINED and
+# starts no path — matching OpenSTA — and this fixture's single endpoint disappears, which
+# would leave the golden asserting `endpoints: 0`.
+input_delay: 0.0

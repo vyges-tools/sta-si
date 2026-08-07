@@ -59,6 +59,7 @@ const NL: &str =
 
 fn job(clocks: Vec<(String, String, f64)>) -> StaJob {
     StaJob {
+        input_delay_declared: true,
         design: "mc".into(),
         netlist: "x".into(),
         libs: vec!["x".into()],

@@ -84,6 +84,7 @@ const NL_BOTH_DELAYED: &str =
 
 fn job() -> StaJob {
     StaJob {
+        input_delay_declared: true,
         design: "sk".into(),
         netlist: "x".into(),
         libs: vec!["x".into()],

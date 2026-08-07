@@ -7,3 +7,7 @@ lib:         tie.lib
 clock:       clk 2.0
 input_slew:  0.02
 output_load: 0.005
+# Declared so the primary inputs are timing start points. Without it they are
+# UNCONSTRAINED and start no path at all — matching OpenSTA — which would make this
+# fixture's constant-propagation assertions vacuous rather than passing.
+input_delay: 0.0

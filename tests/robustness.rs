@@ -92,6 +92,7 @@ const NL: &str = "module top ( clk, rst_n, q ); input clk, rst_n; output q; wire
 
 fn job() -> StaJob {
     StaJob {
+        input_delay_declared: true,
         design: "top".into(),
         netlist: "x".into(),
         libs: vec!["x".into()],

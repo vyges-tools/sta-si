@@ -60,6 +60,7 @@ const NL: &str = "module seq ( clk, y ); input clk; output y; wire q1, n1;\n\
 
 fn job(period: f64) -> StaJob {
     StaJob {
+        input_delay_declared: true,
         design: "seq".into(),
         netlist: "x".into(),
         libs: vec!["x".into()],

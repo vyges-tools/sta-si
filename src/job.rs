@@ -58,6 +58,15 @@ pub struct StaJob {
     // is the default arrival at primary inputs; `output_delay` the external delay
     // that eats into the period at primary outputs. Per-port entries override.
     pub input_delay: f64,
+    /// Whether an arrival was actually **declared** for ports the SDC does not name
+    /// individually — by a job `input_delay:` key or an SDC default `set_input_delay`.
+    ///
+    /// A port with no declared arrival is **unconstrained**: it has no timing start point,
+    /// so no path may begin there. Seeding it at 0 instead invents a launch at time zero,
+    /// which is invisible on setup (a whole period of slack) and manufactures hold
+    /// violations against a capture clock that has real insertion delay — measured at
+    /// -1.07 ns against OpenSTA's +0.88 on a block whose SDC constrained no inputs.
+    pub input_delay_declared: bool,
     pub output_delay: f64,
     pub io_input_delays: Vec<(String, f64)>,
     pub io_output_delays: Vec<(String, f64)>,
@@ -96,12 +105,17 @@ pub struct StaJob {
 impl StaJob {
     /// Resolve the input arrival for a primary input port (per-port override,
     /// else the default `input_delay`).
-    pub fn input_delay_for(&self, port: &str) -> f64 {
+    /// `None` means the port is **unconstrained** and must not start a timed path.
+    pub fn input_delay_for(&self, port: &str) -> Option<f64> {
         self.io_input_delays
             .iter()
             .find(|(p, _)| p == port)
             .map(|(_, d)| *d)
-            .unwrap_or(self.input_delay)
+            .or(if self.input_delay_declared {
+                Some(self.input_delay)
+            } else {
+                None
+            })
     }
 
     /// Resolve the external output delay for a primary output port.
@@ -247,6 +261,7 @@ impl StaJob {
             input_slew: num("input_slew", 0.05),
             output_load: num("output_load", 0.005),
             input_delay: num("input_delay", 0.0),
+            input_delay_declared: kv.contains_key("input_delay"),
             output_delay: num("output_delay", 0.0),
             io_input_delays: Vec::new(),
             io_output_delays: Vec::new(),
@@ -376,6 +391,7 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
     }
     if let Some(v) = in_def {
         job.input_delay = v + sdc.clock_latency;
+        job.input_delay_declared = true;
     }
     let mut out_def = None;
     for d in &sdc.output_delays {
