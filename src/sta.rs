@@ -1770,10 +1770,7 @@ fn build_report(
             .find_map(|n| clock_group_node.get(&n).copied())
     };
     let is_async = |lck: Option<usize>, cap: Option<usize>| -> bool {
-        match (
-            lck.and_then(|n| clock_group_of(n)),
-            cap.and_then(|n| clock_group_of(n)),
-        ) {
+        match (lck.and_then(clock_group_of), cap.and_then(clock_group_of)) {
             (Some(a), Some(b)) => a != b,
             _ => false,
         }

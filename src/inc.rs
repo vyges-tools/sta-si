@@ -309,10 +309,10 @@ impl IncGraph {
             // `ck_load_preserving`. The rule for this path is that anything it does not fully
             // understand is a miss, never a guess, so the condition is proved rather than the
             // old bail relaxed.
-            if new_cell.is_seq || new_cell.clock_pin.is_some() {
-                if !ck_load_preserving(old_cell, new_cell) {
-                    return None;
-                }
+            if (new_cell.is_seq || new_cell.clock_pin.is_some())
+                && !ck_load_preserving(old_cell, new_cell)
+            {
+                return None;
             }
             let iref = nl.insts.iter().find(|i| &i.name == inst)?;
             for (pin, net) in &iref.conns {

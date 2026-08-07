@@ -64,7 +64,7 @@ fn iopath_delays_are_the_timers_own_numbers() {
     let out = sdf::emit("top", &nl, &lib, Some(&sp), &t);
 
     let cell = lib.cells.get("INV").expect("INV");
-    let o = cell.outputs().into_iter().next().expect("an output pin");
+    let o = cell.outputs().next().expect("an output pin");
     let arc = o.arcs.first().expect("an arc");
     let islew = t.slew(t.pin("g2/A").expect("g2/A"));
     let load = t.load(t.pin("g2/Y").expect("g2/Y"));

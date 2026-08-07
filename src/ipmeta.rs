@@ -66,7 +66,7 @@ fn as_arr(v: Option<&Value>) -> &[Value] {
 
 impl IpMeta {
     pub fn parse(text: &str) -> Result<IpMeta, MetaError> {
-        let root = vyges_loom::json::parse(text).map_err(|e| MetaError(format!("{e}")))?;
+        let root = vyges_loom::json::parse(text).map_err(|e| MetaError(e.to_string()))?;
         let mut m = IpMeta::default();
 
         for d in as_arr(get(&root, "clock_domains")) {
