@@ -18,16 +18,16 @@ use vyges_sta_si::job::StaJob;
 use vyges_sta_si::sta::TimingReport;
 
 const USAGE: &str = "\
-vyges-sta-si — sign-off static timing analysis with signal integrity
+vyges loom sta-si — sign-off static timing analysis with signal integrity
 
 usage:
-  vyges-sta-si run      JOB    [-o OUT] [--json] [--fail-on-violation] [--sdf FILE]
-  vyges-sta-si sdc-lint JOB    [-o OUT] [--json] [--fail-on-violation]
-                               (a job with `metadata: vyges-metadata.json` also checks the
-                                SDC against the IP's declared clock_domains)
-  vyges-sta-si check    JOB
-  vyges-sta-si demo            [-o OUT] [--json]
-  vyges-sta-si tcl      SCRIPT [-o OUT] [--json] [--fail-on-violation]   (experimental)
+  vyges loom sta-si run      JOB    [-o OUT] [--json] [--fail-on-violation] [--sdf FILE]
+  vyges loom sta-si sdc-lint JOB    [-o OUT] [--json] [--fail-on-violation]
+                                    (a job with `metadata: vyges-metadata.json` also checks the
+                                     SDC against the IP's declared clock_domains)
+  vyges loom sta-si check    JOB
+  vyges loom sta-si demo            [-o OUT] [--json]
+  vyges loom sta-si tcl      SCRIPT [-o OUT] [--json] [--fail-on-violation]   (experimental)
 
 `sdc-lint` checks the SDC for completeness/consistency (unconstrained I/O, a clock with
 no period, duplicate clocks, a clock on a port the design lacks) — independent of timing.
