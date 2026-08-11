@@ -31,6 +31,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::liberty::{Dir, Lib};
+use crate::names::instance_of;
 use crate::netlist::Netlist;
 use crate::sdc::Sdc;
 
@@ -587,11 +588,7 @@ impl Graph {
 
     /// `inst/pin` paths resolve on the instance half.
     fn knows(&self, obj: &str) -> bool {
-        self.known.contains(obj)
-            || obj
-                .rsplit_once('/')
-                .map(|(i, _)| self.known.contains(i))
-                .unwrap_or(false)
+        self.known.contains(obj) || self.known.contains(instance_of(obj))
     }
 
     fn net_at(&self, inst: usize, pin: &str) -> Option<&str> {
@@ -629,7 +626,7 @@ impl Graph {
 
     /// The nets an SDC object launches from: a port is itself, an instance is its outputs.
     fn start_nets(&self, obj: &str) -> Vec<String> {
-        let base = obj.rsplit_once('/').map(|(i, _)| i).unwrap_or(obj);
+        let base = instance_of(obj);
         if let Some(&i) = self.inst_index.get(base) {
             return self.out_pins[i]
                 .iter()
@@ -672,7 +669,7 @@ impl Graph {
 
     /// Is `to` reached by any timing path — walking back to a register or a primary input?
     fn captures_anything(&self, to: &str) -> bool {
-        let base = to.rsplit_once('/').map(|(i, _)| i).unwrap_or(to);
+        let base = instance_of(to);
         // Start from the object's input nets (an instance) or the net itself (a port).
         let mut stack: Vec<String> = match self.inst_index.get(base) {
             Some(&i) => self.conns[i]
@@ -715,7 +712,7 @@ impl Graph {
     /// Is there a structural path from `from` to `to`? Forward through combinational logic,
     /// stopping at sequential cells — which is what a timing path is.
     fn reaches(&self, from: &str, to: &str) -> bool {
-        let target_base = to.rsplit_once('/').map(|(i, _)| i).unwrap_or(to);
+        let target_base = instance_of(to);
         let target_inst = self.inst_index.get(target_base).copied();
         let mut seen: BTreeSet<String> = BTreeSet::new();
         let mut stack = self.start_nets(from);

@@ -31,6 +31,7 @@ use std::collections::{BTreeMap, HashMap};
 use crate::inc::{HoldRec, InEdge, IncGraph, IncState, IncTopo, Lanes, SetupRec};
 use crate::job::{ExcKind, StaJob};
 use crate::liberty::{Arc, Constraint, Dir, Lib};
+use crate::names::{instance_of, split_inst_pin};
 use crate::netlist::Netlist;
 use crate::spef::Spef;
 
@@ -92,27 +93,6 @@ pub(crate) fn is_power_pin(pin: &str) -> bool {
 
 /// Interpolate an AOCV derate from a `(stages, derate)` table at `depth`, clamping
 /// past the table ends. Empty table -> 1.0 (no derate).
-/// Split an `inst/pin` object reference into `(instance, pin)` — at the **last** separator.
-///
-/// A flattened netlist keeps the hierarchy in the INSTANCE name: synthesis writes `core/u_div`
-/// as one escaped identifier, so `core/u_div/Q` is pin `Q` of instance `core/u_div`, not pin
-/// `u_div/Q` of instance `core`. An SDC names the same object the same way.
-///
-/// Splitting at the first separator yields an instance name that matches no node in the graph,
-/// and the failure is silent in the worst direction: the clock is never attached, the clock
-/// group never applies, the false path never matches — and the design is reported as if the
-/// constraint had never been written. Nothing in the output distinguishes that from an SDC that
-/// really said nothing.
-fn split_inst_pin(obj: &str) -> Option<(&str, &str)> {
-    obj.rsplit_once('/')
-}
-
-/// The instance part of an `inst/pin` label. A label with no pin (a primary port) is its own
-/// instance name.
-fn inst_of_label(label: &str) -> &str {
-    split_inst_pin(label).map(|(i, _)| i).unwrap_or(label)
-}
-
 fn aocv_lookup(tbl: &[(f64, f64)], depth: f64) -> f64 {
     if tbl.is_empty() {
         return 1.0;
@@ -1866,7 +1846,7 @@ fn build_report(
     };
 
     // timing exceptions, matched on launch/capture instance (or port) names.
-    let inst_of = |node: usize| inst_of_label(&labels[node]).to_string();
+    let inst_of = |node: usize| instance_of(&labels[node]).to_string();
     // Membership, not equality: an exception may name a whole bus on either side, and the
     // rule for that lives once in `Exception::covers` rather than being re-derived here.
     let match_exc = |ln: &str, cn: &str| job.exceptions.iter().find(|e| e.covers(ln, cn));
