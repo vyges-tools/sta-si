@@ -183,3 +183,42 @@ fn a_missing_side_still_means_any() {
     assert!(e.covers("a", "anything at all"), "-to absent means any");
     assert!(!e.covers("b", "anything at all"), "-from still constrains");
 }
+
+// A FLATTENED NETLIST PUTS THE HIERARCHY IN THE INSTANCE NAME. Synthesis writes `core/r1` as
+// an escaped identifier, and an SDC names the same object the same way. Everything downstream
+// then has to split `core/r1/D` at the LAST separator to get back the instance — splitting at
+// the first yields `core`, which matches no exception and no clock, so the constraint silently
+// does not apply and the path stays timed.
+const NL_HIER: &str = "module ex ( clk, din, dout ); input clk, din; output dout; wire q1, n1;\n\
+                       DFF \\core/r1 ( .CK(clk), .D(din), .Q(q1) );\n\
+                       INV \\core/g1 ( .A(q1),   .Y(n1) );\n\
+                       DFF \\core/r2 ( .CK(clk), .D(n1),  .Q(dout) );\n\
+                       endmodule";
+
+#[test]
+fn an_exception_applies_to_a_hierarchical_instance_name() {
+    let base = analyze_inputs(NL_HIER, LIB, &job(vec![])).unwrap();
+    assert_eq!(
+        base.worst_endpoint, "core/r2/D",
+        "base worst {}",
+        base.worst_endpoint
+    );
+    assert!(base.wns < 0.0, "base should violate, wns={}", base.wns);
+
+    let fp = analyze_inputs(
+        NL_HIER,
+        LIB,
+        &job(vec![exc(ExcKind::FalsePath, "core/r1", "core/r2")]),
+    )
+    .unwrap();
+    assert_ne!(
+        fp.worst_endpoint, "core/r2/D",
+        "the false path must drop core/r2/D"
+    );
+    assert!(
+        fp.wns > 0.0,
+        "with core/r1 -> core/r2 false, the design meets: wns={}",
+        fp.wns
+    );
+    assert_eq!(fp.endpoints, base.endpoints - 1, "one fewer setup endpoint");
+}

@@ -136,3 +136,73 @@ fn cross_domain_is_tighter_than_either_single_domain() {
         one4.wns
     );
 }
+
+// A CLOCK DECLARED ON A HIERARCHICAL PIN. Synthesis flattens `core/u_div` into one escaped
+// identifier, so a generated clock on that divider's output is `core/u_div/Q` — and every SDC
+// writes it that way. Resolving it needs the split at the LAST separator; at the first it names
+// instance `core`, matches no node, and the clock quietly never attaches to anything.
+const NL_HIER: &str =
+    "module mc ( clk1, din, dout ); input clk1, din; output dout; wire clk2, dq, q1, n1;\n\
+     DFF \\core/u_div ( .CK(clk1), .D(dq),  .Q(clk2) );\n\
+     INV \\core/g0 ( .A(clk2), .Y(dq) );\n\
+     DFF \\core/r1 ( .CK(clk1), .D(din), .Q(q1) );\n\
+     INV \\core/g1 ( .A(q1),   .Y(n1) );\n\
+     DFF \\core/r2 ( .CK(clk2), .D(n1),  .Q(dout) );\n\
+     endmodule";
+
+#[test]
+fn a_clock_declared_on_a_hierarchical_pin_actually_applies() {
+    // The whole test is: does declaring it change anything? A clock that fails to resolve is
+    // not an error — every flop on it silently falls back to the primary period, so the report
+    // looks complete and the periods in it are not the ones that were asked for.
+    let fast = analyze_inputs(
+        NL_HIER,
+        LIB,
+        &job(vec![
+            ck("clk1", 10.0),
+            ("clk2".into(), "core/u_div/Q".into(), 4.0),
+        ]),
+    )
+    .unwrap();
+    let slow = analyze_inputs(
+        NL_HIER,
+        LIB,
+        &job(vec![
+            ck("clk1", 10.0),
+            ("clk2".into(), "core/u_div/Q".into(), 20.0),
+        ]),
+    )
+    .unwrap();
+    assert!(
+        (fast.wns - slow.wns).abs() > 1.0,
+        "the declared period must reach the flops it clocks: wns {} vs {}",
+        fast.wns,
+        slow.wns
+    );
+}
+
+#[test]
+fn async_clock_groups_apply_to_a_hierarchically_named_clock_source() {
+    let clocks = vec![
+        ck("clk1", 10.0),
+        ("clk2".into(), "core/u_div/Q".into(), 4.0),
+    ];
+    let timed = analyze_inputs(NL_HIER, LIB, &job(clocks.clone())).unwrap();
+    assert_eq!(
+        timed.worst_endpoint, "core/r2/D",
+        "the cross-domain path is the worst while it is still timed"
+    );
+
+    let mut grouped = job(clocks);
+    grouped.async_groups = vec![vec!["clk1".into()], vec!["clk2".into()]];
+    let cut = analyze_inputs(NL_HIER, LIB, &grouped).unwrap();
+    assert_ne!(
+        cut.worst_endpoint, "core/r2/D",
+        "declared asynchronous, the cross-domain setup check is cut"
+    );
+    assert_eq!(
+        cut.endpoints,
+        timed.endpoints - 1,
+        "exactly one endpoint leaves the setup analysis"
+    );
+}

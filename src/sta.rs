@@ -92,6 +92,27 @@ pub(crate) fn is_power_pin(pin: &str) -> bool {
 
 /// Interpolate an AOCV derate from a `(stages, derate)` table at `depth`, clamping
 /// past the table ends. Empty table -> 1.0 (no derate).
+/// Split an `inst/pin` object reference into `(instance, pin)` — at the **last** separator.
+///
+/// A flattened netlist keeps the hierarchy in the INSTANCE name: synthesis writes `core/u_div`
+/// as one escaped identifier, so `core/u_div/Q` is pin `Q` of instance `core/u_div`, not pin
+/// `u_div/Q` of instance `core`. An SDC names the same object the same way.
+///
+/// Splitting at the first separator yields an instance name that matches no node in the graph,
+/// and the failure is silent in the worst direction: the clock is never attached, the clock
+/// group never applies, the false path never matches — and the design is reported as if the
+/// constraint had never been written. Nothing in the output distinguishes that from an SDC that
+/// really said nothing.
+fn split_inst_pin(obj: &str) -> Option<(&str, &str)> {
+    obj.rsplit_once('/')
+}
+
+/// The instance part of an `inst/pin` label. A label with no pin (a primary port) is its own
+/// instance name.
+fn inst_of_label(label: &str) -> &str {
+    split_inst_pin(label).map(|(i, _)| i).unwrap_or(label)
+}
+
 fn aocv_lookup(tbl: &[(f64, f64)], depth: f64) -> f64 {
     if tbl.is_empty() {
         return 1.0;
@@ -1187,9 +1208,7 @@ fn build_report(
     let mut net_drv_ip: Vec<Option<(String, String)>> = vec![None; nn]; // driver (inst, pin)
     let mut net_cpl: Vec<Vec<(usize, f64)>> = vec![Vec::new(); nn]; // (aggressor net idx, Cc)
     let ip_of = |node: usize| -> Option<(String, String)> {
-        labels[node]
-            .split_once('/')
-            .map(|(a, b)| (a.to_string(), b.to_string()))
+        split_inst_pin(&labels[node]).map(|(a, b)| (a.to_string(), b.to_string()))
     };
     for (name, net) in &nets {
         let i = net_idx[name.as_str()];
@@ -1756,7 +1775,7 @@ fn build_report(
     };
     let mut clock_src: HashMap<usize, f64> = HashMap::new();
     for (src, per) in &eff_clocks {
-        let node = match src.split_once('/') {
+        let node = match split_inst_pin(src) {
             Some((inst, pin)) => key2idx.get(&pin_key(inst, pin)).copied(),
             None => key2idx.get(&port_key(src)).copied(),
         };
@@ -1789,7 +1808,7 @@ fn build_report(
             let Some(&gi) = group_of_name.get(name.as_str()) else {
                 continue;
             };
-            let node = match src.split_once('/') {
+            let node = match split_inst_pin(src) {
                 Some((inst, pin)) => key2idx.get(&pin_key(inst, pin)).copied(),
                 None => key2idx.get(&port_key(src)).copied(),
             };
@@ -1847,7 +1866,7 @@ fn build_report(
     };
 
     // timing exceptions, matched on launch/capture instance (or port) names.
-    let inst_of = |node: usize| labels[node].split('/').next().unwrap_or("").to_string();
+    let inst_of = |node: usize| inst_of_label(&labels[node]).to_string();
     // Membership, not equality: an exception may name a whole bus on either side, and the
     // rule for that lives once in `Exception::covers` rather than being re-derived here.
     let match_exc = |ln: &str, cn: &str| job.exceptions.iter().find(|e| e.covers(ln, cn));
