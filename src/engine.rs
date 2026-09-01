@@ -164,7 +164,7 @@ pub fn analyze_job_opts(
         return Err(StaError::Parse("no cells in any .lib".into()));
     }
     let spef = match &job.spef {
-        Some(p) => Some(Spef::load(&job.resolve(p)).map_err(|e| StaError::Parse(e.to_string()))?),
+        Some(p) => Some(load_spef(p, job, &nl)?),
         None => None,
     };
     emit_input_coverage(job, &nl, &lib);
@@ -172,6 +172,20 @@ pub fn analyze_job_opts(
         emit_spef_coverage(job, &nl, s);
     }
     sta::analyze(&nl, &lib, job, spef.as_ref())
+}
+
+/// Read a SPEF and put it into the netlist's own spelling of net names.
+///
+/// ⛔ **The two files can name the same net differently and nothing complains.** The Verilog reader
+/// reports a net tied to a port by `assign port = net;` under the PORT's name; OpenROAD's SPEF for
+/// a routed sky130 block names it by the local wire. Every such net was looked up, missed and timed
+/// as **ideal wire** — 53 nets and 147 coupling references on that block, showing up only as
+/// optimistic slack. The rename happens HERE, before anything reads the file, so every consumer
+/// (timing, SI, SDF) joins on the same names rather than each having to remember.
+fn load_spef(path: &str, job: &StaJob, nl: &netlist::Netlist) -> Result<Spef, StaError> {
+    let mut spef = Spef::load(&job.resolve(path)).map_err(|e| StaError::Parse(e.to_string()))?;
+    spef.rename_to_design(nl);
+    Ok(spef)
 }
 
 /// Emit an SDF back-annotation file for the job's design (loads the same Liberty
@@ -196,7 +210,7 @@ pub fn sdf_for_job_opts(
         return Err(StaError::Parse("no cells in any .lib".into()));
     }
     let spef = match &job.spef {
-        Some(p) => Some(Spef::load(&job.resolve(p)).map_err(|e| StaError::Parse(e.to_string()))?),
+        Some(p) => Some(load_spef(p, job, &nl)?),
         None => None,
     };
     // Build the timer and emit from IT: the SDF must be a serialization of the analysis,
