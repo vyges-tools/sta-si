@@ -13,7 +13,12 @@ library(clk_edge) {
     area : 3.0;
     pin(A) { direction : input; capacitance : 0.001; }
     pin(X) { direction : output; function : "A";
-      timing () { related_pin : "A"; timing_type : combinational;
+      /* Declared positive_unate BECAUSE REAL CLOCK BUFFERS DO -- sky130's clkbuf cells all
+         state `timing_sense : "positive_unate"`. An arc that omits it parses as non_unate,
+         where a rising output may be caused by a falling input, and the two lanes mix
+         through the clock tree for a reason that has nothing to do with the rule under
+         test. Leaving it out here made this fixture measure the wrong thing. */
+      timing () { related_pin : "A"; timing_sense : positive_unate; timing_type : combinational;
         cell_rise(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.30, 0.30", "0.30, 0.30"); }
         cell_fall(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.10, 0.10", "0.10, 0.10"); }
         rise_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.02, 0.02", "0.02, 0.02"); }

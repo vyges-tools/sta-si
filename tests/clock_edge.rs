@@ -54,11 +54,10 @@ fn the_fixture_really_has_an_asymmetric_clock_buffer() {
     );
 }
 
-/// ⛔ FAILS TODAY — this is the attributed residual, pinned so the fix is measured.
-/// Un-ignore it when the clock-edge selection lands; it should then pass unchanged.
+/// ✅ The rule, landed. Two guards make it hold, and removing EITHER brings the failure
+/// back: the sequential arc must be launched by one clock edge, and the collapse at a
+/// clock pin must report that edge instead of an extremum.
 #[test]
-#[ignore = "attributed defect: the early pass reports the FALLING edge at a clock pin. \
-            Un-ignore when clock-edge selection replaces the min-over-lanes collapse."]
 fn a_clock_pin_has_one_arrival_when_nothing_derates_it() {
     let t = timer();
     let ck = t.pin("r1/CLK").expect("r1/CLK is a node");
@@ -75,4 +74,23 @@ fn a_clock_pin_has_one_arrival_when_nothing_derates_it() {
          spread of {} ns is invented by the per-lane collapse.",
         late - early
     );
+}
+
+/// The other half, and the one that reaches the DATA path: a flop's CK->Q may be launched
+/// by ONE clock edge. sky130 declares no `timing_sense` on a `rising_edge` arc, so it
+/// parses as non_unate and without the guard the CLOCK's falling edge launches Q — which
+/// is where 0.1493 ns of the 0.3499 ns `fft_top` gap came from, inherited rather than
+/// generated. Q must therefore start from the CK RISE at 0.60, not the fall at 0.20.
+#[test]
+fn a_flop_is_launched_only_by_its_own_clock_edge() {
+    let t = timer();
+    let q = t.pin("r1/Q").expect("r1/Q is a node");
+    // CK rise 0.60 + the flop's 0.20 CK->Q, on both passes.
+    for (what, got) in [("late", t.arrival(q)), ("early", t.arrival_min(q))] {
+        assert!(
+            (got - 0.80).abs() < 1e-9,
+            "{what} arrival at r1/Q should launch from the CK RISE (0.60 + 0.20 = 0.80), \
+             got {got}; 0.40 means the clock's FALLING edge launched the flop"
+        );
+    }
 }

@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::inc::{HoldRec, InEdge, IncGraph, IncState, IncTopo, Lanes, SetupRec};
 use crate::job::{ExcKind, StaJob};
-use crate::liberty::{Arc, Constraint, Dir, Lib};
+use crate::liberty::{Arc, ClkEdge, Constraint, Dir, Lib};
 use crate::names::{instance_of, split_inst_pin};
 use crate::netlist::Netlist;
 use crate::spef::Spef;
@@ -1001,6 +1001,9 @@ fn build_report(
     // driven by one can never switch, so it carries no timing — see the edge build below.
     let mut const_driver: Vec<bool> = Vec::new();
     let mut ck_node_list: Vec<usize> = Vec::new(); // nodes that are clock (CK) pins
+    // (CK node, lane of the edge that triggers it) — see the push site for why Liberty's
+    // CK->Q arc is where that lives.
+    let mut ck_lane_list: Vec<(usize, Option<usize>)> = Vec::new();
     for inst in &nl.insts {
         // physical-only cells (fill/decap/tap/antenna) have no connections and no
         // timing view — skip them rather than erroring on a missing lib cell.
@@ -1046,6 +1049,19 @@ fn build_report(
                     nref.load += cap;
                     if cell.pins[pin].clock {
                         ck_node_list.push(idx); // clock pin — root of insertion-delay paths
+                        // WHICH clock edge triggers this register. Liberty states it on the
+                        // CK->Q arc (`timing_type : rising_edge` / `falling_edge`), which is
+                        // the only place it is written down — `timing_sense` cannot supply
+                        // it and sky130 omits that on these arcs anyway. Lane 0 is rise,
+                        // lane 1 is fall.
+                        let lane = cell
+                            .pins
+                            .values()
+                            .flat_map(|p| p.arcs.iter())
+                            .find(|a| a.related_pin == *pin && a.clk_edge.is_some())
+                            .and_then(|a| a.clk_edge)
+                            .map(|e| usize::from(e == ClkEdge::Fall));
+                        ck_lane_list.push((idx, lane));
                     }
                     if cell.is_seq {
                         if !cell.pins[pin].setup.is_empty() {
@@ -1305,6 +1321,15 @@ fn build_report(
     for &i in &ck_node_list {
         is_ck[i] = true;
     }
+    // A clock pin has exactly ONE arrival: the time its triggering edge gets there. Early
+    // and late may differ only because something DERATES them, never because they picked a
+    // different edge. `None` leaves the old extremum behaviour for a clock pin whose cell
+    // declares no sequential arc — a gate we cannot attribute an edge to, where guessing
+    // one would be worse than the pessimism.
+    let mut ck_lane = vec![None::<usize>; n];
+    for &(i, l) in &ck_lane_list {
+        ck_lane[i] = l;
+    }
 
     // ---- per-lane launch times -------------------------------------------
     // The main pass measures every delay *from the launching clock edge*, so both
@@ -1447,6 +1472,19 @@ fn build_report(
                                 (&arc.cell_fall, &arc.fall_transition)
                             };
                             for il in 0..2 {
+                                // A SEQUENTIAL arc is launched by ONE clock edge, named by
+                                // Liberty as `timing_type : rising_edge` / `falling_edge`.
+                                // sky130 declares no `timing_sense` on these, so they parse
+                                // as non_unate and WITHOUT this guard both clock edges
+                                // launch the flop — which is how the falling edge of the
+                                // clock reaches the data path on a min-delay pass and makes
+                                // the launch look ~0.2 ns early. `ol` still ranges over both:
+                                // one clock edge can drive Q either way.
+                                if let Some(e) = arc.clk_edge {
+                                    if il != usize::from(e == ClkEdge::Fall) {
+                                        continue;
+                                    }
+                                }
                                 // does input edge `il` drive output edge `ol`?
                                 let feeds = match arc.sense.as_str() {
                                     "positive_unate" => il == ol,
@@ -1552,7 +1590,12 @@ fn build_report(
         let mut slew_c = vec![input_slew; n];
         let mut from_c: Vec<Option<usize>> = vec![None; n];
         for v in 0..n {
-            let l = pick(arr[v]);
+            // At a CLOCK pin the lane is not ours to choose by extremum: `create_clock`
+            // fixes the launching edge, and a reference timer carries that edge's own
+            // arrival (OpenSTA tags clock paths with a `ClockEdge`; `Search::clkPathArrival`
+            // returns that path's arrival and never minimises over rise and fall). Picking
+            // `min` here made the early pass report the FALLING edge as the launch time.
+            let l = ck_lane[v].unwrap_or_else(|| pick(arr[v]));
             arrival[v] = arr[v][l];
             slew_c[v] = slew[v][l];
             from_c[v] = from[v][l];
