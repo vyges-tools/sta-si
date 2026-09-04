@@ -146,3 +146,33 @@ fn a_job_whose_clock_source_resolves_to_nothing_still_checks_its_registers() {
         "no clock source resolved: the rule must stand down rather than silence the design"
     );
 }
+
+/// The other half of the same rule: a register on an undeclared clock does not LAUNCH.
+///
+/// `Search.cc`'s `regClkToQ` branch propagates only when `from_tag->isClock()` and sets
+/// `to_tag = nullptr` otherwise — "Do not propagate paths from input ports with default
+/// input arrival clk thru CLK->Q edges". So nothing leaves r2 at all, and the output it
+/// drives is not an endpoint.
+///
+/// ⛔ Leaving this out was worth **83 of 790 setup endpoints out by 8.9–12.6 ns** on
+/// `fft_top` — the undeclared domain's 12 ns input delay reaching the data cone of
+/// registers that ARE declared. Setup rms 3.6447 where hold was 0.033, and WNS was 1.9 %
+/// out and showed none of it.
+#[test]
+fn a_register_on_an_undeclared_clock_does_not_launch_either() {
+    let t = timer();
+    let q = t.pin("r2/Q").expect("r2/Q is a node");
+    assert!(
+        !t.setup_arrival(q).is_finite(),
+        "r2 is clocked by the undeclared pclk_i and must launch nothing, got {}",
+        t.setup_arrival(q)
+    );
+    let out = t.pin("pq_o").expect("pq_o is a node");
+    assert!(
+        t.slack(out).is_none(),
+        "and the output it drives is then not a timed endpoint"
+    );
+    // the declared side still launches
+    let q1 = t.pin("r1/Q").unwrap();
+    assert!(t.setup_arrival(q1).is_finite(), "r1 is on the DECLARED clock and must launch");
+}

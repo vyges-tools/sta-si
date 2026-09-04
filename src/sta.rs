@@ -1424,6 +1424,71 @@ fn build_report(
     // `seed_l` gives each source node its per-lane start time; `block_seq` stops
     // propagation at a flop's clock pin, which is what keeps the clock-launched pass
     // (below) free of paths a flop launched.
+    let eff_clocks: Vec<(String, f64)> = if job.clocks.is_empty() {
+        vec![(job.clock_port.clone(), period)]
+    } else {
+        job.clocks
+            .iter()
+            .map(|(_, src, per)| (src.clone(), *per))
+            .collect()
+    };
+    let mut clock_src: HashMap<usize, f64> = HashMap::new();
+    for (src, per) in &eff_clocks {
+        let node = match split_inst_pin(src) {
+            Some((inst, pin)) => key2idx.get(&pin_key(inst, pin)).copied(),
+            None => key2idx.get(&port_key(src)).copied(),
+        };
+        if let Some(nd) = node {
+            clock_src.insert(nd, *per);
+        }
+    }
+    // ---- is this register's clock pin reached by a DECLARED clock? ------
+    // OpenSTA seeds clock-tagged paths only at pins the SDC names as a clock source
+    // (`Sdc::isLeafPinClock` gating `seedClkArrivals` in `Search::seedArrival`) and
+    // propagates that tag forward; everything else starts as a DATA arrival via
+    // `seedInputArrival`. `VisitPathEnds::visitCheckEnd` then builds a setup / hold /
+    // recovery / removal `PathEndCheck` only for a target clock path whose
+    // `isClock()` is true — with none it leaves `check_clked` false and falls to
+    // `visitCheckEndUnclked`, which emits nothing but an explicit set_max_delay /
+    // set_min_delay. So a register clocked by a clock the SDC never declares carries
+    // NO check at all; it is an unconstrained endpoint, not a passing one.
+    //
+    // This walk is that tag propagation: forward from every declared clock source,
+    // stopping AT a CK pin exactly as the clock-launched pass does (`block_seq`
+    // above) — a CK->Q arc starts a new launch and does not carry the clock onward.
+    //
+    // Measured on fft_top, whose SDC declares clk_i but not pclk_i: 194 of 730 CK
+    // pins arrive at ~12.8 ns because pclk_i's 12 ns `set_input_delay` propagates
+    // through the clock buffers and was then used as a CAPTURE CLOCK ARRIVAL. That
+    // put WHS at -1.0682 where OpenSTA and sign-off both say +0.88, and drove 599
+    // false delay-cell insertions into a design that is already hold-clean.
+    let mut clock_reached = vec![false; n];
+    {
+        let mut stack: Vec<usize> = clock_src.keys().copied().collect();
+        for &s in &stack {
+            clock_reached[s] = true;
+        }
+        while let Some(u) = stack.pop() {
+            if is_ck[u] {
+                continue; // the clock edge stops here; CK->Q is a new launch
+            }
+            for e in &out_edges[u] {
+                if !clock_reached[e.to] {
+                    clock_reached[e.to] = true;
+                    stack.push(e.to);
+                }
+            }
+        }
+    }
+    // Guarded on having RESOLVED at least one declared clock source. With none we
+    // cannot tell a missing `create_clock` from a clock port this model failed to
+    // locate, and declining every check would turn that model gap into a silently
+    // clean design — the exact failure this rule exists to prevent.
+    let clock_declared = !clock_src.is_empty();
+    let unclocked_ck = |ck: Option<usize>| -> bool {
+        clock_declared && ck.is_some_and(|c| !clock_reached[c])
+    };
+
     let relax = |nd: &[f64],
                  ns: &[f64],
                  late: bool,
@@ -1533,6 +1598,24 @@ fn build_report(
                                 // one clock edge can drive Q either way.
                                 if let Some(e) = arc.clk_edge {
                                     if il != usize::from(e == ClkEdge::Fall) {
+                                        continue;
+                                    }
+                                    // ⛔ AND A DATA ARRIVAL AT A CLOCK PIN DOES NOT LAUNCH
+                                    // THE FLOP. `Search.cc`'s `regClkToQ` branch propagates
+                                    // only when `from_tag->isClock()` — its comment is
+                                    // literally "Do not propagate paths from input ports
+                                    // with default input arrival clk thru CLK->Q edges" —
+                                    // and otherwise sets `to_tag = nullptr`, so nothing
+                                    // leaves the flop at all.
+                                    //
+                                    // This is #88's other half. That rule stopped CHECKING
+                                    // registers on an undeclared clock; they went on
+                                    // LAUNCHING, carrying `pclk_i`'s 12 ns into the data
+                                    // cone of registers that ARE declared. Measured on
+                                    // fft_top: 83 of 790 setup endpoints out by 8.9–12.6 ns,
+                                    // setup rms 3.6447 against hold's 0.033 — and WNS,
+                                    // 1.9 % out, showed none of it.
+                                    if clock_declared && !clock_reached[u] {
                                         continue;
                                     }
                                 }
@@ -2173,70 +2256,6 @@ fn build_report(
     // Map each clock's source node to its period (a single-clock job synthesizes
     // one entry from clock_port/period_ns). A generated/divided clock is just an
     // entry whose source is an internal pin.
-    let eff_clocks: Vec<(String, f64)> = if job.clocks.is_empty() {
-        vec![(job.clock_port.clone(), period)]
-    } else {
-        job.clocks
-            .iter()
-            .map(|(_, src, per)| (src.clone(), *per))
-            .collect()
-    };
-    let mut clock_src: HashMap<usize, f64> = HashMap::new();
-    for (src, per) in &eff_clocks {
-        let node = match split_inst_pin(src) {
-            Some((inst, pin)) => key2idx.get(&pin_key(inst, pin)).copied(),
-            None => key2idx.get(&port_key(src)).copied(),
-        };
-        if let Some(nd) = node {
-            clock_src.insert(nd, *per);
-        }
-    }
-    // ---- is this register's clock pin reached by a DECLARED clock? ------
-    // OpenSTA seeds clock-tagged paths only at pins the SDC names as a clock source
-    // (`Sdc::isLeafPinClock` gating `seedClkArrivals` in `Search::seedArrival`) and
-    // propagates that tag forward; everything else starts as a DATA arrival via
-    // `seedInputArrival`. `VisitPathEnds::visitCheckEnd` then builds a setup / hold /
-    // recovery / removal `PathEndCheck` only for a target clock path whose
-    // `isClock()` is true — with none it leaves `check_clked` false and falls to
-    // `visitCheckEndUnclked`, which emits nothing but an explicit set_max_delay /
-    // set_min_delay. So a register clocked by a clock the SDC never declares carries
-    // NO check at all; it is an unconstrained endpoint, not a passing one.
-    //
-    // This walk is that tag propagation: forward from every declared clock source,
-    // stopping AT a CK pin exactly as the clock-launched pass does (`block_seq`
-    // above) — a CK->Q arc starts a new launch and does not carry the clock onward.
-    //
-    // Measured on fft_top, whose SDC declares clk_i but not pclk_i: 194 of 730 CK
-    // pins arrive at ~12.8 ns because pclk_i's 12 ns `set_input_delay` propagates
-    // through the clock buffers and was then used as a CAPTURE CLOCK ARRIVAL. That
-    // put WHS at -1.0682 where OpenSTA and sign-off both say +0.88, and drove 599
-    // false delay-cell insertions into a design that is already hold-clean.
-    let mut clock_reached = vec![false; n];
-    {
-        let mut stack: Vec<usize> = clock_src.keys().copied().collect();
-        for &s in &stack {
-            clock_reached[s] = true;
-        }
-        while let Some(u) = stack.pop() {
-            if is_ck[u] {
-                continue; // the clock edge stops here; CK->Q is a new launch
-            }
-            for e in &out_edges[u] {
-                if !clock_reached[e.to] {
-                    clock_reached[e.to] = true;
-                    stack.push(e.to);
-                }
-            }
-        }
-    }
-    // Guarded on having RESOLVED at least one declared clock source. With none we
-    // cannot tell a missing `create_clock` from a clock port this model failed to
-    // locate, and declining every check would turn that model gap into a silently
-    // clean design — the exact failure this rule exists to prevent.
-    let clock_declared = !clock_src.is_empty();
-    let unclocked_ck = |ck: Option<usize>| -> bool {
-        clock_declared && ck.is_some_and(|c| !clock_reached[c])
-    };
     // Say what was skipped. Leaving these endpoints out makes them vanish from
     // WNS/WHS, and an incomplete SDC must not read as a clean design, so the count
     // is on stderr — the same argument as the unconstrained-input-port note above.

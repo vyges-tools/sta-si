@@ -8,12 +8,15 @@
 # input_delay is declared (12 ns, as fft_top's SDC does) precisely so this cannot be
 # confused with the unconstrained-INPUT-PORT rule: every port here has an arrival, and
 # r2 must still go unchecked because its CLOCK is undeclared.
-# OUT OF SCOPE, deliberately left in: r2/Q still launches a path into the constrained
-# output pq_o, so the golden shows a setup violation there. That is not a defect of this
-# rule -- OpenSTA's arrival search crosses a reg CLK->Q arc too (`SearchPred2::searchThru`
-# blocks only timing-check edges), so the path genuinely exists. The rule declines the
-# four REGISTER checks, which is what was specified and measured; the output-delay side
-# is a separate question and is not claimed here.
+# r2 does not LAUNCH either, so pq_o is not an endpoint at all.
+#
+# This file used to carry a note saying the opposite -- that r2/Q still launches into pq_o
+# and that OpenSTA would too, because `SearchPred2::searchThru` blocks only timing-check
+# edges. That was the wrong rule. The search PREDICATE does allow the arc; the TAG rule in
+# `Search.cc`'s `regClkToQ` branch is what governs, and it propagates only when
+# `from_tag->isClock()`, setting `to_tag = nullptr` otherwise. Its comment says it plainly:
+# "Do not propagate paths from input ports with default input arrival clk thru CLK->Q
+# edges." A data arrival at a clock pin does not launch a flop.
 design:      undeclared_clk
 netlist:     undeclared_clk.v
 lib:         undeclared_clk.lib
