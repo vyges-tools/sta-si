@@ -1420,7 +1420,6 @@ fn build_report(
         slew_derate: th_all.slew_derate,
     };
     // `nd` = per-arc net delay, `ns` = per-arc degraded sink slew (0 = keep driver slew).
-    #[allow(clippy::type_complexity)]
     // `seed_l` gives each source node its per-lane start time; `block_seq` stops
     // propagation at a flop's clock pin, which is what keeps the clock-launched pass
     // (below) free of paths a flop launched.
@@ -1489,6 +1488,7 @@ fn build_report(
         clock_declared && ck.is_some_and(|c| !clock_reached[c])
     };
 
+    #[allow(clippy::type_complexity)]
     let relax = |nd: &[f64],
                  ns: &[f64],
                  late: bool,
