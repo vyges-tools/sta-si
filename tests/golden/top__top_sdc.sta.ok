@@ -5,23 +5,23 @@ STA report — design top
   clock clk  period 1.000 ns   xtalk_miller 2.00
   OCV: flat derate — late 1.050 / early 1.000   CRPR: on
   endpoints: 1
-  WNS: -0.0107 ns    TNS: -0.0107 ns    [VIOLATED]
+  WNS: -0.0106 ns    TNS: -0.0106 ns    [VIOLATED]
 
-  worst path to y  (slack -0.0107 ns):
+  worst path to y  (slack -0.0106 ns):
       arrival     slew   node
        0.1000   0.0200   a
        0.1000   0.0200   g1/A
        0.3220   0.0929   g1/Y
-       0.3295   0.0929   g2/A
+       0.3295   0.1078   g2/A
        0.6025   0.1100   g2/Y
-       0.6100   0.1100   g3/A
-       0.8107   0.0711   g3/Y
-       0.8107   0.0711   y
+       0.6099   0.1063   g3/A
+       0.8106   0.0711   g3/Y
+       0.8106   0.0711   y
 
-  achievable: ~1.011 ns → ~989.4 MHz   (target 1.000 ns → ~1000.0 MHz)
+  achievable: ~1.011 ns → ~989.5 MHz   (target 1.000 ns → ~1000.0 MHz)
 --- stderr ---
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 3 instance(s) of 1 master(s); 3 timed, 0 physical-only","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 1 cell(s) loaded, 1 used by the design","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-SPEF","raw_msg":"SPEF covers 2 of 4 design net(s) (50.0%); 2 net(s) in the file, all named","objects":["clock:clk"]}
-{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-SETUP","raw_msg":"setup violation at y: WNS -0.0107 ns (TNS -0.0107 ns over 1 endpoint(s))","objects":["net:y","clock:clk"]}
-{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-DONE","raw_msg":"sta complete: WNS -0.0107 ns, TNS -0.0107 ns, WHS inf ns — 1 violation(s)"}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-SETUP","raw_msg":"setup violation at y: WNS -0.0106 ns (TNS -0.0106 ns over 1 endpoint(s))","objects":["net:y","clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-DONE","raw_msg":"sta complete: WNS -0.0106 ns, TNS -0.0106 ns, WHS inf ns — 1 violation(s)"}

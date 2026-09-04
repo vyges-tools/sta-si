@@ -47,7 +47,7 @@ fn single_rc_step_response_is_069_rc() {
     assert!(slew > 0.0, "sink should have a finite slew, got {slew}");
 
     // Elmore (first moment) over-estimates: R·C = 1.0 ns
-    let elmore = rc.elmore("u1:Y", 0.0).expect("elmore");
+    let elmore = rc.elmore("u1:Y", 0.0, &std::collections::BTreeMap::new()).expect("elmore");
     let e = elmore.get("u2:A").copied().expect("sink elmore");
     assert!((e - 1.0).abs() < 1e-6, "Elmore should be 1.0 ns, got {e}");
     assert!(delay < e, "transient {delay} should be below Elmore {e}");

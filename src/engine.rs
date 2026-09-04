@@ -44,6 +44,7 @@ endmodule
 /// A built-in 2-inverter design analyzed offline (for `demo`).
 pub fn demo() -> (StaJob, TimingReport) {
     let job = StaJob {
+        rc_model: "elmore".into(),
         design: "demo".into(),
         netlist: "(builtin)".into(),
         libs: vec!["(builtin)".into()],

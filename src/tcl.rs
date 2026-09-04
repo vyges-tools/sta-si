@@ -232,6 +232,7 @@ fn base_job(
     base_dir: &str,
 ) -> StaJob {
     StaJob {
+        rc_model: "elmore".into(),
         input_delay_declared: true,
         design,
         netlist,

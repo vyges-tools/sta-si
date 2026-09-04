@@ -39,6 +39,7 @@ const NL: &str = "module ch ( a, y ); input a; output y; wire n1, n2, n3;\n\
 
 fn job() -> StaJob {
     StaJob {
+        rc_model: "elmore".into(),
         input_delay_declared: true,
         design: "ch".into(),
         netlist: "x".into(),

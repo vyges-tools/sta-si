@@ -24,6 +24,7 @@ const NL: &str = "module top ( a, y ); input a; output y; wire n1;\n\
 
 fn job(period: f64) -> StaJob {
     StaJob {
+        rc_model: "elmore".into(),
         input_delay_declared: true,
         design: "top".into(),
         netlist: "x".into(),

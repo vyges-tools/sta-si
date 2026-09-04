@@ -83,6 +83,12 @@ pub struct StaJob {
     pub aocv_late: Vec<(f64, f64)>, // AOCV late derate vs path depth: (stages, derate)
     pub aocv_early: Vec<(f64, f64)>, // AOCV early derate vs path depth
     pub miller: f64,     // crosstalk Miller coupling factor (2.0 worst late; 1.0 disables SI)
+    /// Interconnect delay model. `"elmore"` (default) is the transcription of OpenSTA's own
+    /// default calculator, `dmp_ceff_elmore` — per-sink Elmore converted to a delay and a
+    /// degraded slew at the library thresholds. `"transient"` selects our waveform-into-RC
+    /// model instead; it is an ADDITION and has to be asked for, because for two years it
+    /// silently took precedence over the reference model and nothing said so.
+    pub rc_model: String,
     pub xtalk_window: f64, // ns — guard band added to the slew-derived switching window
     pub crpr: bool, // remove clock-reconvergence pessimism on the shared clock path (default true)
     pub pba: bool, // path-based analysis: re-time critical paths with path-local slews (default false)
@@ -274,6 +280,11 @@ impl StaJob {
             aocv_late: kv.get("aocv_late").map(|s| pairs(s)).unwrap_or_default(),
             aocv_early: kv.get("aocv_early").map(|s| pairs(s)).unwrap_or_default(),
             miller: num("miller", 2.0),
+            rc_model: kv
+                .get("rc_model")
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .unwrap_or_else(|| "elmore".into()),
             xtalk_window: num("xtalk_window", 0.0), // guard band on top of slew-derived window
             crpr: kv
                 .get("crpr")

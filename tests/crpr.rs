@@ -73,6 +73,7 @@ const NL_SHARED: &str =
 
 fn job() -> StaJob {
     StaJob {
+        rc_model: "elmore".into(),
         input_delay_declared: true,
         design: "c".into(),
         netlist: "x".into(),

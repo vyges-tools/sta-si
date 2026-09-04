@@ -56,6 +56,7 @@ const NL: &str = "module top ( a1, a2, z ); input a1, a2; output z; wire o;\n\
 
 fn job(pba: bool) -> StaJob {
     StaJob {
+        rc_model: "elmore".into(),
         input_delay_declared: true,
         design: "p".into(),
         netlist: "x".into(),

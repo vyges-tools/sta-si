@@ -1012,6 +1012,11 @@ fn build_report(
     // Nodes that drive a fixed logic level (tie cells: `function : "1"` / `"0"`). A net
     // driven by one can never switch, so it carries no timing — see the edge build below.
     let mut const_driver: Vec<bool> = Vec::new();
+    // Liberty input capacitance at each receiver pin, by node. SPEF carries the WIRE's
+    // capacitance; the reference adds this during parasitic reduction unless the SPEF said
+    // it already includes pin caps (`ReduceToPi::pinCapacitance`, guarded by
+    // `includesPinCaps`). Without it every subtree capacitance in the Elmore walk is short.
+    let mut pin_cap_node: HashMap<usize, f64> = HashMap::new();
     let mut ck_node_list: Vec<usize> = Vec::new(); // nodes that are clock (CK) pins
     // (CK node, lane of the edge that triggers it) — see the push site for why Liberty's
     // CK->Q arc is where that lives.
@@ -1056,6 +1061,7 @@ fn build_report(
                     // Miller-aware receiver load when the pin carries a CCS receiver
                     // model, else the static `capacitance`.
                     let cap = cell.pins[pin].load_cap();
+                    pin_cap_node.insert(idx, cap);
                     let nref = nets.get_mut(net).unwrap();
                     nref.sinks.push(idx);
                     nref.load += cap;
@@ -1256,6 +1262,7 @@ fn build_report(
     // indexed by an arc id. Record the sink's (inst,pin) to resolve its SPEF node.
     struct ArcInfo {
         net_idx: usize,
+        sink: usize,
         sink_ip: Option<(String, String)>,
     }
     let mut arcs: Vec<ArcInfo> = Vec::new();
@@ -1267,6 +1274,7 @@ fn build_report(
                     let aid = arcs.len();
                     arcs.push(ArcInfo {
                         net_idx: i,
+                        sink: s,
                         sink_ip: ip_of(s),
                     });
                     out_edges[d].push(Edge {
@@ -1634,13 +1642,50 @@ fn build_report(
     const RC_TRANSIENT: u8 = 1;
     const RC_TREE_ELMORE: u8 = 2;
     const RC_LUMPED: u8 = 3;
+    // Per-net receiver capacitance, keyed by SPEF node — what `ReduceToPi::pinCapacitance`
+    // contributes to `downstreamCap` upstream. Built once: it does not depend on arrivals.
+    // ⚠️ Liberty caps are pF and SPEF node caps are fF, so convert.
+    let net_pin_cap: Vec<BTreeMap<String, f64>> = {
+        let mut v: Vec<BTreeMap<String, f64>> = vec![BTreeMap::new(); nn];
+        if let Some(sp_all) = spef {
+            for a in arcs.iter() {
+                let Some(rc) = sp_all.nets.get(&net_order[a.net_idx]) else {
+                    continue;
+                };
+                if let Some((si, spn)) = &a.sink_ip {
+                    if let Some(node) = rc.pin_node(si, spn) {
+                        *v[a.net_idx].entry(node.to_string()).or_default() +=
+                            pin_cap_node.get(&a.sink).copied().unwrap_or(0.0) * 1000.0;
+                    }
+                }
+            }
+        }
+        v
+    };
     let rc_branch = std::cell::RefCell::new(vec![RC_NONE; n_arcs]);
+    // `rc_model: transient` in the job asks for our waveform model in front of the
+    // reference one. Default is the reference.
+    let transient_first = job.rc_model.eq_ignore_ascii_case("transient");
     let compute = |sw: &[f64], net_slew: &[f64]| -> (Vec<f64>, Vec<f64>) {
-        // per-net crosstalk cap (fF) from window-overlapping aggressors
+        // Per-net coupling capacitance seen by the RC network, in fF.
+        //
+        // 🔑 BASE, and it was missing: a coupling capacitor is GROUNDED on the net at
+        // `couplingCapFactor()` (default 1.0). That is what the reference does on read —
+        // `SpefReader::makeCapacitor`'s two-node form calls `incrCap(node, cap *
+        // couplingCapFactor())` on each net unless `read_spef -keep_capacitive_coupling`
+        // is given, and it is not given by the flow. So the coupling capacitance is part
+        // of the ordinary RC network before any crosstalk analysis happens at all.
+        //
+        // Our window term is the INCREMENT over that base — `(miller - 1.0) * cc` is
+        // exactly "the Miller multiplier minus the grounded copy already counted". It was
+        // being used as the whole contribution, so a net's coupling capacitance vanished
+        // entirely whenever no aggressor window overlapped, which on the early (hold) pass
+        // is always. Measured on fft_top's `net55`: 194.4 fF over 512 aggressors against
+        // 560.7 fF of wire — 34.7 % of the net's capacitance simply absent.
         let xc: Vec<f64> = (0..nn)
             .map(|i| {
                 let svi = sw[i];
-                let mut x = 0.0;
+                let mut x: f64 = net_cpl[i].iter().map(|(_, cc)| *cc).sum();
                 if svi.is_finite() {
                     for &(ai, cc) in &net_cpl[i] {
                         let window = (net_slew[i] + net_slew[ai]) / 2.0 + guard;
@@ -1653,9 +1698,12 @@ fn build_report(
             })
             .collect();
         // waveform-into-RC: a transient response per net (driver-slew-aware), memoized
-        // so each sink reads the same simulation. Falls back to per-pin Elmore.
+        // so each sink reads the same simulation. Only built when it is actually selected.
         let tr_net: Vec<Option<BTreeMap<String, (f64, f64)>>> = (0..nn)
             .map(|i| {
+                if !transient_first {
+                    return None;
+                }
                 let rc = spef?.nets.get(&net_order[i])?;
                 let (di, dp) = net_drv_ip[i].as_ref()?;
                 let dn = rc.pin_node(di, dp)?;
@@ -1672,22 +1720,64 @@ fn build_report(
                     mark(RC_NONE);
                     return (0.0, 0.0); // no parasitics -> ideal interconnect
                 };
-                // transient (waveform-into-RC) delay + degraded slew at the sink
-                if let (Some(map), Some((si, sp))) = (&tr_net[i], &a.sink_ip) {
-                    if let Some(sn) = rc.pin_node(si, sp) {
-                        if let Some(&(delay, slew)) = map.get(sn) {
-                            mark(RC_TRANSIENT);
-                            return (delay, slew);
+                // ---- BASE MODEL: per-sink Elmore, as the reference does ------------
+                // OpenSTA's default arc delay calculator is `dmp_ceff_elmore`
+                // (`Sta.cc:426`). Its per-sink half, `DmpAlg::loadDelaySlew`
+                // (`DmpCeff.cc:556`), takes the sink's ELMORE TIME CONSTANT and produces
+                // both a wire delay and a DEGRADED SLEW at the library thresholds. The
+                // closed form is `DelayCalcBase::dspfWireDelaySlew`:
+                //
+                //     wire_delay = -tau * ln(1 - Vth)
+                //     load_slew  = drvr_slew + tau * ln((1 - Vl) / (1 - Vh)) / slew_derate
+                //
+                // ⛔ We returned `tau` ITSELF as the delay and slew 0 (= keep the driver
+                // slew). Both are wrong: tau is a time constant, not a 50 % delay, and a
+                // net that degrades no slew makes every downstream cell delay be looked up
+                // at too sharp a transition.
+                //
+                // ⚠️ DIVERGENCE, deliberate: upstream evaluates this per rise/fall with
+                // that edge's thresholds, and our `compute` is per ARC rather than per lane,
+                // so the rise thresholds are used for both. sky130 declares them symmetric
+                // (0.2/0.8/0.5), so it costs nothing here — but it would on a library that
+                // does not.
+                if let (Some((di, dp)), Some((si, sp))) = (&net_drv_ip[i], &a.sink_ip) {
+                    if let (Some(dt), Some(st)) = (rc.pin_node(di, dp), rc.pin_node(si, sp)) {
+                        if let Some(dl) = rc.elmore(dt, xc[i], &net_pin_cap[i]) {
+                            if let Some(&tau) = dl.get(st) {
+                                mark(RC_TREE_ELMORE);
+                                let drvr_slew = net_slew[i];
+                                // degenerate case, verbatim from DmpAlg::loadDelaySlew:
+                                // an Elmore small against the driver slew is the delay.
+                                if tau == 0.0 || tau < drvr_slew * 1e-3 {
+                                    return (tau, drvr_slew);
+                                }
+                                let th = lib.thresholds;
+                                let delay = -tau * (1.0 - th.input_rise).ln();
+                                let slew = drvr_slew
+                                    + tau
+                                        * ((1.0 - th.slew_lower_rise)
+                                            / (1.0 - th.slew_upper_rise))
+                                            .ln()
+                                        / th.slew_derate;
+                                // upstream's two guards: a negative delay falls back to the
+                                // Elmore value, and a load slew may not be sharper than the
+                                // driver's.
+                                let delay = if delay < 0.0 { tau } else { delay };
+                                return (delay, slew.max(drvr_slew));
+                            }
                         }
                     }
                 }
-                // fallback: per-pin tree Elmore when driver + sink map to SPEF nodes
-                if let (Some((di, dp)), Some((si, sp))) = (&net_drv_ip[i], &a.sink_ip) {
-                    if let (Some(dt), Some(st)) = (rc.pin_node(di, dp), rc.pin_node(si, sp)) {
-                        if let Some(dl) = rc.elmore(dt, xc[i]) {
-                            if let Some(&v) = dl.get(st) {
-                                mark(RC_TREE_ELMORE);
-                                return (v, 0.0);
+                // ---- ADDITION, opt-in: our waveform-into-RC transient ----------------
+                // Asked for with `rc_model: transient`. It is an extension of the model
+                // above, not a replacement, and it must not run unless requested — it took
+                // precedence silently and displaced the reference model entirely.
+                if transient_first {
+                    if let (Some(map), Some((si, sp))) = (&tr_net[i], &a.sink_ip) {
+                        if let Some(sn) = rc.pin_node(si, sp) {
+                            if let Some(&(delay, slew)) = map.get(sn) {
+                                mark(RC_TRANSIENT);
+                                return (delay, slew);
                             }
                         }
                     }
@@ -1799,7 +1889,27 @@ fn build_report(
                     net_res[*i],
                     net_cap[*i]
                 ),
+                // (coupling total reported on the next line)
                 None => eprintln!("rc-trace: ASKED net {w} — not found"),
+            }
+            // Coupling capacitance is reported separately because the reference GROUNDS it
+            // by default (`SpefReader::makeCapacitor` two-node form, at
+            // `couplingCapFactor()`, unless `read_spef -keep_capacitive_coupling`), whereas
+            // our `xc` only adds `(miller-1)*Cc` for window-overlapping aggressors. If those
+            // two differ, the RC network itself differs before any delay model runs.
+            if let Some(i) = rows.iter().map(|(i, _)| *i).find(|i| {
+                std::env::var("VYGES_STA_RC_NET").ok().as_deref() == Some(&net_order[*i])
+            }) {
+                let cc: f64 = net_cpl[i].iter().map(|(_, c)| *c).sum();
+                eprintln!(
+                    "rc-trace: ASKED net {} — coupling {:.4} fF over {} aggressor(s), \
+                     ground/wire cap {:.4} fF ⇒ grounding coupling would add {:.1} %",
+                    net_order[i],
+                    cc,
+                    net_cpl[i].len(),
+                    net_cap[i],
+                    100.0 * cc / net_cap[i].max(1e-12)
+                );
             }
         }
     }

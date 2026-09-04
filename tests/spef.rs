@@ -65,6 +65,7 @@ const NL: &str = "module top ( a, y ); input a; output y; wire n1, n2;\n\
 
 fn job() -> StaJob {
     StaJob {
+        rc_model: "elmore".into(),
         input_delay_declared: true,
         design: "top".into(),
         netlist: "x".into(),
@@ -145,13 +146,13 @@ fn per_pin_elmore_differentiates_sinks() {
         ground: vec![("C".into(), 1.0), ("s1".into(), 2.0), ("s2".into(), 3.0)],
         ..Default::default()
     };
-    let d = rc.elmore("D", 0.0).unwrap();
+    let d = rc.elmore("D", 0.0, &std::collections::BTreeMap::new()).unwrap();
     // s1 = 10·6 + 5·2 = 70 (×1e-6 ns) ; s2 = 10·6 + 50·3 = 210 (×1e-6 ns)
     assert!((d["s1"] - 7e-5).abs() < 1e-12, "s1={}", d["s1"]);
     assert!((d["s2"] - 2.1e-4).abs() < 1e-12, "s2={}", d["s2"]);
     assert!(d["s2"] > d["s1"]); // far sink is slower — the whole point of per-pin
                                 // a crosstalk cap at the net node raises every downstream sink
-    let dx = rc.elmore("D", 10.0).unwrap();
+    let dx = rc.elmore("D", 10.0, &std::collections::BTreeMap::new()).unwrap();
     assert!(dx["s1"] > d["s1"] && dx["s2"] > d["s2"]);
 }
 

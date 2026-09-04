@@ -56,6 +56,7 @@ const NL: &str = "module ex ( clk, din, dout ); input clk, din; output dout; wir
 
 fn job(exceptions: Vec<Exception>) -> StaJob {
     StaJob {
+        rc_model: "elmore".into(),
         input_delay_declared: true,
         design: "ex".into(),
         netlist: "x".into(),

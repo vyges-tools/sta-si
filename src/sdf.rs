@@ -187,7 +187,7 @@ pub fn emit(design: &str, nl: &Netlist, lib: &Lib, spef: Option<&Spef>, t: &Time
                 let netrc = sp.nets.get(net);
                 let elmore = netrc
                     .and_then(|rc| rc.pin_node(&inst.name, &out.name))
-                    .and_then(|d| netrc.unwrap().elmore(d, 0.0));
+                    .and_then(|d| netrc.unwrap().elmore(d, 0.0, &std::collections::BTreeMap::new()));
                 let lumped = sp.net_delay_ns(net);
                 for (si, sp_pin) in sinks {
                     let d = match (&elmore, netrc.and_then(|rc| rc.pin_node(si, sp_pin))) {

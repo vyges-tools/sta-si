@@ -9,6 +9,7 @@ const NL: &str = include_str!("../examples/icsprout55/regreg.v");
 
 fn job() -> StaJob {
     StaJob {
+        rc_model: "elmore".into(),
         input_delay_declared: true,
         design: "ics55_regreg".into(),
         netlist: "x".into(),
