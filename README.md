@@ -168,11 +168,12 @@ which one you want is a real choice, not a formality.
 ### Where it sits vs OpenSTA / the commercial signoff timer — run it *first*, not *instead*
 
 `vyges-sta-si` is an **early-flow and complementary** engine, **not a tapeout
-sign-off replacement** for OpenSTA or the commercial signoff timer. It is *correlated to* OpenSTA
-— on a routed sky130 block, WNS agrees within **~1 %**, on the same critical path the sign-off
-timer reports — i.e. one tier below it in
-maturity — so it runs **upstream of**, and **alongside**, the signoff tool, never
-in lieu of it for tape-out:
+sign-off replacement** for OpenSTA or the commercial signoff timer. It is *correlated to*
+OpenSTA — on a routed sky130 block, setup and hold agree to an RMS of **0.03 ns per
+endpoint** over the endpoint set both report (see *Current state*) — and it is far narrower:
+it covers a flop-based standard-cell abstraction and declines the rest (see *What it does
+not model*). So it runs **upstream of**, and **alongside**, the signoff tool, never in lieu
+of it for tape-out:
 
 | Stage | Run | Why |
 | --- | --- | --- |
@@ -432,6 +433,61 @@ uncertainty, and derate read from [`top.sdc`](examples/top/top.sdc) instead.
 See [`examples/icsprout55/`](examples/icsprout55/) for a 55nm reg-to-reg path with
 flat / POCV / multi-corner (`mcmm.sta`) runs.
 
+## Design philosophy
+
+Four rules shape this engine, and they explain most of what it does and does not do.
+
+**1. It is a transcription, not an independent implementation.** Where `vyges-sta-si`
+disagrees with OpenSTA, that is a defect here — not a difference of opinion, and not
+something to argue about. The rules are read out of the reference's source, and each one is
+pinned by a test that states the rule it came from. The corollary trips people up: being
+*more accurate* than the reference is also a defect. When the reference computes an
+increment in single precision, or uses a deliberately coarse fast `exp`, so does this
+engine, because the goal is to land on the same number rather than a better one.
+
+**2. Reading the algorithm is not enough — the call sequence carries as much of the
+behaviour.** Several of the largest corrections in this engine were not arithmetic at all:
+which of three implementations a virtual call resolves to, whether a flop is launched at
+all, which of a pair of edges a check belongs to. Those are decided by dispatch and order,
+not by a formula, and a faithful formula in the wrong place is still wrong.
+
+**3. Correlation is judged per endpoint, never from WNS or WHS alone.** A worst-slack number
+is one endpoint out of hundreds, and it hides everything that is not the minimum. This
+engine has been measured with a setup WNS 1.9 % from the reference while a tenth of its
+endpoints were out by more than 11 ns. Every correlation claim below is a distribution over
+all shared endpoints; the headline number is quoted after it, never instead of it.
+
+**4. Additions layer on top of the reference model, never in front of it.** SI/crosstalk,
+AOCV/POCV and path-based analysis are extensions this engine has and the reference does not.
+They are opt-in and they sit *beside* the transcribed model. The rule exists because it was
+broken once: a home-grown interconnect model was tried first and silently displaced the
+reference's for every net, and no output said so.
+
+## What it does not model
+
+Deliberately listed, because a timer that is quiet about its gaps is worse than one that
+is narrow. `vyges-sta-si` covers a **flop-based standard-cell abstraction**, and outside
+that it does not approximate — it simply has nothing to say:
+
+- **Transparent latches.** There is no D→Q transparent path and no time borrowing. A
+  latch-based design is not timed less accurately here; it is not timed.
+- **Derived generated clocks.** A divided or generated clock is carried as its own clock
+  with a stated period. It is not derived from a master's waveform, so `-divide_by`,
+  `-edges` and edge-shift semantics are not honoured.
+- **Checks other than setup, hold, recovery and removal** — no clock-gating checks, no
+  minimum pulse width, no minimum period, no maximum skew.
+- **Design-rule limit checks** — no maximum capacitance, transition or fanout reporting.
+- **Power.** Use [`power`](https://github.com/vyges-tools/power).
+- **SDF back-annotation as an input.** This engine *writes* SDF; it does not read one and
+  time from it. Its delays are always its own.
+- **Path enumeration.** It reports the worst setup path, the worst hold path and a
+  per-endpoint slack list — not the N worst paths per group, and it has no path-group
+  taxonomy, so recovery and removal checks are reported alongside hold rather than in a
+  separate asynchronous group.
+
+If a design needs any of the above, run the signoff timer for it. That is the same advice
+as the section above, made specific.
+
 ## Domain coverage
 
 `vyges-sta-si` operates on the **standard-cell digital abstraction** — it builds a timing
@@ -470,7 +526,7 @@ that foundry's NDA, never in this repository.
                                                    AOCV/POCV + SI margins, under NDA
 ```
 
-## Current state (2026-06-29)
+## Current state (2026-09-04)
 
 v1 does **setup *and* hold** timing. Setup is the max-delay path — combinational
 (input → output) **and register-to-register** (flop Q launches via its CK→Q arc;
@@ -490,23 +546,26 @@ for setup, early/late for hold — and the OCV spread on the clock path they *sh
 is credited back, removing reconvergence pessimism; `crpr: false` to disable), and
 **MCMM** (a job can list per-corner scenario `.sta` files; the worst setup and worst
 hold are reported across them), **rise/fall-split unate propagation**, and
-**multi-clock / generated clocks** (cross-domain paths use the tightest launch→capture
-edge relation, not a single period), **timing exceptions** (false paths and
+**multi-clock** (cross-domain paths use the tightest launch→capture
+edge relation, not a single period; a divided or generated clock is carried as its own
+clock with a stated period — it is not *derived* from a master's waveform), **timing exceptions** (false paths and
 multicycle paths, matched on launch/capture instance or port), and **CCS-into-RC
 delay** — a current-source model (`output_current` waveforms) plus an **effective
 capacitance**: the driver behind a resistive net sees C1 + shielded-C2, not the
 lumped total (Ceff iterated to convergence with the output slew), so cell delay
 drops on resistive nets (this benefits NLDM too, not just CCS). The interconnect
-delay to each sink is a **transient waveform-into-RC solve** (backward-Euler on the
-RC tree driven by the driver edge) — the true response, e.g. 0.69·RC for a single
-RC, not Elmore's pessimistic R·C — and the **degraded sink slew** it computes is
-propagated downstream (a resistive net hands the next stage a slower edge, raising
-its delay). With `pba: true` it adds **path-based analysis** — re-timing the
+delay to each sink is the reference delay calculator's own: the driver's Pi model
+from an admittance-moment reduction, an **effective capacitance** from a
+three-equation Newton solve, and a per-sink **wire delay and degraded sink slew**
+taken from the resulting waveform's threshold crossings. A resistive net therefore
+hands the next stage a slower edge, raising its delay. (A transient
+waveform-into-RC solve is also available, `rc_model: transient`, as an explicit
+opt-in beside that model rather than in front of it.) With `pba: true` it adds **path-based analysis** — re-timing the
 critical path and its fan-in alternatives with strictly path-local slews, catching
 a non-greedy worst path that the graph-based max can miss. It also writes **SDF
 back-annotation** (`--sdf`: IOPATH + setup/hold TIMINGCHECK + SPEF INTERCONNECT, for
 gate-level sim) and lints constraints with **`sdc-lint`** (completeness/consistency
-of the SDC, independent of the timing run). Fully offline, no external deps, 71 tests
+of the SDC, independent of the timing run). Fully offline, no external deps, 216 tests
 green.
 It **closes the loop with the other engines**: it reads the
 Liberty `vyges-char` emits and the SPEF (incl. coupling + RC tree) `vyges-extract`
@@ -522,10 +581,22 @@ first sub-100nm node)**, whose reg-to-reg setup/hold/POCV example is in
 Propagation is **rise/fall-split by arc unateness** — an inverter chain alternates
 edges rather than taking `max(rise,fall)` per stage, matching how real paths behave.
 
-**Correlated against OpenSTA 2.7.0** on a sky130 design: single-arc paths match to
-4 decimals (global WNS 9.3760 ns, DFF CK→Q 0.6240 ns), and a multi-stage reg→reg
-path agrees within **~3%** (down from ~7% before unate-split), staying slightly
-conservative — the residual is second-order slew propagation.
+**Correlated against OpenSTA per endpoint**, on a routed sky130 block (post-route netlist,
+OpenRCX SPEF, the same Liberty and SDC given to both), with the reference re-run rather than
+read from an archive:
+
+- **setup** — RMS **0.032 ns** over the 790 endpoints both timers report, 7 of them outside
+  0.1 ns; WNS 6.7987 against 6.8508.
+- **hold** — RMS **0.034 ns** over 664 endpoints, 3 outside 0.1 ns; WHS 0.8824 against
+  0.8821.
+- Both timers report the **same endpoint set**, 790 and 664, with none extra on either side.
+- The ECO planner built on this timer proposes **zero** delay cells on that block, which the
+  reference and the sign-off run both call hold-clean.
+
+The distributions are quoted before the headline slacks deliberately. Earlier in this
+engine's life setup WNS sat 1.9 % from the reference while a tenth of its endpoints were out
+by more than 11 ns — a worst-slack figure cannot see that, and neither can a reader who is
+only given one.
 
 On a **real routed sky130 block** (post-route netlist + OpenRCX SPEF), measured against the
 sign-off timer's own checked-in results rather than a re-run:
