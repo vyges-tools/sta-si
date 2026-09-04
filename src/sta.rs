@@ -1242,15 +1242,32 @@ fn build_report(
     // effective-capacitance shielding per driver node (CCS-into-RC): the driver
     // sees a near cap + a far cap shielded behind the wire resistance, so its cell
     // delay is computed at Ceff < total on resistive nets.
-    let mut shield: Vec<Option<(f64, f64)>> = vec![None; n]; // driver node -> (C1 pF, tau ns)
+    // driver node -> the three-element Pi (C2 near pF, Rpi, C1 far pF), as
+    // `ReduceToPi::reduceToPi` builds it by matching admittance moments. ⛔ It is NOT the
+    // driver node's own capacitance: moment matching puts 0.1879 pF of near cap on
+    // `fft_top`'s `input55`, where that SPEF node carries none at all — so reading the node
+    // handed the gate ZERO near capacitance and `report_dcalc` disagreed by the whole Pi.
+    let mut shield: Vec<Option<(f64, f64, f64)>> = vec![None; n];
     if let Some(s) = spef {
         for (name, net) in &nets {
             if let Some(d) = net.driver {
                 let i = net_idx[name.as_str()];
                 if let (Some(rc), Some((di, dp))) = (s.nets.get(name), &net_drv_ip[i]) {
                     if let Some(dnode) = rc.pin_node(di, dp) {
-                        if let Some((c1_ff, tau)) = rc.pi_reduce(dnode) {
-                            shield[d] = Some((c1_ff / 1000.0, tau));
+                        // the same capacitance content the reduction sees: coupling
+                        // grounded at factor 1.0, plus Liberty receiver caps at the sinks
+                        let cc: f64 = net_cpl[i].iter().map(|(_, c)| *c).sum();
+                        let mut pcap: BTreeMap<String, f64> = BTreeMap::new();
+                        for &sk in &net.sinks {
+                            if let Some((si, sp)) = ip_of(sk) {
+                                if let Some(nd) = rc.pin_node(&si, &sp) {
+                                    *pcap.entry(nd.to_string()).or_default() +=
+                                        pin_cap_node.get(&sk).copied().unwrap_or(0.0) * 1000.0;
+                                }
+                            }
+                        }
+                        if let Some((c2_ff, rpi, c1_ff)) = rc.pi_reduce(dnode, cc, &pcap) {
+                            shield[d] = Some((c2_ff / 1000.0, rpi, c1_ff / 1000.0));
                         }
                     }
                 }
@@ -1337,6 +1354,9 @@ fn build_report(
 
     // Which nodes are flop clock (CK) pins. Needed by the clock-launched pass below
     // (which stops at them) as well as by CRPR further down.
+    // The effective capacitance actually used at each driver node, so it can be diffed
+    // against `report_dcalc`'s `Ceff=..` rather than re-derived. Diagnostic only.
+    let ceff_used = std::cell::RefCell::new(vec![f64::NAN; n]);
     let mut is_ck = vec![false; n];
     for &i in &ck_node_list {
         is_ck[i] = true;
@@ -1523,10 +1543,16 @@ fn build_report(
                                 // shielding), iterating Ceff <-> output transition to a
                                 // self-consistent point rather than a single lumped pass.
                                 let leff = match shield[v] {
-                                    Some((c1, tau)) => {
-                                        crate::ccs::ceff_iter(c1, load - c1, tau, |c| {
-                                            st.lookup(sin, c)
-                                        })
+                                    // (near, far, far-branch time constant Rpi*C1).
+                                    // ⚠️ Rpi is in OHMS and C1 in pF, so the product is
+                                    // Ω·pF = 1e-12 s; ceff_iter wants ns.
+                                    Some((c2, rpi, c1)) => {
+                                        let ce =
+                                            crate::ccs::ceff_iter(c2, c1, rpi * c1 * 1e-3, |c| {
+                                                st.lookup(sin, c)
+                                            });
+                                        ceff_used.borrow_mut()[v] = ce;
+                                        ce
                                     }
                                     None => load,
                                 };
@@ -1942,6 +1968,28 @@ fn build_report(
             // `couplingCapFactor()`, unless `read_spef -keep_capacitive_coupling`), whereas
             // our `xc` only adds `(miller-1)*Cc` for window-overlapping aggressors. If those
             // two differ, the RC network itself differs before any delay model runs.
+            // Our driver Pi, to diff against `report_dcalc`'s `Pi model C2=.. Rpi=.. C1=..`.
+            if let Some((nm, nt)) = nets.iter().find(|(nm, _)| {
+                std::env::var("VYGES_STA_RC_NET").ok().as_deref() == Some(nm.as_str())
+            }) {
+                if let Some(d) = nt.driver {
+                    match shield[d] {
+                        Some((c2, rpi, c1)) => eprintln!(
+                            "rc-trace: ASKED net {nm} DRIVER Pi — ours C2={c2:.4} \
+                             Rpi={:.4}k C1={c1:.4} (total {:.4}) · Ceff={:.4} · load {:.4} pF",
+                            rpi / 1000.0,
+                            c2 + c1,
+                            ceff_used.borrow()[d],
+                            node_load[d]
+                        ),
+                        None => eprintln!(
+                            "rc-trace: ASKED net {nm} DRIVER — NO Pi; gate sees the TOTAL \
+                             load {:.4} pF",
+                            node_load[d]
+                        ),
+                    }
+                }
+            }
             if let Some(i) = rows.iter().map(|(i, _)| *i).find(|i| {
                 std::env::var("VYGES_STA_RC_NET").ok().as_deref() == Some(&net_order[*i])
             }) {
@@ -2385,7 +2433,7 @@ fn build_report(
         let cell_dly = |arc: &Arc, sin: f64, vnode: usize| -> (f64, f64) {
             let cl = node_load[vnode];
             let leff = match shield[vnode] {
-                Some((c1, tau)) => crate::ccs::ceff_iter(c1, cl - c1, tau, |c| {
+                Some((c2, rpi, c1)) => crate::ccs::ceff_iter(c2, c1, rpi * c1 * 1e-3, |c| {
                     arc.rise_transition
                         .lookup(sin, c)
                         .max(arc.fall_transition.lookup(sin, c))
