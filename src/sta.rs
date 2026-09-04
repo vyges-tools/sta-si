@@ -1625,6 +1625,16 @@ fn build_report(
     // into arrivals, so we iterate until the per-arc delays stabilise.
     let guard = job.xtalk_window;
     let miller = job.miller;
+    // Which interconnect model each arc's delay actually came from. A net that silently
+    // drops to a coarser model is indistinguishable in the output from one the fine model
+    // handled — the delay is just wrong by an amount nothing reports. Recorded here, at
+    // the point of the decision, so the answer cannot drift from the code that makes it.
+    // Dump it with VYGES_STA_RC_TRACE=1 (and VYGES_STA_RC_NET=<net> for one net).
+    const RC_NONE: u8 = 0;
+    const RC_TRANSIENT: u8 = 1;
+    const RC_TREE_ELMORE: u8 = 2;
+    const RC_LUMPED: u8 = 3;
+    let rc_branch = std::cell::RefCell::new(vec![RC_NONE; n_arcs]);
     let compute = |sw: &[f64], net_slew: &[f64]| -> (Vec<f64>, Vec<f64>) {
         // per-net crosstalk cap (fF) from window-overlapping aggressors
         let xc: Vec<f64> = (0..nn)
@@ -1654,15 +1664,19 @@ fn build_report(
             .collect();
         // each arc -> (net delay, degraded sink slew); slew 0 means "keep driver slew"
         arcs.iter()
-            .map(|a| {
+            .enumerate()
+            .map(|(k, a)| {
                 let i = a.net_idx;
+                let mark = |b: u8| rc_branch.borrow_mut()[k] = b;
                 let Some(rc) = spef.and_then(|s| s.nets.get(&net_order[i])) else {
+                    mark(RC_NONE);
                     return (0.0, 0.0); // no parasitics -> ideal interconnect
                 };
                 // transient (waveform-into-RC) delay + degraded slew at the sink
                 if let (Some(map), Some((si, sp))) = (&tr_net[i], &a.sink_ip) {
                     if let Some(sn) = rc.pin_node(si, sp) {
                         if let Some(&(delay, slew)) = map.get(sn) {
+                            mark(RC_TRANSIENT);
                             return (delay, slew);
                         }
                     }
@@ -1672,12 +1686,17 @@ fn build_report(
                     if let (Some(dt), Some(st)) = (rc.pin_node(di, dp), rc.pin_node(si, sp)) {
                         if let Some(dl) = rc.elmore(dt, xc[i]) {
                             if let Some(&v) = dl.get(st) {
+                                mark(RC_TREE_ELMORE);
                                 return (v, 0.0);
                             }
                         }
                     }
                 }
                 // last resort: lumped Elmore (R·C) + lumped crosstalk (R·xtalk-cap)
+                // ⚠️ This branch also returns slew 0, i.e. "keep the driver slew" — so a net
+                // that lands here degrades no slew at all, and every downstream delay is
+                // looked up at too sharp a transition.
+                mark(RC_LUMPED);
                 (
                     net_res[i] * net_cap[i] * 1e-6 + net_res[i] * xc[i] * 1e-6,
                     0.0,
@@ -1725,6 +1744,66 @@ fn build_report(
             break;
         }
     }
+    // Say which interconnect model the design actually got. Opt-in: it is a diagnostic,
+    // and the counts are only meaningful once the loop above has converged.
+    if std::env::var_os("VYGES_STA_RC_TRACE").is_some() {
+        let b = rc_branch.borrow();
+        let mut tally = [0usize; 4];
+        for &x in b.iter() {
+            tally[x as usize] += 1;
+        }
+        eprintln!(
+            "rc-trace: {} interconnect arc(s) — transient {} · tree-elmore {} · lumped {} · \
+             no-parasitics {}",
+            b.len(),
+            tally[RC_TRANSIENT as usize],
+            tally[RC_TREE_ELMORE as usize],
+            tally[RC_LUMPED as usize],
+            tally[RC_NONE as usize]
+        );
+        // per-net, worst first: a net whose arcs did NOT reach the transient model is the
+        // one whose per-sink delays are flattened.
+        let mut per_net: HashMap<usize, [usize; 4]> = HashMap::new();
+        for (k, a) in arcs.iter().enumerate() {
+            per_net.entry(a.net_idx).or_insert([0; 4])[b[k] as usize] += 1;
+        }
+        let want = std::env::var("VYGES_STA_RC_NET").ok();
+        let mut rows: Vec<(usize, [usize; 4])> = per_net.into_iter().collect();
+        rows.sort_by_key(|(_, c)| {
+            std::cmp::Reverse(c[RC_TREE_ELMORE as usize] + c[RC_LUMPED as usize])
+        });
+        for (i, c) in rows.iter().take(10) {
+            let fan: usize = c.iter().sum();
+            eprintln!(
+                "rc-trace:   net {:<28} fanout {:>4} — transient {} · tree-elmore {} · \
+                 lumped {} · none {}",
+                net_order[*i],
+                fan,
+                c[RC_TRANSIENT as usize],
+                c[RC_TREE_ELMORE as usize],
+                c[RC_LUMPED as usize],
+                c[RC_NONE as usize]
+            );
+        }
+        if let Some(w) = want {
+            match rows.iter().find(|(i, _)| net_order[*i] == w) {
+                Some((i, c)) => eprintln!(
+                    "rc-trace: ASKED net {} — fanout {} · transient {} · tree-elmore {} · \
+                     lumped {} · none {} · res {:.4} ohm · cap {:.4} fF",
+                    net_order[*i],
+                    c.iter().sum::<usize>(),
+                    c[RC_TRANSIENT as usize],
+                    c[RC_TREE_ELMORE as usize],
+                    c[RC_LUMPED as usize],
+                    c[RC_NONE as usize],
+                    net_res[*i],
+                    net_cap[*i]
+                ),
+                None => eprintln!("rc-trace: ASKED net {w} — not found"),
+            }
+        }
+    }
+
     // The EARLY (min-delay) interconnect: no coupling windows — a hold path is scored
     // without the aggressor pessimism the late path carries — but at the CONVERGED
     // OPERATING POINT, exactly like the late one.
