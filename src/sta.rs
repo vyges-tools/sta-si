@@ -1720,20 +1720,37 @@ fn build_report(
                     mark(RC_NONE);
                     return (0.0, 0.0); // no parasitics -> ideal interconnect
                 };
-                // ---- BASE MODEL: per-sink Elmore, as the reference does ------------
+                // ---- BASE MODEL: per-sink Elmore -----------------------------------
                 // OpenSTA's default arc delay calculator is `dmp_ceff_elmore`
-                // (`Sta.cc:426`). Its per-sink half, `DmpAlg::loadDelaySlew`
-                // (`DmpCeff.cc:556`), takes the sink's ELMORE TIME CONSTANT and produces
-                // both a wire delay and a DEGRADED SLEW at the library thresholds. The
-                // closed form is `DelayCalcBase::dspfWireDelaySlew`:
+                // (`Sta.cc:426`), and its per-sink half takes the sink's ELMORE TIME
+                // CONSTANT and produces a wire delay and a degraded slew.
+                //
+                // ⚠️ WHAT FOLLOWS IS AN APPROXIMATION, AND THE REFERENCE IS NOT ONE LAW.
+                // `DmpCeffDelayCalc::setCeffAlgorithm` picks per driver from Rd, Rpi, c1
+                // and c2, and the two branches do DIFFERENT things:
+                //   · `DmpCap::loadDelaySlew` — `delay = elmore` (the RAW time constant,
+                //     no conversion) and `slew = drvr_slew` (NO degradation at all);
+                //   · `DmpAlg::loadDelaySlew` (DmpPi / DmpZeroC2) — put a pole at
+                //     `1/elmore` on the DMP driver waveform and solve for the actual
+                //     threshold crossings.
+                // We can select neither yet: the branch test needs the THREE-element Pi
+                // (c2, rpi, c1) from `reduceToPi` plus `gateModelRd`, and our `pi_reduce`
+                // yields only (C1, tau). Measured on `fft_top`'s `net55` the reference
+                // took the CROSSING SOLVE — its sink slew 1.6616 differs from its driver
+                // slew 1.1048, which `DmpCap` could not produce.
+                //
+                // So this uses the closed form from `DelayCalcBase::dspfWireDelaySlew`,
+                // which upstream applies on the DSPF/input-port path:
                 //
                 //     wire_delay = -tau * ln(1 - Vth)
                 //     load_slew  = drvr_slew + tau * ln((1 - Vl) / (1 - Vh)) / slew_derate
                 //
-                // ⛔ We returned `tau` ITSELF as the delay and slew 0 (= keep the driver
-                // slew). Both are wrong: tau is a time constant, not a 50 % delay, and a
-                // net that degrades no slew makes every downstream cell delay be looked up
-                // at too sharp a transition.
+                // ⚠️ Returning `tau` itself with no slew degradation — what we did before
+                // — is exactly `DmpCap`, so it was right for THAT branch and wrong for the
+                // other. Measured A/B on fft_top with everything else equal, the two are a
+                // wash (WNS 6.7073 vs 6.6983, WHS 0.8286 vs 0.8262 against 6.85/0.8821), so
+                // the per-sink law is now a second-order term: the dominant one is the
+                // DRIVER SLEW, 0.3036 against the reference's 1.1048.
                 //
                 // ⚠️ DIVERGENCE, deliberate: upstream evaluates this per rise/fall with
                 // that edge's thresholds, and our `compute` is per ARC rather than per lane,
