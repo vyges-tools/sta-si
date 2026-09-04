@@ -20,7 +20,20 @@ fn example_top_analyzes() {
     assert_eq!(rep.worst_path.len(), 8);
     assert_eq!(rep.worst_path[0].label, "a");
     assert_eq!(rep.worst_path.last().unwrap().label, "y");
-    assert!(rep.wns > 0.0 && rep.wns < 1.0);
+    // ⚠️ NEGATIVE, and correctly so. This fixture's cell is characterised to a 0.01 pF
+    // load and the net it drives is ~0.08 pF — eight times beyond the table. The reference
+    // EXTRAPOLATES past an axis (`findValueIndex` returns `size-2`, `Table2::findValue`
+    // uses the actual x), so the delay grows linearly and a 1 ns period cannot be met.
+    // This assertion used to read `wns > 0.0 && wns < 1.0`, which held only because our
+    // lookup CLAMPED at the axis and made the cell look load-independent past 10 fF.
+    // 🔑 The fixture was always driving more than it was characterised for; the clamp hid
+    // it. Verified inert on real data: sky130's loads are inside the table and `fft_top`'s
+    // WNS/WHS do not move at all.
+    assert!(
+        rep.wns < 0.0 && rep.wns > -10.0,
+        "8x the characterised load cannot meet a 1 ns period: {}",
+        rep.wns
+    );
 }
 
 // ---- timing-health advisory (#10) ---------------------------------------

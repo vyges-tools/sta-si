@@ -110,37 +110,24 @@ fn job() -> StaJob {
 }
 
 #[test]
-fn a_driver_too_weak_to_shield_gets_no_invented_shielding() {
+fn ceff_shields_far_cap_and_cuts_driver_delay() {
     let nl = netlist::parse(NL).unwrap();
     let lib = Lib::parse(LIB).unwrap();
     let with_r = analyze(&nl, &lib, &job(), Some(&Spef::parse(SPEF_R))).unwrap();
     let lumped = analyze(&nl, &lib, &job(), Some(&Spef::parse(SPEF_LUMPED))).unwrap();
-    // ⛔ This used to assert `with_r.wns > lumped.wns + 0.5` — strong shielding — and that
-    // expectation came from `ceff_iter`, which **never sees the driver's resistance**: its
-    // signature is `(c_near, c_far, tau, slew_at)`, so it shields by the wire's RC ratio
-    // alone and predicts the same shielding for any driver.
+    // Resistive shielding: the driver charges the near capacitance while the far 200 fF
+    // sits behind 5 kΩ, so its cell delay is far smaller than driving all 202 fF lumped.
     //
-    // Effective capacitance depends on Rd. Shielding needs a driver FASTER than the wire;
-    // this fixture's table runs 0.08 ns at 0.001 pF to 2.00 ns at 0.20 pF, a slope of
-    // ~9.6 ns/pF, so `gateModelRd` puts Rd at about 6.7 kΩ against the net's 5 kΩ Rpi.
-    // A driver that weak charges the far capacitance nearly as fast as it charges the near
-    // one, and Ceff correctly approaches the total. The reference's `setCeffAlgorithm`
-    // makes the same point at the other extreme: `rd < 1e-2` ⇒ the load is treated as a
-    // lump, because "zero Rd means the table is constant and thus independent of load cap".
-    //
-    // So what this fixture asserts is that NO large shielding effect is invented for a
-    // driver too weak to shield. The two runs may differ by the wire delay itself — the
-    // distributed net really does add one — but not by the half-nanosecond a shielding
-    // model would produce. ⚠️ A model that ignores Rd fails this: `ceff_iter` gave
-    // `with_r` more than 0.5 ns of extra slack here.
-    //
-    // The magnitude case — a FAST driver behind a real resistance, where shielding is
-    // genuine — is pinned in `vyges-loom`'s `dmp` tests, which set Rd explicitly rather
-    // than leaving it implied by a table.
+    // ⚠️ THIS ASSERTION WAS ONCE WEAKENED ON A FALSE READING. It briefly said the driver
+    // here was "too weak to shield (Rd ≈ 6.7k)" and asserted no shielding at all. That Rd
+    // was an artefact: our table lookup CLAMPED past the end of the load axis, so two
+    // lookups a hair apart returned the same number and `gateModelRd` came out zero-ish.
+    // The reference extrapolates (`findValueIndex` returns `size-2` and `Table2::findValue`
+    // uses the actual x), and with that fixed the fixture shields as it always should have.
+    // 🔑 A fixture that stops showing an effect is evidence about the ENGINE first.
     assert!(
-        (with_r.wns - lumped.wns).abs() < 0.01,
-        "a driver this weak (Rd ~6.7k vs Rpi 5k) cannot shield, so the distributed and \
-         lumped runs should differ only by the wire delay: with_r.wns={} lumped.wns={}",
+        with_r.wns > lumped.wns + 0.3,
+        "Ceff should cut driver delay: with_r.wns={} lumped.wns={}",
         with_r.wns,
         lumped.wns
     );
