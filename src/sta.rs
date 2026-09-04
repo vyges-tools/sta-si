@@ -342,6 +342,11 @@ pub(crate) struct Timing {
     clk_arrival: Vec<f64>,
     slew: Vec<f64>,         // setup-corner output slew, ns
     arr_min: Vec<f64>,      // earliest (hold) arrival, ns
+    // Hold-corner output slew, ns. Carried beside `slew` because a slew is what a
+    // downstream delay is looked up at: when two timers disagree about a DELAY, the
+    // question is almost always whether they agree about the SLEW that produced it, and
+    // comparing our late slew against a reference's min-path slew answers nothing.
+    slew_min: Vec<f64>,
     node_load: Vec<f64>,    // driver-node capacitive load, pF
     endpoint_req: Vec<f64>, // required time (meaningful at setup endpoints)
 }
@@ -358,6 +363,7 @@ impl Timing {
         clk_arrival: &[f64],
         slew: &[f64],
         arr_min: &[f64],
+        slew_min: &[f64],
         node_load: &[f64],
         endpoint_req: &[f64],
     ) -> Timing {
@@ -374,6 +380,7 @@ impl Timing {
             clk_arrival: clk_arrival.to_vec(),
             slew: slew.to_vec(),
             arr_min: arr_min.to_vec(),
+            slew_min: slew_min.to_vec(),
             node_load: node_load.to_vec(),
             endpoint_req: endpoint_req.to_vec(),
         }
@@ -533,6 +540,11 @@ impl Timer {
     /// Setup-corner output slew at `p`, ns.
     pub fn slew(&self, p: PinId) -> f64 {
         self.timing.slew.get(p).copied().unwrap_or(0.0)
+    }
+    /// Hold-corner (early) output slew at `p`, ns — the slew the min-delay path was
+    /// looked up at. Compare this, not [`Timer::slew`], against another timer's min path.
+    pub fn slew_min(&self, p: PinId) -> f64 {
+        self.timing.slew_min.get(p).copied().unwrap_or(0.0)
     }
     /// Capacitive load on `p` when it drives a net, pF (0 if `p` is not a net driver).
     pub fn load(&self, p: PinId) -> f64 {
@@ -1724,7 +1736,33 @@ fn build_report(
     // OpenSTA never does this — it varies min against max by derating and by a coupling
     // cap factor per analysis point, and always evaluates at the real operating point.
     // Measured on fft_top: WHS 0.6607 -> ~0.878 against OpenSTA's 0.8821.
-    let (early_d, early_s) = compute(&neg, &conv_net_slew);
+    //
+    // ⛔ AND IT NEEDS ITS OWN FIXED POINT, for the same reason the late one does. A net
+    // hands its sinks a DEGRADED slew, and that slew is what the next cell's delay is
+    // looked up at — so seeding the early interconnect from the LATE driver slews carries
+    // late slews into early delays. Measured on `_11950_/A0`: sink slew 1.0786, which is
+    // the LATE slew at its driver `_12893_/Q`, where the early slew there is 0.4032. That
+    // one pin's cell delay came out 0.211 ns long and the endpoint read 0.277 ns
+    // OPTIMISTIC — the direction that misses a real hold violation.
+    let (early_d, early_s) = {
+        let (mut d, mut sl) = compute(&neg, &conv_net_slew); // seeded from the late point
+        for _ in 0..MAX_SI_ITERS {
+            let (_a, slw, _f, _o, _, _, _) = relax(&d, &sl, false, &seed_main, false);
+            let e_net_slew: Vec<f64> = (0..nn)
+                .map(|i| net_drv[i].map(|dv| slw[dv]).unwrap_or(0.0))
+                .collect();
+            let (nd, ns) = compute(&neg, &e_net_slew);
+            let delta = (0..n_arcs)
+                .map(|k| (nd[k] - d[k]).abs())
+                .fold(0.0, f64::max);
+            d = nd;
+            sl = ns;
+            if delta < SI_TOL {
+                break;
+            }
+        }
+        (d, sl)
+    };
     // final late propagation consistent with the converged per-arc delays, and the
     // early (min-delay) propagation used for hold and for early clock arrivals.
     let (arrival, slew, from, order_late, late_arr, late_slew, late_from) =
@@ -2319,6 +2357,7 @@ fn build_report(
         &clk_arr,
         &slew,
         &arr_min,
+        &slew_min,
         &node_load,
         &endpoint_req,
     );

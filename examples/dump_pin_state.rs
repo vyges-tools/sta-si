@@ -35,13 +35,14 @@ fn main() {
     let hold: std::collections::HashMap<usize, f64> =
         t.report().hold_slacks.iter().map(|&(i, s)| (i, s)).collect();
 
-    println!("pin,slew,load,arrival,arrival_min,setup_slack,hold_slack");
+    println!("pin,slew,slew_min,load,arrival,arrival_min,setup_slack,hold_slack");
     for p in 0..t.num_pins() {
         let f = |v: Option<f64>| v.map(|x| format!("{x:.6}")).unwrap_or_default();
         println!(
-            "{},{:.6},{:.6},{:.6},{:.6},{},{}",
+            "{},{:.6},{:.6},{:.6},{:.6},{:.6},{},{}",
             t.pin_label(p),
             t.slew(p),
+            t.slew_min(p),
             t.load(p),
             t.arrival(p),
             t.arrival_min(p),

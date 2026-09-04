@@ -557,6 +557,7 @@ impl IncGraph {
             &self.state.clk_arrival,
             &slew,
             &arr_min,
+            &slew_min,
             &self.state.node_load,
             &endpoint_req,
         );
