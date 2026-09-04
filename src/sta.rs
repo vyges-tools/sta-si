@@ -1356,7 +1356,10 @@ fn build_report(
     // (which stops at them) as well as by CRPR further down.
     // The effective capacitance actually used at each driver node, so it can be diffed
     // against `report_dcalc`'s `Ceff=..` rather than re-derived. Diagnostic only.
-    let ceff_used = std::cell::RefCell::new(vec![f64::NAN; n]);
+    // ⚠️ PER OUTPUT LANE (0 = rise). Recording it per NODE reports whichever lane ran
+    // last, and `report_dcalc` prints a block per EDGE — diffing the two invites an
+    // apples-to-oranges comparison, which cost a round here.
+    let ceff_used = std::cell::RefCell::new(vec![[f64::NAN; 2]; n]);
     let mut is_ck = vec![false; n];
     for &i in &ck_node_list {
         is_ck[i] = true;
@@ -1408,6 +1411,14 @@ fn build_report(
     // arrival, cell-stage depth, and variance (AOCV/POCV). On return we collapse
     // each node to its worst lane so every downstream consumer is unchanged.
     let input_slew = job.input_slew;
+    // Library thresholds per output edge (lane 0 = rise), as `DmpAlg::init` reads them.
+    let th_all = lib.thresholds;
+    let dmp_vth = move |ol: usize| crate::dmp::Vth {
+        vth: if ol == 0 { th_all.output_rise } else { th_all.output_fall },
+        vl: if ol == 0 { th_all.slew_lower_rise } else { th_all.slew_lower_fall },
+        vh: if ol == 0 { th_all.slew_upper_rise } else { th_all.slew_upper_fall },
+        slew_derate: th_all.slew_derate,
+    };
     // `nd` = per-arc net delay, `ns` = per-arc degraded sink slew (0 = keep driver slew).
     #[allow(clippy::type_complexity)]
     // `seed_l` gives each source node its per-lane start time; `block_seq` stops
@@ -1542,25 +1553,59 @@ fn build_report(
                                 // CCS-into-RC: drive the effective capacitance (resistive
                                 // shielding), iterating Ceff <-> output transition to a
                                 // self-consistent point rather than a single lumped pass.
-                                let leff = match shield[v] {
-                                    // (near, far, far-branch time constant Rpi*C1).
-                                    // ⚠️ Rpi is in OHMS and C1 in pF, so the product is
-                                    // Ω·pF = 1e-12 s; ceff_iter wants ns.
-                                    Some((c2, rpi, c1)) => {
-                                        let ce =
-                                            crate::ccs::ceff_iter(c2, c1, rpi * c1 * 1e-3, |c| {
-                                                st.lookup(sin, c)
-                                            });
-                                        ceff_used.borrow_mut()[v] = ce;
-                                        ce
+                                // On the NLDM path this is the reference's own DMP solve
+                                // (`crate::dmp`, transcribed from `DmpPi`): the effective
+                                // capacitance from a three-equation Newton system, and a
+                                // driver slew taken from the resulting WAVEFORM rather than
+                                // from the slew table.
+                                //
+                                // ℹ️ CCS keeps `ceff_iter`. Per OpenSTA issue #73, from the
+                                // maintainer: under CCS "the effective capacitance changes
+                                // as the output voltage changes" — there is no single Ceff,
+                                // and `report_dcalc` is "a placeholder" there. The DMP solve
+                                // answers a question CCS does not ask.
+                                let ccs_arc = !arc.ccs.is_empty();
+                                let dmp = match (ccs_arc, shield[v]) {
+                                    (false, Some((c2, rpi, c1))) => {
+                                        let gate =
+                                            |c: f64| (dt.lookup(sin, c), st.lookup(sin, c));
+                                        let t = dmp_vth(ol);
+                                        let rd =
+                                            crate::dmp::gate_model_rd(t.vth, &gate, c1, c2);
+                                        // ⚠️ Rpi is in ohms; the solver works in kΩ so that
+                                        // rd·C and rpi·C land in ns.
+                                        Some(crate::dmp::solve_driver(
+                                            rd,
+                                            c2,
+                                            rpi / 1000.0,
+                                            c1,
+                                            t,
+                                            &gate,
+                                        ))
                                     }
-                                    None => load,
+                                    _ => None,
                                 };
-                                // CCS current-source delay when the arc carries it; else NLDM.
-                                let (d, sout) = if !arc.ccs.is_empty() {
+                                let leff = match (&dmp, shield[v]) {
+                                    (Some(r), _) => r.ceff,
+                                    (None, Some((c2, rpi, c1))) => crate::ccs::ceff_iter(
+                                        c2,
+                                        c1,
+                                        rpi * c1 * 1e-3,
+                                        |c| st.lookup(sin, c),
+                                    ),
+                                    (None, None) => load,
+                                };
+                                if shield[v].is_some() {
+                                    ceff_used.borrow_mut()[v][ol] = leff;
+                                }
+                                // CCS current-source delay when the arc carries it; else the
+                                // DMP result, else a plain NLDM lookup.
+                                let (d, sout) = if ccs_arc {
                                     arc.ccs
                                         .delay_slew(ol == 0, sin, leff, 0.3, 0.7)
                                         .unwrap_or((dt.lookup(sin, leff), st.lookup(sin, leff)))
+                                } else if let Some(r) = dmp {
+                                    (r.delay, r.slew)
                                 } else {
                                     (dt.lookup(sin, leff), st.lookup(sin, leff))
                                 };
@@ -1976,10 +2021,11 @@ fn build_report(
                     match shield[d] {
                         Some((c2, rpi, c1)) => eprintln!(
                             "rc-trace: ASKED net {nm} DRIVER Pi — ours C2={c2:.4} \
-                             Rpi={:.4}k C1={c1:.4} (total {:.4}) · Ceff={:.4} · load {:.4} pF",
+                             Rpi={:.4}k C1={c1:.4} (total {:.4}) · Ceff rise={:.4}                              fall={:.4} · load {:.4} pF",
                             rpi / 1000.0,
                             c2 + c1,
-                            ceff_used.borrow()[d],
+                            ceff_used.borrow()[d][0],
+                            ceff_used.borrow()[d][1],
                             node_load[d]
                         ),
                         None => eprintln!(

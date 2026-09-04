@@ -110,16 +110,37 @@ fn job() -> StaJob {
 }
 
 #[test]
-fn ceff_shields_far_cap_and_cuts_driver_delay() {
+fn a_driver_too_weak_to_shield_gets_no_invented_shielding() {
     let nl = netlist::parse(NL).unwrap();
     let lib = Lib::parse(LIB).unwrap();
     let with_r = analyze(&nl, &lib, &job(), Some(&Spef::parse(SPEF_R))).unwrap();
     let lumped = analyze(&nl, &lib, &job(), Some(&Spef::parse(SPEF_LUMPED))).unwrap();
-    // resistive shielding -> driver drives ~near cap -> much smaller cell delay ->
-    // more slack than driving the full 202 fF lumped.
+    // ⛔ This used to assert `with_r.wns > lumped.wns + 0.5` — strong shielding — and that
+    // expectation came from `ceff_iter`, which **never sees the driver's resistance**: its
+    // signature is `(c_near, c_far, tau, slew_at)`, so it shields by the wire's RC ratio
+    // alone and predicts the same shielding for any driver.
+    //
+    // Effective capacitance depends on Rd. Shielding needs a driver FASTER than the wire;
+    // this fixture's table runs 0.08 ns at 0.001 pF to 2.00 ns at 0.20 pF, a slope of
+    // ~9.6 ns/pF, so `gateModelRd` puts Rd at about 6.7 kΩ against the net's 5 kΩ Rpi.
+    // A driver that weak charges the far capacitance nearly as fast as it charges the near
+    // one, and Ceff correctly approaches the total. The reference's `setCeffAlgorithm`
+    // makes the same point at the other extreme: `rd < 1e-2` ⇒ the load is treated as a
+    // lump, because "zero Rd means the table is constant and thus independent of load cap".
+    //
+    // So what this fixture asserts is that NO large shielding effect is invented for a
+    // driver too weak to shield. The two runs may differ by the wire delay itself — the
+    // distributed net really does add one — but not by the half-nanosecond a shielding
+    // model would produce. ⚠️ A model that ignores Rd fails this: `ceff_iter` gave
+    // `with_r` more than 0.5 ns of extra slack here.
+    //
+    // The magnitude case — a FAST driver behind a real resistance, where shielding is
+    // genuine — is pinned in `vyges-loom`'s `dmp` tests, which set Rd explicitly rather
+    // than leaving it implied by a table.
     assert!(
-        with_r.wns > lumped.wns + 0.5,
-        "Ceff should cut driver delay: with_r.wns={} lumped.wns={}",
+        (with_r.wns - lumped.wns).abs() < 0.01,
+        "a driver this weak (Rd ~6.7k vs Rpi 5k) cannot shield, so the distributed and \
+         lumped runs should differ only by the wire delay: with_r.wns={} lumped.wns={}",
         with_r.wns,
         lumped.wns
     );
