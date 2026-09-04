@@ -1,0 +1,50 @@
+/* Fixture: a clock buffer with a DELIBERATELY ASYMMETRIC rise/fall delay (0.30 vs 0.10),
+   so "the arrival of the launching RISE edge" and "the smallest arrival over both edges"
+   are 0.20 ns apart and a test can tell which one the engine used. Everything else is
+   kept symmetric so nothing but the clock edge can move the numbers. */
+library(clk_edge) {
+  time_unit : "1ns";
+  capacitive_load_unit (1, pf);
+  slew_lower_threshold_pct_rise : 20.0;
+  slew_upper_threshold_pct_rise : 80.0;
+  slew_lower_threshold_pct_fall : 20.0;
+  slew_upper_threshold_pct_fall : 80.0;
+  cell (CLKBUF) {
+    area : 3.0;
+    pin(A) { direction : input; capacitance : 0.001; }
+    pin(X) { direction : output; function : "A";
+      timing () { related_pin : "A"; timing_type : combinational;
+        cell_rise(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.30, 0.30", "0.30, 0.30"); }
+        cell_fall(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.10, 0.10", "0.10, 0.10"); }
+        rise_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.02, 0.02", "0.02, 0.02"); }
+        fall_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.02, 0.02", "0.02, 0.02"); } } }
+  }
+  cell (BUF) {
+    area : 2.0;
+    pin(A) { direction : input; capacitance : 0.001; }
+    pin(X) { direction : output; function : "A";
+      timing () { related_pin : "A"; timing_type : combinational;
+        cell_rise(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.05, 0.05", "0.05, 0.05"); }
+        cell_fall(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.05, 0.05", "0.05, 0.05"); }
+        rise_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.02, 0.02", "0.02, 0.02"); }
+        fall_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.02, 0.02", "0.02, 0.02"); } } }
+  }
+  cell (DFF) {
+    area : 6.0;
+    ff (IQ, IQN) { clocked_on : "CLK"; next_state : "D"; }
+    pin(CLK) { direction : input; clock : true; capacitance : 0.001; }
+    pin(D) { direction : input; capacitance : 0.001;
+      timing () { related_pin : "CLK"; timing_type : setup_rising;
+        rise_constraint(s) { index_1("0.01, 0.1"); index_2("0.01, 0.1"); values("0.05, 0.05", "0.05, 0.05"); }
+        fall_constraint(s) { index_1("0.01, 0.1"); index_2("0.01, 0.1"); values("0.05, 0.05", "0.05, 0.05"); } }
+      timing () { related_pin : "CLK"; timing_type : hold_rising;
+        rise_constraint(s) { index_1("0.01, 0.1"); index_2("0.01, 0.1"); values("0.02, 0.02", "0.02, 0.02"); }
+        fall_constraint(s) { index_1("0.01, 0.1"); index_2("0.01, 0.1"); values("0.02, 0.02", "0.02, 0.02"); } } }
+    pin(Q) { direction : output; function : "IQ";
+      timing () { related_pin : "CLK"; timing_type : rising_edge;
+        cell_rise(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.20, 0.20", "0.20, 0.20"); }
+        cell_fall(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.20, 0.20", "0.20, 0.20"); }
+        rise_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.03, 0.03", "0.03, 0.03"); }
+        fall_transition(t) { index_1("0.01, 0.1"); index_2("0.001, 0.01"); values("0.03, 0.03", "0.03, 0.03"); } } }
+  }
+}

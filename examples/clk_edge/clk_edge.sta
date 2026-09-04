@@ -1,0 +1,16 @@
+# A CLK pin's EARLY and LATE arrival must be equal here.
+#
+# One corner, no derating, no OCV: the only thing that can separate an early from a late
+# clock arrival is DERATING, and there is none. The launching edge of `clock clk_i` is the
+# RISING edge, and a rising edge stays rising through a non-inverting CLKBUF, so both
+# passes must report the RISE arrival -- 2 x 0.30 = ~0.60, not 2 x 0.10 = ~0.20.
+#
+# OpenSTA satisfies this: on fft_top it reports 0.8411 at the launch CLK pin of a MIN
+# (hold) path, which is the same value our LATE pass computes (0.8405).
+design:      clk_edge
+netlist:     clk_edge.v
+lib:         clk_edge.lib
+clock:       clk_i clk_i 4.0
+input_slew:  0.02
+output_load: 0.005
+input_delay: 0.0

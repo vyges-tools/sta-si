@@ -6,6 +6,11 @@
 //! delay, so having ours in the same shape turns "our delays disagree" into "our *slews* disagree"
 //! or "our *loads* disagree", which are different bugs with different fixes.
 //!
+//! `arrival` is the LATE (setup) propagation and `arrival_min` the EARLY (hold) one. Both are
+//! dumped because their SPREAD is itself a finding: with a single corner and flat derate a
+//! reference timer carries one edge through the clock network, so a large early/late spread on
+//! a clock pin points at our per-lane collapse rather than at any delay number.
+//!
 //! Usage: `cargo run --release --example dump_pin_state -- JOB.sta > pins.csv`
 
 use vyges_sta_si::job::StaJob;
@@ -30,15 +35,16 @@ fn main() {
     let hold: std::collections::HashMap<usize, f64> =
         t.report().hold_slacks.iter().map(|&(i, s)| (i, s)).collect();
 
-    println!("pin,slew,load,arrival,setup_slack,hold_slack");
+    println!("pin,slew,load,arrival,arrival_min,setup_slack,hold_slack");
     for p in 0..t.num_pins() {
         let f = |v: Option<f64>| v.map(|x| format!("{x:.6}")).unwrap_or_default();
         println!(
-            "{},{:.6},{:.6},{:.6},{},{}",
+            "{},{:.6},{:.6},{:.6},{:.6},{},{}",
             t.pin_label(p),
             t.slew(p),
             t.load(p),
             t.arrival(p),
+            t.arrival_min(p),
             f(t.slack(p)),
             f(hold.get(&p).copied())
         );
