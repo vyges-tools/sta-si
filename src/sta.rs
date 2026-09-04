@@ -2399,11 +2399,6 @@ fn build_report(
 
     // worst (max) constraint over a pin's groups, interpolated at the operating
     // clock + data transitions — matches how delay arcs are looked up.
-    let eval_cons = |cons: &[Constraint], clk_slew: f64, data_slew: f64| -> f64 {
-        cons.iter()
-            .map(|c| c.eval(clk_slew, data_slew))
-            .fold(f64::NEG_INFINITY, f64::max)
-    };
 
     // timing exceptions, matched on launch/capture instance (or port) names.
     let inst_of = |node: usize| instance_of(&labels[node]).to_string();
@@ -2411,6 +2406,9 @@ fn build_report(
     // rule for that lives once in `Exception::covers` rather than being re-derived here.
     let match_exc = |ln: &str, cn: &str| job.exceptions.iter().find(|e| e.covers(ln, cn));
     let mut excluded_setup = vec![false; n]; // false-path endpoints (skip setup)
+    // Required time PER DATA EDGE. `endpoint_req` keeps the tighter of the two so the
+    // query API still answers with one number; the scoring loop below uses the pair.
+    let mut req_edge = vec![[f64::NAN; 2]; n];
 
     // setup capture uses the EARLY clock; CRPR adds back the shared-path pessimism;
     // the capture window is the launch→capture edge relation (one period intra-domain),
@@ -2435,7 +2433,6 @@ fn build_report(
             _ => 0.0,
         };
         let ck_slew = cap.map(|i| slew[i]).unwrap_or(input_slew);
-        let setup_v = eval_cons(setup, ck_slew, slew[*idx]);
         let pc = cap.map(&clock_period_of).unwrap_or(period);
         let pl = lck.map(&clock_period_of).unwrap_or(pc);
         let (mut setup_rel, _) = edge_relation(pl, pc);
@@ -2450,7 +2447,17 @@ fn build_report(
             excluded_setup[*idx] = true; // async clock groups: no setup check
         }
         let base = cap_early + setup_rel + crpr - job.setup_uncertainty;
-        endpoint_req[*idx] = base - setup_v;
+        // ⛔ PER DATA EDGE, for the same reason as hold: a check exists for one edge, so
+        // the latest arrival must meet THAT edge's setup constraint, not the worse of the
+        // two. `endpoint_req` keeps the tighter one for the single-valued query API.
+        for l in 0..2 {
+            let sv = setup
+                .iter()
+                .map(|c| c.eval_edge(l == 0, ck_slew, late_slew[*idx][l]))
+                .fold(f64::NEG_INFINITY, f64::max);
+            req_edge[*idx][l] = base - sv;
+        }
+        endpoint_req[*idx] = req_edge[*idx][0].min(req_edge[*idx][1]);
         // capture the clock-side constants so the fast path can re-derive required time
         // from the (possibly changed) data slew without re-walking the clock network.
         if simple_ctx && !excluded_setup[*idx] {
@@ -2488,7 +2495,21 @@ fn build_report(
             (false, false) => continue, // unreached by either
         };
         endpoints += 1;
-        let slack = endpoint_req[v] - arr_v;
+        // per-edge where we have it: each edge's own arrival against its own required.
+        // The clock-launched arrival is collapsed (it carries an absolute edge time, not a
+        // per-lane delay), so it is scored against the tighter required, as before.
+        let mut slack = f64::INFINITY;
+        if !req_edge[v][0].is_nan() && !clk_launched {
+            for l in 0..2 {
+                let a = late_arr[v][l];
+                if a.is_finite() {
+                    slack = slack.min(req_edge[v][l] - a);
+                }
+            }
+        }
+        if !slack.is_finite() {
+            slack = endpoint_req[v] - arr_v;
+        }
         if slack < 0.0 {
             tns += slack;
         }
@@ -2681,10 +2702,37 @@ fn build_report(
             _ => 0.0,
         };
         let ck_slew = cap.map(|i| slew_min[i]).unwrap_or(input_slew);
-        let hold_v = eval_cons(hold, ck_slew, slew_min[idx]);
         let base = crpr - cap_late - hold_rel - job.hold_uncertainty;
-        // earliest data must arrive after the (late) capture edge + hold relation
-        let slack = arr_min[idx] + base - hold_v;
+        // ⛔ PER DATA EDGE. A check exists for ONE edge at a time —
+        // `VisitPathEnds::visitCheckEnd` matches `check_arc->toEdge()` against the path's
+        // `end_rf` — so each edge's own arrival is scored against that edge's own
+        // constraint, and the worst of the two is the endpoint's slack.
+        //
+        // Taking `min` over the lanes for the arrival and `max` over rise/fall for the
+        // constraint scores a pairing no check has. It shows up on ASYNC release paths:
+        // for an active-low reset the release is the RISING edge, and the reference's min
+        // path is `^` at every node, while the minimum over lanes is the falling (assert)
+        // edge. Measured on fft_top: all 132 async endpoints pessimistic, mean −0.1414.
+        let mut slack = f64::INFINITY;
+        for l in 0..2 {
+            let a = early_arr[idx][l];
+            if !a.is_finite() {
+                continue;
+            }
+            let hv = hold
+                .iter()
+                .map(|c| c.eval_edge(l == 0, ck_slew, early_slew[idx][l]))
+                .fold(f64::NEG_INFINITY, f64::max);
+            let sl = a + base - hv;
+            if sl < slack {
+                slack = sl;
+            }
+        }
+        if !slack.is_finite() {
+            // no edge reached this pin after all
+            hold_endpoints -= 1;
+            continue;
+        }
         hold_slacks.push((idx, slack));
         if simple_ctx {
             inc_hold.push(HoldRec {

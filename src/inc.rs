@@ -156,7 +156,19 @@ pub(crate) struct IncGraph {
 }
 
 /// worst (max) constraint over a pin's groups, interpolated at the operating slews —
+/// ⛔ PER DATA EDGE, and it must stay identical to the full builder's. A check exists for
+/// one edge at a time, so each edge's arrival is scored against that edge's constraint;
+/// pairing an extremum arrival with the worse constraint scores a check that does not
+/// exist. If this and `sta.rs` ever disagree, a cell swap re-scores the design differently
+/// from a full analysis and nothing says so.
+fn eval_cons_edge(cons: &[Constraint], rising: bool, clk_slew: f64, data_slew: f64) -> f64 {
+    cons.iter()
+        .map(|c| c.eval_edge(rising, clk_slew, data_slew))
+        .fold(f64::NEG_INFINITY, f64::max)
+}
+
 /// identical to `build_report`'s `eval_cons`.
+#[allow(dead_code)]
 fn eval_cons(cons: &[Constraint], clk_slew: f64, data_slew: f64) -> f64 {
     cons.iter()
         .map(|c| c.eval(clk_slew, data_slew))
@@ -461,8 +473,22 @@ impl IncGraph {
                 return None;
             }
             let cons = cons_override.get(&r.idx).map(|(su, _)| su).unwrap_or(&r.cons);
-            let setup_v = eval_cons(cons, r.ck_slew, slew[r.idx]);
-            endpoint_req[r.idx] = r.base - setup_v;
+            // per edge, then folded back into the single `endpoint_req` this path carries,
+            // so `endpoint_req - arrival` still yields the per-edge slack downstream.
+            let mut best = f64::INFINITY;
+            for l in 0..2 {
+                let a = late.arr[r.idx][l];
+                if !a.is_finite() {
+                    continue;
+                }
+                let sv = eval_cons_edge(cons, l == 0, r.ck_slew, late.slew[r.idx][l]);
+                best = best.min(r.base - sv - a);
+            }
+            endpoint_req[r.idx] = if best.is_finite() {
+                best + arrival[r.idx]
+            } else {
+                r.base - eval_cons_edge(cons, true, r.ck_slew, slew[r.idx])
+            };
         }
         for r in &self.topo.hold_recs {
             if in_cone[r.idx] && self.launch_ck(r.idx, &from_min) != r.launch_ck {
@@ -517,8 +543,19 @@ impl IncGraph {
             }
             hold_endpoints += 1;
             let cons = cons_override.get(&r.idx).map(|(_, ho)| ho).unwrap_or(&r.cons);
-            let hold_v = eval_cons(cons, r.ck_slew, slew_min[r.idx]);
-            let slack = arr_min[r.idx] + r.base - hold_v;
+            let mut slack = f64::INFINITY;
+            for l in 0..2 {
+                let a = early.arr[r.idx][l];
+                if !a.is_finite() {
+                    continue;
+                }
+                let hv = eval_cons_edge(cons, l == 0, r.ck_slew, early.slew[r.idx][l]);
+                slack = slack.min(a + r.base - hv);
+            }
+            if !slack.is_finite() {
+                hold_endpoints -= 1;
+                continue;
+            }
             hold_slacks.push((r.idx, slack));
             if slack < 0.0 {
                 ths += slack;

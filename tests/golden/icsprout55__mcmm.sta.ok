@@ -6,11 +6,11 @@ MCMM report — design ics55_regreg_mcmm
 
   scenario               period     WNS setup      WHS hold   verdict
   corner_ss               2.000        1.6963        0.1800   MET
-  corner_tt               2.000        1.8281        0.1124   MET
-  corner_ff               2.000        1.8746        0.0769   MET
+  corner_tt               2.000        1.8290        0.1124   MET
+  corner_ff               2.000        1.8777        0.0826   MET
 
   worst setup: 1.6963 ns  (scenario corner_ss)   [MET]
-  worst hold:  0.0769 ns  (scenario corner_ff)   [MET]
+  worst hold:  0.0826 ns  (scenario corner_ff)   [MET]
 --- stderr ---
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 3 instance(s) of 2 master(s); 3 timed, 0 physical-only","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 2 cell(s) loaded, 2 used by the design","objects":["clock:clk"]}
@@ -19,5 +19,5 @@ MCMM report — design ics55_regreg_mcmm
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 3 instance(s) of 2 master(s); 3 timed, 0 physical-only","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 2 cell(s) loaded, 2 used by the design","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.6963 ns, TNS 0.0000 ns, WHS 0.1800 ns — 0 violation(s)"}
-{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.8281 ns, TNS 0.0000 ns, WHS 0.1124 ns — 0 violation(s)"}
-{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.8746 ns, TNS 0.0000 ns, WHS 0.0769 ns — 0 violation(s)"}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.8290 ns, TNS 0.0000 ns, WHS 0.1124 ns — 0 violation(s)"}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.8777 ns, TNS 0.0000 ns, WHS 0.0826 ns — 0 violation(s)"}

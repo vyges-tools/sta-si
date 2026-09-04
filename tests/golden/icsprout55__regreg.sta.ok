@@ -5,14 +5,16 @@ STA report — design ics55_regreg
   clock clk  period 2.000 ns   xtalk_miller 2.00
   OCV: flat derate — late 1.000 / early 1.000   CRPR: on
   endpoints: 3
-  WNS: 1.8281 ns    TNS: 0.0000 ns    [MET]
+  WNS: 1.8290 ns    TNS: 0.0000 ns    [MET]
 
-  worst path to r1/D  (slack 1.8281 ns):
+  worst path to r2/D  (slack 1.8290 ns):
       arrival     slew   node
        0.0000   0.0500   clk
-       0.0000   0.0500   r2/CK
-       0.1481   0.0721   r2/Q
-       0.1481   0.0721   r1/D
+       0.0000   0.0500   r1/CK
+       0.1140   0.0235   r1/Q
+       0.1140   0.0235   g1/A
+       0.1291   0.0136   g1/Y
+       0.1291   0.0136   r2/D
 
   hold endpoints: 2    WHS: 0.1124 ns    THS: 0.0000 ns    [MET]
   worst hold path to r1/D  (slack 0.1124 ns):
@@ -22,8 +24,8 @@ STA report — design ics55_regreg
        0.1211   0.0633   r2/Q
        0.1211   0.0633   r1/D
 
-  achievable: ~0.172 ns → ~5817.6 MHz   (target 2.000 ns → ~500.0 MHz)
+  achievable: ~0.171 ns → ~5849.0 MHz   (target 2.000 ns → ~500.0 MHz)
 --- stderr ---
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 3 instance(s) of 2 master(s); 3 timed, 0 physical-only","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 2 cell(s) loaded, 2 used by the design","objects":["clock:clk"]}
-{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.8281 ns, TNS 0.0000 ns, WHS 0.1124 ns — 0 violation(s)"}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.8290 ns, TNS 0.0000 ns, WHS 0.1124 ns — 0 violation(s)"}
