@@ -1,0 +1,23 @@
+# A register clocked by a clock the job never declares carries NO check.
+#
+# OpenSTA seeds clock-tagged paths only at pins the SDC names as a clock source, so
+# pclk_i here is an ordinary data input: its arrival propagates through b1/b2 as DATA
+# and r2's CLK pin never holds a clock. VisitPathEnds::visitCheckEnd then builds no
+# PathEndCheck for r2 at all -- it is an unconstrained endpoint, not a passing one.
+#
+# input_delay is declared (12 ns, as fft_top's SDC does) precisely so this cannot be
+# confused with the unconstrained-INPUT-PORT rule: every port here has an arrival, and
+# r2 must still go unchecked because its CLOCK is undeclared.
+# OUT OF SCOPE, deliberately left in: r2/Q still launches a path into the constrained
+# output pq_o, so the golden shows a setup violation there. That is not a defect of this
+# rule -- OpenSTA's arrival search crosses a reg CLK->Q arc too (`SearchPred2::searchThru`
+# blocks only timing-check edges), so the path genuinely exists. The rule declines the
+# four REGISTER checks, which is what was specified and measured; the output-delay side
+# is a separate question and is not claimed here.
+design:      undeclared_clk
+netlist:     undeclared_clk.v
+lib:         undeclared_clk.lib
+clock:       clk_i clk_i 2.0
+input_slew:  0.02
+output_load: 0.005
+input_delay: 12.0

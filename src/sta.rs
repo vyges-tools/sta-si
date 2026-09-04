@@ -1763,6 +1763,74 @@ fn build_report(
             clock_src.insert(nd, *per);
         }
     }
+    // ---- is this register's clock pin reached by a DECLARED clock? ------
+    // OpenSTA seeds clock-tagged paths only at pins the SDC names as a clock source
+    // (`Sdc::isLeafPinClock` gating `seedClkArrivals` in `Search::seedArrival`) and
+    // propagates that tag forward; everything else starts as a DATA arrival via
+    // `seedInputArrival`. `VisitPathEnds::visitCheckEnd` then builds a setup / hold /
+    // recovery / removal `PathEndCheck` only for a target clock path whose
+    // `isClock()` is true — with none it leaves `check_clked` false and falls to
+    // `visitCheckEndUnclked`, which emits nothing but an explicit set_max_delay /
+    // set_min_delay. So a register clocked by a clock the SDC never declares carries
+    // NO check at all; it is an unconstrained endpoint, not a passing one.
+    //
+    // This walk is that tag propagation: forward from every declared clock source,
+    // stopping AT a CK pin exactly as the clock-launched pass does (`block_seq`
+    // above) — a CK->Q arc starts a new launch and does not carry the clock onward.
+    //
+    // Measured on fft_top, whose SDC declares clk_i but not pclk_i: 194 of 730 CK
+    // pins arrive at ~12.8 ns because pclk_i's 12 ns `set_input_delay` propagates
+    // through the clock buffers and was then used as a CAPTURE CLOCK ARRIVAL. That
+    // put WHS at -1.0682 where OpenSTA and sign-off both say +0.88, and drove 599
+    // false delay-cell insertions into a design that is already hold-clean.
+    let mut clock_reached = vec![false; n];
+    {
+        let mut stack: Vec<usize> = clock_src.keys().copied().collect();
+        for &s in &stack {
+            clock_reached[s] = true;
+        }
+        while let Some(u) = stack.pop() {
+            if is_ck[u] {
+                continue; // the clock edge stops here; CK->Q is a new launch
+            }
+            for e in &out_edges[u] {
+                if !clock_reached[e.to] {
+                    clock_reached[e.to] = true;
+                    stack.push(e.to);
+                }
+            }
+        }
+    }
+    // Guarded on having RESOLVED at least one declared clock source. With none we
+    // cannot tell a missing `create_clock` from a clock port this model failed to
+    // locate, and declining every check would turn that model gap into a silently
+    // clean design — the exact failure this rule exists to prevent.
+    let clock_declared = !clock_src.is_empty();
+    let unclocked_ck = |ck: Option<usize>| -> bool {
+        clock_declared && ck.is_some_and(|c| !clock_reached[c])
+    };
+    // Say what was skipped. Leaving these endpoints out makes them vanish from
+    // WNS/WHS, and an incomplete SDC must not read as a clean design, so the count
+    // is on stderr — the same argument as the unconstrained-input-port note above.
+    if clock_declared {
+        let unclocked: Vec<usize> = (0..n).filter(|&i| is_ck[i] && !clock_reached[i]).collect();
+        if !unclocked.is_empty() {
+            let total = is_ck.iter().filter(|&&b| b).count();
+            let head: Vec<&str> = unclocked.iter().take(5).map(|&i| labels[i].as_str()).collect();
+            eprintln!(
+                "note: {} of {total} register clock pin(s) are not reached by a declared \
+                 clock and carry no setup/hold/recovery/removal check ({}{}). Add \
+                 create_clock for the missing clock.",
+                unclocked.len(),
+                head.join(", "),
+                if unclocked.len() > head.len() {
+                    ", \u{2026}"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
     // period of the clock reaching a CK pin = nearest clock source toward the root
     let clock_period_of = |ck: usize| -> f64 {
         for node in path_to_root(ck) {
@@ -1857,6 +1925,14 @@ fn build_report(
     // shifted out by a multicycle exception (false paths drop the endpoint).
     for (idx, setup, ck) in &flop_d {
         let cap = ck_node(ck);
+        // No declared clock reaches this capture register, so it has no reference to
+        // be checked against: OpenSTA builds no PathEndCheck here at all. Scoring it
+        // against the data arrival that happens to sit on its CK pin invents a check.
+        // Covers RECOVERY too — `flop_d` carries both setup and recovery constraints.
+        if unclocked_ck(cap) {
+            excluded_setup[*idx] = true;
+            continue;
+        }
         let lck = launch_ck(*idx, &from);
         let cap_early = cap
             .map(|i| arr_min[i])
@@ -2079,6 +2155,10 @@ fn build_report(
             continue; // unreached
         }
         let cap = ck_node(ck);
+        // Same rule on the hold side; `flop_hold` carries both hold and REMOVAL.
+        if unclocked_ck(cap) {
+            continue;
+        }
         let lck = launch_ck(idx, &from_min);
         let pc = cap.map(&clock_period_of).unwrap_or(period);
         let pl = lck.map(&clock_period_of).unwrap_or(pc);

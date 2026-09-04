@@ -1,0 +1,35 @@
+$ vyges-sta-si run examples/undeclared_clk/undeclared_clk.sta
+exit: 0
+--- stdout ---
+STA report — design undeclared_clk
+  clock clk_i  period 2.000 ns   xtalk_miller 2.00
+  OCV: flat derate — late 1.000 / early 1.000   CRPR: on
+  endpoints: 4
+  WNS: -10.4202 ns    TNS: -30.5802 ns    [VIOLATED]
+
+  worst path to pq_o  (slack -10.4202 ns):
+      arrival     slew   node
+      12.0000   0.0200   pclk_i
+      12.0000   0.0200   b1/A
+      12.0533   0.0211   b1/X
+      12.0533   0.0211   b2/A
+      12.1070   0.0212   b2/X
+      12.1070   0.0212   r2/CLK
+      12.4202   0.0462   r2/Q
+      12.4202   0.0462   pq_o
+
+  hold endpoints: 2    WHS: 11.9300 ns    THS: 0.0000 ns    [MET]
+  worst hold path to r1/RESET_B  (slack 11.9300 ns):
+      arrival     slew   node
+      12.0000   0.0200   rst_n_i
+      12.0000   0.0200   b4/A
+      12.0533   0.0211   b4/X
+      12.0533   0.0211   r1/RESET_B
+
+  achievable: ~12.420 ns → ~80.5 MHz   (target 2.000 ns → ~500.0 MHz)
+--- stderr ---
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 9 instance(s) of 2 master(s); 9 timed, 0 physical-only","objects":["clock:clk_i"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 2 cell(s) loaded, 2 used by the design","objects":["clock:clk_i"]}
+note: 1 of 2 register clock pin(s) are not reached by a declared clock and carry no setup/hold/recovery/removal check (r2/CLK). Add create_clock for the missing clock.
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-SETUP","raw_msg":"setup violation at pq_o: WNS -10.4202 ns (TNS -30.5802 ns over 4 endpoint(s))","objects":["net:pq_o","clock:clk_i"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-DONE","raw_msg":"sta complete: WNS -10.4202 ns, TNS -30.5802 ns, WHS 11.9300 ns — 1 violation(s)"}
