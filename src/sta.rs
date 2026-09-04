@@ -1678,9 +1678,15 @@ fn build_report(
     const SI_TOL: f64 = 1e-9; // ns — per-arc delay change below which we stop
     let neg = vec![f64::NEG_INFINITY; nn];
     let zero = vec![0.0f64; nn];
-    let (nom_d, nom_s) = compute(&neg, &zero); // nominal: no windows -> no crosstalk
+    // A STARTING POINT for the iteration below, nothing more: no windows and no slews yet
+    // exist, so this is a degenerate operating point and its delays are systematically
+    // small. ⚠️ It is not a usable answer — see `early_d`/`early_s` after the loop.
+    let (nom_d, nom_s) = compute(&neg, &zero);
     let mut arc_d = nom_d.clone();
     let mut arc_s = nom_s.clone();
+    // The converged per-net driver slew, kept past the loop: the EARLY interconnect has to
+    // be evaluated at the same operating point as the late one.
+    let mut conv_net_slew = zero.clone();
     let mut cycle_checked = false;
     for _ in 0..MAX_SI_ITERS {
         let (arr, slw, _f, ord, _, _, _) = relax(&arc_d, &arc_s, true, &seed_main, false);
@@ -1700,18 +1706,31 @@ fn build_report(
         let delta = (0..n_arcs)
             .map(|k| (nd[k] - arc_d[k]).abs())
             .fold(0.0, f64::max);
+        conv_net_slew = net_slew;
         arc_d = nd;
         arc_s = ns;
         if delta < SI_TOL {
             break;
         }
     }
+    // The EARLY (min-delay) interconnect: no coupling windows — a hold path is scored
+    // without the aggressor pessimism the late path carries — but at the CONVERGED
+    // OPERATING POINT, exactly like the late one.
+    //
+    // ⛔ This used to reuse `nom_d`/`nom_s`, the loop's zero-slew SEED. That is not
+    // "no crosstalk", it is "no slew": every early delay came out systematically small,
+    // and disabling coupling entirely (`miller: 1.0`) did not move the answer by a
+    // picosecond, which is what proved the slew and not the coupling was responsible.
+    // OpenSTA never does this — it varies min against max by derating and by a coupling
+    // cap factor per analysis point, and always evaluates at the real operating point.
+    // Measured on fft_top: WHS 0.6607 -> ~0.878 against OpenSTA's 0.8821.
+    let (early_d, early_s) = compute(&neg, &conv_net_slew);
     // final late propagation consistent with the converged per-arc delays, and the
     // early (min-delay) propagation used for hold and for early clock arrivals.
     let (arrival, slew, from, order_late, late_arr, late_slew, late_from) =
         relax(&arc_d, &arc_s, true, &seed_main, false);
     let (arr_min, slew_min, from_min, _ord_min, early_arr, early_slew, early_from) =
-        relax(&nom_d, &nom_s, false, &seed_main, false);
+        relax(&early_d, &early_s, false, &seed_main, false);
 
     // Clock-launched arrivals: the same late propagation, but started at the clock
     // source's own edge times and stopped at every flop CK pin. A clock port driving
