@@ -1745,6 +1745,13 @@ fn build_report(
                         if let Some(dl) = rc.elmore(dt, xc[i], &net_pin_cap[i]) {
                             if let Some(&tau) = dl.get(st) {
                                 mark(RC_TREE_ELMORE);
+                                // ⛔ TYPES (`cpp-to-rust-numeric-reference.md` §2 — narrowing
+                                // is the rounding people miss). The reduced Elmore is STORED
+                                // and READ as float: `setElmore(Parasitic*, const Pin*,
+                                // float)` and `findElmore(..., float &elmore, ...)`. So the
+                                // double the DFS accumulated is rounded to f32 before any
+                                // consumer sees it.
+                                let tau = tau as f32 as f64;
                                 let drvr_slew = net_slew[i];
                                 // degenerate case, verbatim from DmpAlg::loadDelaySlew:
                                 // an Elmore small against the driver slew is the delay.
@@ -1752,13 +1759,18 @@ fn build_report(
                                     return (tau, drvr_slew);
                                 }
                                 let th = lib.thresholds;
-                                let delay = -tau * (1.0 - th.input_rise).ln();
-                                let slew = drvr_slew
+                                // The arithmetic itself is double — `1.0` in
+                                // `log(1.0 - vth)` promotes the float thresholds — but both
+                                // results land in `ArcDelay`/`Slew`, and `Delay.hh` has
+                                // `typedef float Delay`. That is a SECOND narrowing.
+                                let delay = (-tau * (1.0 - th.input_rise).ln()) as f32 as f64;
+                                let slew = (drvr_slew
                                     + tau
                                         * ((1.0 - th.slew_lower_rise)
                                             / (1.0 - th.slew_upper_rise))
                                             .ln()
-                                        / th.slew_derate;
+                                        / th.slew_derate) as f32
+                                    as f64;
                                 // upstream's two guards: a negative delay falls back to the
                                 // Elmore value, and a load slew may not be sharper than the
                                 // driver's.
@@ -1842,6 +1854,22 @@ fn build_report(
         for &x in b.iter() {
             tally[x as usize] += 1;
         }
+        // Does the DRIVER get an effective capacitance, or the total? Upstream always
+        // characterises the gate against the Pi model from the reduction
+        // (`DmpCeffDelayCalc::gateDelay` -> `piModel` -> `setCeffAlgorithm` ->
+        // `gateDelaySlew`), and the driver slew that comes out is what anchors every
+        // sink's `loadDelaySlew`. A driver with no Pi here falls back to the TOTAL load,
+        // which double-counts capacitance the wire resistance shields.
+        let drivers: usize = nets.values().filter(|nt| nt.driver.is_some()).count();
+        let with_pi: usize = nets
+            .values()
+            .filter_map(|nt| nt.driver)
+            .filter(|d| shield[*d].is_some())
+            .count();
+        eprintln!(
+            "rc-trace: driver Pi (Ceff) available on {with_pi} of {drivers} driven net(s) — \
+             the rest use the TOTAL load"
+        );
         eprintln!(
             "rc-trace: {} interconnect arc(s) — transient {} · tree-elmore {} · lumped {} · \
              no-parasitics {}",
