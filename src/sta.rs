@@ -1360,6 +1360,16 @@ fn build_report(
     // last, and `report_dcalc` prints a block per EDGE — diffing the two invites an
     // apples-to-oranges comparison, which cost a round here.
     let ceff_used = std::cell::RefCell::new(vec![[f64::NAN; 2]; n]);
+    // The driver waveform each cell arc produced, per driver node and output lane.
+    //
+    // 🔑 CALL SEQUENCE. Upstream evaluates the gate and then every sink of that net inside
+    // ONE arc evaluation, so `loadDelaySlew` reads what `gateDelaySlew` just set. Our net
+    // delays are computed in `compute` and the gate in `relax`, so the state is carried
+    // across — and the interconnect loop already alternates the two, which is the fixed
+    // point that makes it converge. The FIRST `compute` has no waveform and falls back to
+    // the closed form, exactly as before.
+    let drvr_wave: std::cell::RefCell<Vec<[Option<crate::dmp::DriverWaveform>; 2]>> =
+        std::cell::RefCell::new(vec![[None, None]; n]);
     let mut is_ck = vec![false; n];
     for &i in &ck_node_list {
         is_ck[i] = true;
@@ -1489,8 +1499,8 @@ fn build_report(
     };
 
     #[allow(clippy::type_complexity)]
-    let relax = |nd: &[f64],
-                 ns: &[f64],
+    let relax = |nd: &[[f64; 2]],
+                 ns: &[[f64; 2]],
                  late: bool,
                  seed_l: &[[f64; 2]],
                  block_seq: bool|
@@ -1553,9 +1563,9 @@ fn build_report(
                         // interconnect: rise->rise, fall->fall, same delay, no derate.
                         // The sink slew is the transient-degraded value when available
                         // (>0), else the driver slew passes through unchanged.
-                        let d = nd[*i];
-                        let sink_slew = ns[*i];
                         for l in 0..2 {
+                            let d = nd[*i][l];
+                            let sink_slew = ns[*i][l];
                             let a = arr[u][l];
                             if !a.is_finite() {
                                 continue;
@@ -1680,6 +1690,9 @@ fn build_report(
                                 };
                                 if shield[v].is_some() {
                                     ceff_used.borrow_mut()[v][ol] = leff;
+                                }
+                                if let Some(r) = &dmp {
+                                    drvr_wave.borrow_mut()[v][ol] = r.waveform;
                                 }
                                 // CCS current-source delay when the arc carries it; else the
                                 // DMP result, else a plain NLDM lookup.
@@ -1820,7 +1833,12 @@ fn build_report(
     // `rc_model: transient` in the job asks for our waveform model in front of the
     // reference one. Default is the reference.
     let transient_first = job.rc_model.eq_ignore_ascii_case("transient");
-    let compute = |sw: &[f64], net_slew: &[f64]| -> (Vec<f64>, Vec<f64>) {
+    // ⛔ PER ARC PER LANE. The reference computes a wire delay and a sink slew inside the
+    // RISE or FALL arc evaluation — `loadDelaySlew` is called from `gateDelay` for one
+    // `RiseFall` — so both are per edge. Collapsing them to one value per arc forces a
+    // single driver waveform onto both edges, which was measured to take data-hold rms
+    // from 0.0329 to 0.0537 when the per-sink crossing solve was wired against it.
+    let compute = |sw: &[[f64; 2]], net_slew: &[[f64; 2]]| -> (Vec<[f64; 2]>, Vec<[f64; 2]>) {
         // Per-net coupling capacitance seen by the RC network, in fF.
         //
         // 🔑 BASE, and it was missing: a coupling capacitor is GROUNDED on the net at
@@ -1836,14 +1854,18 @@ fn build_report(
         // entirely whenever no aggressor window overlapped, which on the early (hold) pass
         // is always. Measured on fft_top's `net55`: 194.4 fF over 512 aggressors against
         // 560.7 fF of wire — 34.7 % of the net's capacitance simply absent.
+        // Coupling stays a per-NET aggregate: our Miller term is one number for the net,
+        // so the window is taken from the worst lane rather than split per edge.
+        let win = |x: [f64; 2]| if x[0] > x[1] { x[0] } else { x[1] };
+        let slw_of = |x: [f64; 2]| if x[0] > x[1] { x[0] } else { x[1] };
         let xc: Vec<f64> = (0..nn)
             .map(|i| {
-                let svi = sw[i];
+                let svi = win(sw[i]);
                 let mut x: f64 = net_cpl[i].iter().map(|(_, cc)| *cc).sum();
                 if svi.is_finite() {
                     for &(ai, cc) in &net_cpl[i] {
-                        let window = (net_slew[i] + net_slew[ai]) / 2.0 + guard;
-                        if sw[ai].is_finite() && (sw[ai] - svi).abs() <= window {
+                        let window = (slw_of(net_slew[i]) + slw_of(net_slew[ai])) / 2.0 + guard;
+                        if win(sw[ai]).is_finite() && (win(sw[ai]) - svi).abs() <= window {
                             x += (miller - 1.0).max(0.0) * cc;
                         }
                     }
@@ -1861,7 +1883,7 @@ fn build_report(
                 let rc = spef?.nets.get(&net_order[i])?;
                 let (di, dp) = net_drv_ip[i].as_ref()?;
                 let dn = rc.pin_node(di, dp)?;
-                rc.transient(dn, net_slew[i], xc[i], lib.thresholds)
+                rc.transient(dn, slw_of(net_slew[i]), xc[i], lib.thresholds)
             })
             .collect();
         // each arc -> (net delay, degraded sink slew); slew 0 means "keep driver slew"
@@ -1872,7 +1894,7 @@ fn build_report(
                 let mark = |b: u8| rc_branch.borrow_mut()[k] = b;
                 let Some(rc) = spef.and_then(|s| s.nets.get(&net_order[i])) else {
                     mark(RC_NONE);
-                    return (0.0, 0.0); // no parasitics -> ideal interconnect
+                    return ([0.0, 0.0], [0.0, 0.0]); // no parasitics -> ideal interconnect
                 };
                 // ---- BASE MODEL: per-sink Elmore -----------------------------------
                 // OpenSTA's default arc delay calculator is `dmp_ceff_elmore`
@@ -1923,30 +1945,53 @@ fn build_report(
                                 // double the DFS accumulated is rounded to f32 before any
                                 // consumer sees it.
                                 let tau = tau as f32 as f64;
-                                let drvr_slew = net_slew[i];
-                                // degenerate case, verbatim from DmpAlg::loadDelaySlew:
-                                // an Elmore small against the driver slew is the delay.
-                                if tau == 0.0 || tau < drvr_slew * 1e-3 {
-                                    return (tau, drvr_slew);
-                                }
+                                // PER EDGE: each lane has its own driver slew and its own
+                                // thresholds, exactly as the reference evaluates one arc.
+                                // The arithmetic is double — `1.0` in `log(1.0 - vth)`
+                                // promotes the float thresholds — but both results land in
+                                // `ArcDelay`/`Slew`, and `Delay.hh` has `typedef float
+                                // Delay`, which is a SECOND narrowing.
                                 let th = lib.thresholds;
-                                // The arithmetic itself is double — `1.0` in
-                                // `log(1.0 - vth)` promotes the float thresholds — but both
-                                // results land in `ArcDelay`/`Slew`, and `Delay.hh` has
-                                // `typedef float Delay`. That is a SECOND narrowing.
-                                let delay = (-tau * (1.0 - th.input_rise).ln()) as f32 as f64;
-                                let slew = (drvr_slew
-                                    + tau
-                                        * ((1.0 - th.slew_lower_rise)
-                                            / (1.0 - th.slew_upper_rise))
-                                            .ln()
-                                        / th.slew_derate) as f32
-                                    as f64;
-                                // upstream's two guards: a negative delay falls back to the
-                                // Elmore value, and a load slew may not be sharper than the
-                                // driver's.
-                                let delay = if delay < 0.0 { tau } else { delay };
-                                return (delay, slew.max(drvr_slew));
+                                let mut dl = [0.0f64; 2];
+                                let mut sl = [0.0f64; 2];
+                                // The reference's own per-sink model, when this edge's
+                                // driver produced a waveform: `DmpAlg::loadDelaySlew` puts
+                                // a third pole at 1/tau on it and solves for the actual
+                                // Vth/Vl/Vh crossings. Its degenerate branch is the closed
+                                // form's degenerate branch, so the fallback below is only
+                                // for an edge that has not been evaluated yet.
+                                let wv = net_drv[i].map(|dn| drvr_wave.borrow()[dn]);
+                                for l in 0..2 {
+                                    if let Some(Some(w)) = wv.map(|x| x[l]) {
+                                        let (d, sv) = w.load_delay_slew(tau);
+                                        dl[l] = d as f32 as f64;
+                                        sl[l] = sv as f32 as f64;
+                                        continue;
+                                    }
+                                    let drvr_slew = net_slew[i][l];
+                                    // degenerate case, verbatim from
+                                    // `DmpAlg::loadDelaySlew`: an Elmore small against the
+                                    // driver slew IS the delay, and the slew is undegraded.
+                                    if tau == 0.0 || tau < drvr_slew * 1e-3 {
+                                        dl[l] = tau;
+                                        sl[l] = drvr_slew;
+                                        continue;
+                                    }
+                                    let (vth, vl, vh) = if l == 0 {
+                                        (th.input_rise, th.slew_lower_rise, th.slew_upper_rise)
+                                    } else {
+                                        (th.input_fall, th.slew_lower_fall, th.slew_upper_fall)
+                                    };
+                                    let d = (-tau * (1.0 - vth).ln()) as f32 as f64;
+                                    let sv = (drvr_slew
+                                        + tau * ((1.0 - vl) / (1.0 - vh)).ln() / th.slew_derate)
+                                        as f32
+                                        as f64;
+                                    // upstream's two guards
+                                    dl[l] = if d < 0.0 { tau } else { d };
+                                    sl[l] = sv.max(drvr_slew);
+                                }
+                                return (dl, sl);
                             }
                         }
                     }
@@ -1960,7 +2005,8 @@ fn build_report(
                         if let Some(sn) = rc.pin_node(si, sp) {
                             if let Some(&(delay, slew)) = map.get(sn) {
                                 mark(RC_TRANSIENT);
-                                return (delay, slew);
+                                // one transient per net, so both edges share it
+                                return ([delay, delay], [slew, slew]);
                             }
                         }
                     }
@@ -1970,18 +2016,16 @@ fn build_report(
                 // that lands here degrades no slew at all, and every downstream delay is
                 // looked up at too sharp a transition.
                 mark(RC_LUMPED);
-                (
-                    net_res[i] * net_cap[i] * 1e-6 + net_res[i] * xc[i] * 1e-6,
-                    0.0,
-                )
+                let d = net_res[i] * net_cap[i] * 1e-6 + net_res[i] * xc[i] * 1e-6;
+                ([d, d], [0.0, 0.0])
             })
             .unzip()
     };
 
     const MAX_SI_ITERS: usize = 20;
     const SI_TOL: f64 = 1e-9; // ns — per-arc delay change below which we stop
-    let neg = vec![f64::NEG_INFINITY; nn];
-    let zero = vec![0.0f64; nn];
+    let neg = vec![[f64::NEG_INFINITY; 2]; nn];
+    let zero = vec![[0.0f64; 2]; nn];
     // A STARTING POINT for the iteration below, nothing more: no windows and no slews yet
     // exist, so this is a degenerate operating point and its delays are systematically
     // small. ⚠️ It is not a usable answer — see `early_d`/`early_s` after the loop.
@@ -1993,22 +2037,23 @@ fn build_report(
     let mut conv_net_slew = zero.clone();
     let mut cycle_checked = false;
     for _ in 0..MAX_SI_ITERS {
-        let (arr, slw, _f, ord, _, _, _) = relax(&arc_d, &arc_s, true, &seed_main, false);
+        let (_a, _s, _f, ord, arr, slw, _fl) = relax(&arc_d, &arc_s, true, &seed_main, false);
         if !cycle_checked {
             if ord.len() != n {
                 return Err(StaError::CombinationalLoop);
             }
             cycle_checked = true;
         }
-        let sw: Vec<f64> = (0..nn)
-            .map(|i| net_drv[i].map(|d| arr[d]).unwrap_or(f64::NEG_INFINITY))
+        // per-lane driver arrival and slew — `relax` hands the per-lane arrays back
+        let sw: Vec<[f64; 2]> = (0..nn)
+            .map(|i| net_drv[i].map(|d| arr[d]).unwrap_or([f64::NEG_INFINITY; 2]))
             .collect();
-        let net_slew: Vec<f64> = (0..nn)
-            .map(|i| net_drv[i].map(|d| slw[d]).unwrap_or(0.0))
+        let net_slew: Vec<[f64; 2]> = (0..nn)
+            .map(|i| net_drv[i].map(|d| slw[d]).unwrap_or([0.0; 2]))
             .collect();
         let (nd, ns) = compute(&sw, &net_slew);
         let delta = (0..n_arcs)
-            .map(|k| (nd[k] - arc_d[k]).abs())
+            .map(|k| (nd[k][0] - arc_d[k][0]).abs().max((nd[k][1] - arc_d[k][1]).abs()))
             .fold(0.0, f64::max);
         conv_net_slew = net_slew;
         arc_d = nd;
@@ -2158,13 +2203,13 @@ fn build_report(
     let (early_d, early_s) = {
         let (mut d, mut sl) = compute(&neg, &conv_net_slew); // seeded from the late point
         for _ in 0..MAX_SI_ITERS {
-            let (_a, slw, _f, _o, _, _, _) = relax(&d, &sl, false, &seed_main, false);
-            let e_net_slew: Vec<f64> = (0..nn)
-                .map(|i| net_drv[i].map(|dv| slw[dv]).unwrap_or(0.0))
+            let (_a, _s2, _f, _o, _ar, slw, _fl) = relax(&d, &sl, false, &seed_main, false);
+            let e_net_slew: Vec<[f64; 2]> = (0..nn)
+                .map(|i| net_drv[i].map(|dv| slw[dv]).unwrap_or([0.0; 2]))
                 .collect();
             let (nd, ns) = compute(&neg, &e_net_slew);
             let delta = (0..n_arcs)
-                .map(|k| (nd[k] - d[k]).abs())
+                .map(|k| (nd[k][0] - d[k][0]).abs().max((nd[k][1] - d[k][1]).abs()))
                 .fold(0.0, f64::max);
             d = nd;
             sl = ns;
@@ -2537,9 +2582,13 @@ fn build_report(
                 };
                 match &e.kind {
                     EdgeKind::Net(i) => {
-                        t += arc_d[*i];
-                        if arc_s[*i] > 0.0 {
-                            s = arc_s[*i];
+                        // ⚠️ The path-based walk carries a COLLAPSED path with no edge, so
+                        // it takes the worse lane. Identical to the old single-valued
+                        // behaviour wherever the two lanes agree.
+                        t += arc_d[*i][0].max(arc_d[*i][1]);
+                        let sk = arc_s[*i][0].max(arc_s[*i][1]);
+                        if sk > 0.0 {
+                            s = sk;
                         }
                     }
                     EdgeKind::Cell(arc) => {
