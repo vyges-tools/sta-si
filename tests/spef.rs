@@ -191,3 +191,44 @@ fn spef_adds_delay_and_load_reducing_slack() {
         ideal.wns
     );
 }
+
+// The same chain with the output net y in the SPEF too: u3 drives the port through a wire.
+const SPEF_PORT: &str = r#"
+*SPEF "IEEE 1481-1999"
+*C_UNIT 1 FF
+*R_UNIT 1 OHM
+*NAME_MAP
+*1 n1
+*2 n2
+*3 u1
+*4 u2
+*5 u3
+*6 y
+*D_NET *6 2.000000
+*CONN
+*I *5:Y O
+*P *6 O
+*CAP
+1 *6:1 2.000000
+*RES
+1 *5:Y *6:1 200.000000
+2 *6:1 *6 200.000000
+*END
+"#;
+
+// Rule (the driver's Pi is reduced at the pin caps of the net's nodes, and a top-level port's is
+// its external load): a heavier `output_load` slows the gate driving the port even when that net
+// has parasitics. Before, the Pi of a net driving a port carried only its wire, and the port's
+// load reached no delay at all.
+#[test]
+fn an_output_ports_load_enters_the_driver_pi() {
+    let nl = netlist::parse(NL).unwrap();
+    let lib = Lib::parse(LIB).unwrap();
+    let spef = Spef::parse(SPEF_PORT);
+    let mut j = job();
+    j.output_load = 0.001;
+    let light = analyze(&nl, &lib, &j, Some(&spef)).unwrap();
+    j.output_load = 0.010;
+    let heavy = analyze(&nl, &lib, &j, Some(&spef)).unwrap();
+    assert!(heavy.wns < light.wns - 1e-4, "heavy {} !< light {}", heavy.wns, light.wns);
+}

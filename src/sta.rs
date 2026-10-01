@@ -1264,6 +1264,13 @@ fn build_report(
                                     *pcap.entry(nd.to_string()).or_default() +=
                                         pin_cap_node.get(&sk).copied().unwrap_or(0.0) * 1000.0;
                                 }
+                            } else if output_ports.iter().any(|(idx, _)| *idx == sk) {
+                                // A top-level output port: its external load at its own node
+                                // (`ReduceToPi::pinCapacitance` → `Sdc::portExtCap`). Without
+                                // it the Pi of a net driving a port carries only the wire, and
+                                // the gate sees almost no load (fft_ctrl_tlul's sram_clk_o:
+                                // 0.0706 ns against sign-off's 0.2125 ns at output140).
+                                *pcap.entry(labels[sk].clone()).or_default() += job.output_load * 1000.0;
                             }
                         }
                         if let Some((c2_ff, rpi, c1_ff)) = rc.pi_reduce(dnode, cc, &pcap) {
