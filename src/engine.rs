@@ -264,6 +264,7 @@ pub fn lint_job(job: &StaJob) -> Result<crate::sdclint::LintReport, StaError> {
                 s.clocks.push(crate::sdc::SdcClock {
                     name: name.clone(),
                     source: source.clone(),
+                    sources: if source.is_empty() { Vec::new() } else { vec![source.clone()] },
                     period: *period,
                 });
             }
