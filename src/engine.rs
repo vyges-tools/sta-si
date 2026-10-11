@@ -266,6 +266,7 @@ pub fn lint_job(job: &StaJob) -> Result<crate::sdclint::LintReport, StaError> {
                     source: source.clone(),
                     sources: if source.is_empty() { Vec::new() } else { vec![source.clone()] },
                     period: *period,
+                    waveform: None,
                 });
             }
             s
