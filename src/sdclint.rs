@@ -200,7 +200,9 @@ pub fn lint_with_meta(
 
     let mut by_name: BTreeMap<&str, u32> = BTreeMap::new();
     let mut by_source: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for c in &sdc.clocks {
+    // Every definition the file wrote, including those a later `create_clock` overwrote or
+    // replaced: the parse times only the survivors, but a redefinition is what this reports.
+    for c in sdc.clocks.iter().chain(&sdc.superseded_clocks) {
         *by_name.entry(c.name.as_str()).or_default() += 1;
         by_source
             .entry(c.source.as_str())
