@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The design is public and large; take only the three paths this needs, at depth 1.
       # A full clone is multi-gigabyte and almost all of it is history we will never read.
@@ -56,7 +56,7 @@ jobs:
       # Our own pinned mirror rather than a live PDK build (see the env block above).
       - name: Cache the PDK slice
         id: pdk-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: pdk
           key: sky130-fd-sc-hd-${{ env.PDK_RELEASE }}
