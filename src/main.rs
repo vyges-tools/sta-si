@@ -17,6 +17,27 @@ use vyges_sta_si::engine;
 use vyges_sta_si::job::StaJob;
 use vyges_sta_si::sta::TimingReport;
 
+/// A diagnostic as a structured event (`STASI-ERROR`, or `STASI-WARNING` for a warning; `vyges-events/1.0`)
+/// instead of a bare stderr line; text after a blank line (the usage) stays plain help.
+fn diag_line(msg: String) {
+    let (head, help) = match msg.split_once("\n\n") {
+        Some((h, rest)) => (h.to_string(), Some(rest.to_string())),
+        None => (msg, None),
+    };
+    let warn = head.starts_with("warning: ");
+    let text = head.strip_prefix("error: ").or_else(|| head.strip_prefix("warning: ")).unwrap_or(&head).to_string();
+    let (severity, code) = if warn { (vyges_events::Severity::Warn, "STASI-WARNING") } else { (vyges_events::Severity::Error, "STASI-ERROR") };
+    vyges_events::emit(&vyges_events::Event::new("vyges-sta-si", severity, text).with_code(code));
+    if let Some(h) = help {
+        eprintln!("{h}");
+    }
+}
+
+macro_rules! diag {
+    ($($t:tt)*) => { diag_line(format!($($t)*)) };
+}
+
+
 const USAGE: &str = "\
 vyges loom sta-si — sign-off static timing analysis with signal integrity
 
@@ -221,7 +242,7 @@ fn write_out(text: &str, cli: &Cli) {
                 }
             }
             Err(e) => {
-                eprintln!("error: {path}: {e}");
+                diag!("error: {path}: {e}");
                 exit(1);
             }
         },
@@ -537,7 +558,7 @@ fn main() {
                     j.period_ns
                 ),
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    diag!("error: {e}");
                     exit(2);
                 }
             }
@@ -550,7 +571,7 @@ fn main() {
             let mut job = match StaJob::load(path) {
                 Ok(j) => j,
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    diag!("error: {e}");
                     exit(2);
                 }
             };
@@ -566,7 +587,7 @@ fn main() {
                     match pdk_resolve(p, "lib", cli.corner.as_deref()) {
                         Ok(path) => job.libs.push(path),
                         Err(e) => {
-                            eprintln!("error: {e}");
+                            diag!("error: {e}");
                             exit(2);
                         }
                     }
@@ -579,7 +600,7 @@ fn main() {
                 match engine::analyze_mcmm(&job, lib_opts) {
                     Ok(rep) => emit_mcmm(&job, &rep, &cli),
                     Err(e) => {
-                        eprintln!("error: {e}");
+                        diag!("error: {e}");
                         exit(1);
                     }
                 }
@@ -609,7 +630,7 @@ fn main() {
                 match engine::sdf_for_job_opts(&job, lib_opts) {
                     Ok(text) => {
                         if let Err(e) = std::fs::write(sdf_out, &text) {
-                            eprintln!("error: {sdf_out}: {e}");
+                            diag!("error: {sdf_out}: {e}");
                             exit(1);
                         }
                         if !cli.quiet {
@@ -617,7 +638,7 @@ fn main() {
                         }
                     }
                     Err(e) => {
-                        eprintln!("error: {e}");
+                        diag!("error: {e}");
                         exit(1);
                     }
                 }
@@ -626,7 +647,7 @@ fn main() {
                 match engine::liberty_json_for_job(&job, lib_opts) {
                     Ok(text) => {
                         if let Err(e) = std::fs::write(json_out, &text) {
-                            eprintln!("error: {json_out}: {e}");
+                            diag!("error: {json_out}: {e}");
                             exit(1);
                         }
                         if !cli.quiet {
@@ -634,7 +655,7 @@ fn main() {
                         }
                     }
                     Err(e) => {
-                        eprintln!("error: {e}");
+                        diag!("error: {e}");
                         exit(1);
                     }
                 }
@@ -642,7 +663,7 @@ fn main() {
             match engine::analyze_job_opts(&job, lib_opts) {
                 Ok(rep) => emit(&job, &rep, &cli),
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    diag!("error: {e}");
                     exit(1);
                 }
             }
@@ -655,14 +676,14 @@ fn main() {
             let job = match StaJob::load(path) {
                 Ok(j) => j,
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    diag!("error: {e}");
                     exit(2);
                 }
             };
             let report = match engine::lint_job(&job) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    diag!("error: {e}");
                     exit(1);
                 }
             };
@@ -687,7 +708,7 @@ fn main() {
             let adapted = match vyges_sta_si::tcl::adapt(path) {
                 Ok(a) => a,
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    diag!("error: {e}");
                     exit(2);
                 }
             };
@@ -707,7 +728,7 @@ fn main() {
             ) {
                 Ok(rep) => emit_tcl(&adapted.job, &rep, &adapted.reports, &cli),
                 Err(e) => {
-                    eprintln!("error: {e}");
+                    diag!("error: {e}");
                     exit(1);
                 }
             }
