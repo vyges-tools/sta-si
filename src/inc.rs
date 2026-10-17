@@ -100,7 +100,7 @@ fn ck_load_preserving(old: &crate::liberty::Cell, new: &crate::liberty::Cell) ->
         let Some(np) = new.pins.get(name) else {
             return false; // clock pin missing from the replacement
         };
-        if !np.clock || np.load_cap().to_bits() != op.load_cap().to_bits() {
+        if !np.clock || crate::sta::pin_load_caps(np).map(f64::to_bits) != crate::sta::pin_load_caps(op).map(f64::to_bits) {
             return false; // any change in clock load perturbs the clock network
         }
     }
@@ -130,7 +130,8 @@ pub(crate) struct IncTopo {
 /// Mutable propagated state — cloned on `checkpoint`, restored on `restore`.
 #[derive(Clone)]
 pub(crate) struct IncState {
-    pub node_load: Vec<f64>,
+    /// Driver load per output edge (lane 0 rise, 1 fall) — see `sta::pin_load_caps`.
+    pub node_load: Vec<[f64; 2]>,
     pub late: Lanes,
     pub early: Lanes,
     // collapsed (worst-lane) state, kept in sync with the lanes.
@@ -215,7 +216,7 @@ impl IncGraph {
         } else {
             self.topo.early_derate
         };
-        let load = self.state.node_load[v];
+        let load_lanes = self.state.node_load[v];
         let mut arr = [init; 2];
         let mut slew = [self.topo.input_slew; 2];
         let mut from = [None; 2];
@@ -261,7 +262,7 @@ impl IncGraph {
                                 continue;
                             }
                             let sin = lanes.slew[*u][il];
-                            let leff = load; // no SPEF → no resistive shielding
+                            let leff = load_lanes[ol]; // no SPEF → no resistive shielding
                             let (d, sout) = if !arc.ccs.is_empty() {
                                 arc.ccs
                                     .delay_slew(ol == 0, sin, leff, 0.3, 0.7)
@@ -346,8 +347,8 @@ impl IncGraph {
                         // seed the cone — seeding here would walk into the clock network and
                         // trip the clock-in-cone bail on an edit that provably cannot perturb it.
                         debug_assert_eq!(
-                            new_cell.pins[pin].load_cap().to_bits(),
-                            old_cell.pins[pin].load_cap().to_bits()
+                            crate::sta::pin_load_caps(&new_cell.pins[pin]).map(f64::to_bits),
+                            crate::sta::pin_load_caps(&old_cell.pins[pin]).map(f64::to_bits)
                         );
                     }
                     Dir::In => {
@@ -366,9 +367,11 @@ impl IncGraph {
                         }
                         // input pin cap changed → the net's driver sees a different load.
                         let d = *self.topo.net_driver.get(net)?;
-                        let old_cap = old_cell.pins[pin].load_cap();
-                        let new_cap = new_cell.pins[pin].load_cap();
-                        self.state.node_load[d] += new_cap - old_cap;
+                        let old_cap = crate::sta::pin_load_caps(&old_cell.pins[pin]);
+                        let new_cap = crate::sta::pin_load_caps(&new_cell.pins[pin]);
+                        for l in 0..2 {
+                            self.state.node_load[d][l] += new_cap[l] - old_cap[l];
+                        }
                         seeds.push(d);
                     }
                     Dir::Out => {
@@ -600,7 +603,7 @@ impl IncGraph {
             &slew,
             &arr_min,
             &slew_min,
-            &self.state.node_load,
+            &self.state.node_load.iter().map(|l| l[0].max(l[1])).collect::<Vec<f64>>(),
             &endpoint_req,
         );
 

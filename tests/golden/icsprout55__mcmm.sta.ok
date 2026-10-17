@@ -5,7 +5,7 @@ MCMM report — design ics55_regreg_mcmm
   scenarios: 3
 
   scenario               period     WNS setup      WHS hold   verdict
-  corner_ss               2.000        1.6807        0.2058   MET
+  corner_ss               2.000        1.6807        0.2057   MET
   corner_tt               2.000        1.8241        0.1134   MET
   corner_ff               2.000        1.8767        0.0790   MET
 
@@ -18,6 +18,6 @@ MCMM report — design ics55_regreg_mcmm
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 2 cell(s) loaded, 2 used by the design","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 3 instance(s) of 2 master(s); 3 timed, 0 physical-only","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 2 cell(s) loaded, 2 used by the design","objects":["clock:clk"]}
-{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.6807 ns, TNS 0.0000 ns, WHS 0.2058 ns — 0 violation(s)"}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.6807 ns, TNS 0.0000 ns, WHS 0.2057 ns — 0 violation(s)"}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.8241 ns, TNS 0.0000 ns, WHS 0.1134 ns — 0 violation(s)"}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.8767 ns, TNS 0.0000 ns, WHS 0.0790 ns — 0 violation(s)"}
