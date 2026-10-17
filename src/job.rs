@@ -113,9 +113,12 @@ impl StaJob {
     /// else the default `input_delay`).
     /// `None` means the port is **unconstrained** and must not start a timed path.
     pub fn input_delay_for(&self, port: &str) -> Option<f64> {
+        // the object as written may be a PATTERN (`[get_ports in*]`), and a later command on the
+        // same port replaces an earlier one — the reference's rules
         self.io_input_delays
             .iter()
-            .find(|(p, _)| p == port)
+            .rev()
+            .find(|(p, _)| vyges_loom::sdc::object_matches(p, port))
             .map(|(_, d)| *d)
             .or(if self.input_delay_declared {
                 Some(self.input_delay)
@@ -126,9 +129,12 @@ impl StaJob {
 
     /// Resolve the external output delay for a primary output port.
     pub fn output_delay_for(&self, port: &str) -> f64 {
+        // the object as written may be a PATTERN (`[get_ports in*]`), and a later command on the
+        // same port replaces an earlier one — the reference's rules
         self.io_output_delays
             .iter()
-            .find(|(p, _)| p == port)
+            .rev()
+            .find(|(p, _)| vyges_loom::sdc::object_matches(p, port))
             .map(|(_, d)| *d)
             .unwrap_or(self.output_delay)
     }
