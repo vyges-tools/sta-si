@@ -628,6 +628,15 @@ fn main() {
                     if let Some(l) = vyges_sta_si::job::latency_not_modelled(&sdc).filter(|_| !cli.quiet) {
                         eprintln!("warning: sdc: {l}");
                     }
+                    // Without set_propagated_clock the reference times every clock as IDEAL (its
+                    // network delay zero, its slew the clock transition); this timer propagates
+                    // the clock network either way, so a pre-CTS file reads differently.
+                    if !sdc.clocks.is_empty() && sdc.propagated.is_empty() && !cli.quiet {
+                        eprintln!(
+                            "warning: sdc: no set_propagated_clock — the clocks are ideal for a reference timer, \
+                             but this timer propagates the clock network (clock pin slews and arrivals differ)"
+                        );
+                    }
                     if cli.verbose && !sdc.ignored.is_empty() {
                         let mut u = sdc.ignored.clone();
                         u.sort();
