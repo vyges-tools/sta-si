@@ -1533,6 +1533,35 @@ fn build_report(
             }
         }
     }
+    // IDEAL clock networks (an SDC clock with no `set_propagated_clock`): every pin from the
+    // source up to the register clock pins arrives at the source's own time — no network delay —
+    // with the clock transition as its slew, so a register's CK->Q is looked up at that slew. The
+    // reference's rule; a propagated clock is timed through its network as before.
+    let mut ideal_slew: Vec<Option<[f64; 2]>> = vec![None; n];
+    {
+        let mut stack: Vec<usize> = Vec::new();
+        for (src, sl) in &job.ideal_clocks {
+            let node = match split_inst_pin(src) {
+                Some((inst, pin)) => key2idx.get(&pin_key(inst, pin)).copied(),
+                None => key2idx.get(&port_key(src)).copied(),
+            };
+            if let Some(nd) = node {
+                ideal_slew[nd] = Some(*sl);
+                stack.push(nd);
+            }
+        }
+        while let Some(u) = stack.pop() {
+            if is_ck[u] {
+                continue;
+            }
+            for e in &out_edges[u] {
+                if ideal_slew[e.to].is_none() {
+                    ideal_slew[e.to] = ideal_slew[u];
+                    stack.push(e.to);
+                }
+            }
+        }
+    }
     // Guarded on having RESOLVED at least one declared clock source. With none we
     // cannot tell a missing `create_clock` from a clock port this model failed to
     // locate, and declining every check would turn that model gap into a silently
@@ -1609,8 +1638,11 @@ fn build_report(
                         // The sink slew is the transient-degraded value when available
                         // (>0), else the driver slew passes through unchanged.
                         for l in 0..2 {
-                            let d = nd[*i][l];
-                            let sink_slew = ns[*i][l];
+                            // an ideal clock network: no wire delay, the clock transition
+                            let (d, sink_slew) = match ideal_slew[v] {
+                                Some(isl) => (0.0, isl[l].max(f64::MIN_POSITIVE)),
+                                None => (nd[*i][l], ns[*i][l]),
+                            };
                             let a = arr[u][l];
                             if !a.is_finite() {
                                 continue;
@@ -1755,6 +1787,11 @@ fn build_report(
                                     (r.delay, r.slew)
                                 } else {
                                     (dt.lookup(sin, leff), st.lookup(sin, leff))
+                                };
+                                // an ideal clock network: no cell delay, the clock transition
+                                let (d, sout) = match ideal_slew[v] {
+                                    Some(isl) => (0.0, isl[ol]),
+                                    None => (d, sout),
                                 };
                                 let stage = depth[u][il] + 1;
                                 let derate = cell_derate(late, stage);

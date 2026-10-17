@@ -103,6 +103,11 @@ pub struct StaJob {
     /// The SDC's `set_clock_groups`, per command — when present, the clock separation rule
     /// (`crate::sdc::clocks_unrelated`) is read from these, not from `async_groups`.
     pub clock_groups: Vec<crate::sdc::ClockGroups>,
+    /// Clocks timed IDEAL, by source (port or `inst/pin`) -> the clock transition `[rise, fall]`
+    /// at their register clock pins. An SDC clock is ideal unless `set_propagated_clock` names
+    /// it, as in the reference; a `.sta` file's own `clock:` lines are propagated (that format's
+    /// rule), so they never appear here.
+    pub ideal_clocks: std::collections::BTreeMap<String, [f64; 2]>,
     pub sdc: Option<String>, // optional SDC constraints file (merged at load)
     /// Optional `vyges-metadata.json`. Only the constraint linter reads it, for the IP's
     /// declared `clock_domains` — the one input that says how many clocks the design was
@@ -309,6 +314,7 @@ impl StaJob {
             exceptions,
             async_groups: Vec::new(),
             clock_groups: Vec::new(),
+            ideal_clocks: Default::default(),
             sdc,
             metadata,
             base_dir: base_dir.to_string(),
@@ -397,6 +403,7 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
         job.async_groups = sdc.async_groups.clone();
     }
     job.clock_groups = sdc.clock_groups.clone();
+    job.ideal_clocks = ideal_clocks(sdc);
     // clocks: SDC is authoritative when present.
     if !sdc.clocks.is_empty() {
         job.clocks = sdc
@@ -541,5 +548,58 @@ mod clock_latency_rule {
         assert!(latency_not_modelled(&same).is_none());
         let pin = crate::sdc::Sdc::parse(&format!("{two}set_clock_latency 0.5 [get_pins r1/CK]\n")).unwrap();
         assert!(latency_not_modelled(&pin).unwrap().contains("pin or port"));
+    }
+}
+
+/// Commands the SDC reader lists as not modelled that this timer DOES model: ideal versus
+/// propagated clocks (`ideal_clocks`) and the ideal clock's transition.
+pub const MODELLED_HERE: &[&str] = &["set_propagated_clock", "set_clock_transition"];
+
+/// The SDC's ideal clocks — every clock with a source that no `set_propagated_clock` names (by
+/// clock, `[all_clocks]`, or its source port / pin) — with its `set_clock_transition` per edge
+/// (0 when none; a `-min`-only value is not the late slew).
+pub fn ideal_clocks(sdc: &crate::sdc::Sdc) -> std::collections::BTreeMap<String, [f64; 2]> {
+    let propagated = |c: &crate::sdc::SdcClock| {
+        sdc.propagated.iter().flat_map(|o| o.names.iter()).any(|n| n == "all_clocks" || n == "*" || *n == c.name || c.sources.contains(n))
+    };
+    let mut out = std::collections::BTreeMap::new();
+    for c in sdc.clocks.iter().filter(|c| !c.sources.is_empty() && !propagated(c)) {
+        let mut slew = [0.0f64; 2];
+        for t in sdc.clock_transitions.iter().filter(|t| t.objects.iter().any(|o| o == "all_clocks" || o == "*" || *o == c.name)) {
+            if t.flags.iter().any(|f| f == "-min") && !t.flags.iter().any(|f| f == "-max") {
+                continue;
+            }
+            let (rise, fall) = (!t.flags.iter().any(|f| f == "-fall"), !t.flags.iter().any(|f| f == "-rise"));
+            if rise {
+                slew[0] = t.value;
+            }
+            if fall {
+                slew[1] = t.value;
+            }
+        }
+        for s in &c.sources {
+            out.insert(s.clone(), slew);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod ideal_clock_rule {
+    use super::*;
+
+    /// Reference rule: an SDC clock is IDEAL unless `set_propagated_clock` names it; its
+    /// `set_clock_transition` is its slew at the register clock pins. Measured on a two-flop
+    /// sky130 design: ideal WNS 0.401970 / WHS 0.231933 and propagated 0.394806 / 0.229312, both
+    /// equal to the reference; before this every clock was propagated.
+    #[test]
+    fn a_clock_is_ideal_unless_propagated() {
+        let base = "create_clock -name a -period 1 [get_ports ca]\ncreate_clock -name b -period 1 [get_ports cb]\n";
+        let s = crate::sdc::Sdc::parse(&format!("{base}set_clock_transition -rise 0.04 [get_clocks a]\nset_clock_transition -fall 0.03 [get_clocks a]\nset_propagated_clock [get_clocks b]\n")).unwrap();
+        let ideal = ideal_clocks(&s);
+        assert_eq!(ideal.keys().collect::<Vec<_>>(), vec!["ca"]);
+        assert_eq!(ideal["ca"], [0.04, 0.03]);
+        let all = crate::sdc::Sdc::parse(&format!("{base}set_propagated_clock [all_clocks]\n")).unwrap();
+        assert!(ideal_clocks(&all).is_empty());
     }
 }

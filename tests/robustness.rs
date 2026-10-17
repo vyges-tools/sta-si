@@ -124,6 +124,7 @@ fn job() -> StaJob {
         exceptions: vec![],
         async_groups: vec![],
         clock_groups: vec![],
+        ideal_clocks: Default::default(),
         crpr: true,
         pba: false,
         base_dir: String::new(),

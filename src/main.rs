@@ -621,22 +621,16 @@ fn main() {
                 // re-parse; cheap). The health line names only what can move a slack — commands
                 // not applied, exceptions refused, timing-affecting commands not modelled; the
                 // full list of unmodelled commands is verbose.
-                if let Ok(sdc) = job.load_sdc(sdc_path) {
+                if let Ok(mut sdc) = job.load_sdc(sdc_path) {
+                    // the reader lists what IT does not model; this timer models these
+                    sdc.ignored.retain(|c| !vyges_sta_si::job::MODELLED_HERE.contains(&c.as_str()));
                     if let Some(h) = sdc.health().filter(|_| !cli.quiet) {
                         eprintln!("warning: sdc: {h}");
                     }
                     if let Some(l) = vyges_sta_si::job::latency_not_modelled(&sdc).filter(|_| !cli.quiet) {
                         eprintln!("warning: sdc: {l}");
                     }
-                    // Without set_propagated_clock the reference times every clock as IDEAL (its
-                    // network delay zero, its slew the clock transition); this timer propagates
-                    // the clock network either way, so a pre-CTS file reads differently.
-                    if !sdc.clocks.is_empty() && sdc.propagated.is_empty() && !cli.quiet {
-                        eprintln!(
-                            "warning: sdc: no set_propagated_clock — the clocks are ideal for a reference timer, \
-                             but this timer propagates the clock network (clock pin slews and arrivals differ)"
-                        );
-                    }
+
                     if cli.verbose && !sdc.ignored.is_empty() {
                         let mut u = sdc.ignored.clone();
                         u.sort();

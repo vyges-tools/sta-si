@@ -79,6 +79,7 @@ fn job(exceptions: Vec<Exception>) -> StaJob {
         exceptions,
         async_groups: Vec::new(),
         clock_groups: vec![],
+        ideal_clocks: Default::default(),
         crpr: true,
         pba: false,
         input_delay: 0.0,

@@ -73,6 +73,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         exceptions: vec![],
         async_groups: vec![],
         clock_groups: vec![],
+        ideal_clocks: Default::default(),
         crpr: true,
         pba: false,
         sdc: None,

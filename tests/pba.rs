@@ -79,6 +79,7 @@ fn job(pba: bool) -> StaJob {
         exceptions: vec![],
         async_groups: vec![],
         clock_groups: vec![],
+        ideal_clocks: Default::default(),
         crpr: true,
         pba,
         input_delay: 0.0,
