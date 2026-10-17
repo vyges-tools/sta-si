@@ -44,11 +44,12 @@ fn parses_receiver_capacitance() {
     let a = &lib.cell("INV").unwrap().pins["A"];
     let r = a.recv.as_ref().expect("receiver_capacitance parsed");
     assert!(!r.is_empty());
-    assert_eq!(r.c2_fall.values, vec![vec![0.0040]]);
+    // Liberty numbers are strtof (f32), as the reference reads them
+    assert_eq!(r.c2_fall.values, vec![vec![0.0040f32 as f64]]);
     // effective load = mean of per-edge (C1+C2)/2:
     //   rise (0.0020+0.0030)/2 = 0.0025; fall (0.0018+0.0040)/2 = 0.0029
     //   -> (0.0025 + 0.0029)/2 = 0.0027
-    assert!((r.effective_load() - 0.0027).abs() < 1e-9);
+    assert!((r.effective_load() - 0.0027).abs() < 1e-6);
 }
 
 #[test]
@@ -56,7 +57,7 @@ fn receiver_load_beats_static_capacitance() {
     let lib = Lib::parse(LIB).unwrap();
     // pin with a receiver model -> Miller-aware load (0.0027), not the static 0.0019
     let inv_a = &lib.cell("INV").unwrap().pins["A"];
-    assert!((inv_a.load_cap() - 0.0027).abs() < 1e-9);
+    assert!((inv_a.load_cap() - 0.0027).abs() < 1e-6);
     assert!(
         inv_a.load_cap() > inv_a.capacitance,
         "receiver load includes Miller > static cap"
@@ -64,5 +65,5 @@ fn receiver_load_beats_static_capacitance() {
     // pin without a receiver model -> falls back to the static capacitance
     let buf_a = &lib.cell("BUF").unwrap().pins["A"];
     assert!(buf_a.recv.is_none());
-    assert!((buf_a.load_cap() - 0.0019).abs() < 1e-9);
+    assert!((buf_a.load_cap() - 0.0019).abs() < 1e-6);
 }

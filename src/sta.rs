@@ -1600,6 +1600,11 @@ fn build_report(
                     }
                     EdgeKind::Cell(arc) if !blocked => {
                         for ol in 0..2 {
+                            // a one-edge arc (`combinational_rise` / `_fall`) drives only that output edge;
+                            // the other has no table, and read anyway it timed as ZERO delay
+                            if !arc.out_edges.drives(ol == 0) {
+                                continue;
+                            }
                             let (dt, st) = if ol == 0 {
                                 (&arc.cell_rise, &arc.rise_transition)
                             } else {

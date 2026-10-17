@@ -88,7 +88,9 @@ fn a_flop_is_launched_only_by_its_own_clock_edge() {
     // CK rise 0.60 + the flop's 0.20 CK->Q, on both passes.
     for (what, got) in [("late", t.arrival(q)), ("early", t.arrival_min(q))] {
         assert!(
-            (got - 0.80).abs() < 1e-9,
+            // Liberty values are read as the reference reads them (strtof, f32), so 0.20 is
+            // 0.2f32: agreement is to float precision, and 0.40 is still far outside it
+            (got - 0.80).abs() < 1e-6,
             "{what} arrival at r1/Q should launch from the CK RISE (0.60 + 0.20 = 0.80), \
              got {got}; 0.40 means the clock's FALLING edge launched the flop"
         );
