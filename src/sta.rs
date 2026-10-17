@@ -1835,7 +1835,7 @@ fn build_report(
                                         // time per capacitance (kΩ for ns and pF, Ω for ps and
                                         // pF) so that rd·C and rpi·C land in its time unit — and
                                         // takes that unit so its `rd < 1e-2` ohms holds in any.
-                                        Some(crate::dmp::solve_driver_r(
+                                        let r = crate::dmp::solve_driver_r(
                                             rd,
                                             c2,
                                             rpi / ohm_per_r,
@@ -1843,7 +1843,18 @@ fn build_report(
                                             t,
                                             &gate,
                                             ohm_per_r,
-                                        ))
+                                        );
+                                        // `VYGES_STA_DMP_TRACE=1`: the reference's `dmp_ceff` debug
+                                        // line per driver edge, in SI, beside the result.
+                                        if std::env::var_os("VYGES_STA_DMP_TRACE").is_some() {
+                                            eprintln!(
+                                                "dmp|{}|ol={ol}|in_slew={:e}|c2={:e}|rpi={:e}|c1={:e}|rd={:e}|alg={:?}|ceff={:e}|delay={:e}|slew={:e}",
+                                                labels[v], sin * lib.units.time_s, c2 * lib.units.cap_f, rpi, c1 * lib.units.cap_f, rd * ohm_per_r,
+                                                crate::dmp::select_alg_r(rd, c2, rpi / ohm_per_r, c1, ohm_per_r),
+                                                r.ceff * lib.units.cap_f, r.delay * lib.units.time_s, r.slew * lib.units.time_s
+                                            );
+                                        }
+                                        Some(r)
                                     }
                                     _ => None,
                                 };
@@ -2003,6 +2014,16 @@ fn build_report(
                             for l in 0..2 {
                                 *v[a.net_idx][mm][l].entry(node.to_string()).or_default() += c[mm][l] * ff_per_cap;
                             }
+                        }
+                    }
+                } else if output_ports.iter().any(|(idx, _)| *idx == a.sink) {
+                    // A top-level output port: its external load at its own node, as the Pi above
+                    // takes it (`ReduceToPi::pinCapacitance` → `Sdc::portExtCap`) — the reduction
+                    // that gives the Pi also gives each load's Elmore. Without it the wire delay to
+                    // every other load of a net that drives a port missed the port's load.
+                    for mm in 0..2 {
+                        for l in 0..2 {
+                            *v[a.net_idx][mm][l].entry(labels[a.sink].clone()).or_default() += job.output_load * ff_per_cap;
                         }
                     }
                 }

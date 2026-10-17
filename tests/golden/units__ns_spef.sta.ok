@@ -11,22 +11,22 @@ STA report — design seq
       arrival     slew   node
        0.0000   0.0200   clk
        0.0000   0.0200   r1/CK
-       0.1652   0.0816   r1/Q
-       0.1681   0.0819   g1/A
-       0.3415   0.0781   g1/Y
-       0.3431   0.0781   r2/D
+       0.1652   0.0819   r1/Q
+       0.1681   0.0820   g1/A
+       0.3416   0.0783   g1/Y
+       0.3431   0.0784   r2/D
 
-  hold endpoints: 2    WHS: 0.2109 ns    THS: 0.0000 ns    [MET]
-  worst hold path to r1/D  (slack 0.2109 ns):
+  hold endpoints: 2    WHS: 0.2135 ns    THS: 0.0000 ns    [MET]
+  worst hold path to r1/D  (slack 0.2135 ns):
       arrival     slew   node
        0.0000   0.0200   clk
        0.0000   0.0200   r2/CK
-       0.2274   0.1544   r2/Q
-       0.2309   0.1546   r1/D
+       0.2274   0.1548   r2/Q
+       0.2335   0.1552   r1/D
 
-  achievable: ~0.393 ns → ~2544.2 MHz   (target 1.000 ns → ~1000.0 MHz)
+  achievable: ~0.393 ns → ~2543.7 MHz   (target 1.000 ns → ~1000.0 MHz)
 --- stderr ---
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 3 instance(s) of 2 master(s); 3 timed, 0 physical-only","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 3 cell(s) loaded, 2 used by the design","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-SPEF","raw_msg":"SPEF covers 3 of 4 design net(s) (75.0%); 3 net(s) in the file, all named","objects":["clock:clk"]}
-{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 0.6069 ns, TNS 0.0000 ns, WHS 0.2109 ns — 0 violation(s)"}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 0.6069 ns, TNS 0.0000 ns, WHS 0.2135 ns — 0 violation(s)"}

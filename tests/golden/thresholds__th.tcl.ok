@@ -11,11 +11,11 @@ Path Type: max (Setup)
        Arrival      Slew   Node
         0.0000    0.0200   clk
         0.0000    0.0000   r1/CK
-        0.1481    0.0750   r1/Q
-        0.1635    0.1003   g1/A
-        0.3500    0.0979   g1/Y
-        0.3498    0.0696   r2/D
-    slack 0.6002 (MET)
+        0.1481    0.0753   r1/Q
+        0.1636    0.1006   g1/A
+        0.3502    0.0982   g1/Y
+        0.3501    0.0698   r2/D
+    slack 0.5999 (MET)
 
 Path Type: min (Hold)
   Startpoint: clk
@@ -24,13 +24,13 @@ Path Type: min (Hold)
        Arrival      Slew   Node
         0.0000    0.0200   clk
         0.0000    0.0000   r2/CK
-        0.2059    0.1419   r2/Q
-        0.2095    0.1421   r1/D
-    slack 0.1895 (MET)
+        0.2059    0.1422   r2/Q
+        0.2121    0.1426   r1/D
+    slack 0.1921 (MET)
 
 --- stderr ---
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIB-THRESHOLDS","raw_msg":"th_b.lib: its slew and delay thresholds differ from the first library's; its cells are timed at their own, and ports at the first library's"}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 3 instance(s) of 2 master(s); 3 timed, 0 physical-only","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 6 cell(s) loaded, 2 used by the design","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-SPEF","raw_msg":"SPEF covers 3 of 4 design net(s) (75.0%); 3 net(s) in the file, all named","objects":["clock:clk"]}
-{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 0.6002 ns, TNS 0.0000 ns, WHS 0.1895 ns — 0 violation(s)"}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 0.5999 ns, TNS 0.0000 ns, WHS 0.1921 ns — 0 violation(s)"}
