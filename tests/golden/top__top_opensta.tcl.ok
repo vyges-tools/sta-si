@@ -11,22 +11,22 @@ Path Type: max (Setup)
        Arrival      Slew   Node
         0.1000    0.0200   a
         0.1000    0.0200   g1/A
-        1.3707    0.5809   g1/Y
-        1.3839    0.5809   g2/A
-        4.8789    0.9959   g2/Y
-        4.8871    0.9959   g3/A
-        5.8816    0.2601   g3/Y
-        5.8816    0.2601   y
-    slack -5.0816 (VIOLATED)
+        0.6153    0.2294   g1/Y
+        0.6153    0.2294   g2/A
+        1.6167    0.3234   g2/Y
+        1.6167    0.3234   g3/A
+        1.8539    0.0631   g3/Y
+        1.8539    0.0631   y
+    slack -1.0539 (VIOLATED)
 
 Path Type: min (Hold)
   (no constrained paths)
 
-wns -5.0816
-tns -5.0816
+wns -1.0539
+tns -1.0539
 --- stderr ---
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 3 instance(s) of 1 master(s); 3 timed, 0 physical-only","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 1 cell(s) loaded, 1 used by the design","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-SPEF","raw_msg":"SPEF covers 2 of 4 design net(s) (50.0%); 2 net(s) in the file, all named","objects":["clock:clk"]}
-{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-SETUP","raw_msg":"setup violation at y: WNS -5.0816 ns (TNS -5.0816 ns over 1 endpoint(s))","objects":["net:y","clock:clk"]}
-{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-DONE","raw_msg":"sta complete: WNS -5.0816 ns, TNS -5.0816 ns, WHS inf ns — 1 violation(s)"}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-SETUP","raw_msg":"setup violation at y: WNS -1.0539 ns (TNS -1.0539 ns over 1 endpoint(s))","objects":["net:y","clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-DONE","raw_msg":"sta complete: WNS -1.0539 ns, TNS -1.0539 ns, WHS inf ns — 1 violation(s)"}

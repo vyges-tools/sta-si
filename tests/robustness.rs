@@ -17,9 +17,9 @@ fn spef_pf_units_scale_to_ff() {
 *1 n1
 *D_NET *1 0.020000
 *CAP
-1 *1 0.010000
+1 *1:1 0.010000
 *RES
-1 *1 *1 1.000000
+1 *1:1 *1:2 1.000000
 *END
 "#;
     let s = Spef::parse(spef);

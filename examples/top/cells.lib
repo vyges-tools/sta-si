@@ -2,6 +2,7 @@ library (demo_hd) {
   delay_model : table_lookup;
   time_unit : "1ns";
   capacitive_load_unit (1, "pf");
+  lu_table_template (t) { variable_1 : input_net_transition; variable_2 : total_output_net_capacitance; index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); }
 
   cell (INV) {
     pin (A) { direction : input; capacitance : 0.0015; }

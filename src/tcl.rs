@@ -242,8 +242,11 @@ fn base_job(
         clock_port: String::new(),
         period_ns: 0.0,
         clocks: Vec::new(),
-        input_slew: 0.05,
-        output_load: 0.005,
+        // A script sets these or they are 0, as in the reference: no `set_input_transition`, an
+        // input starts from slew 0; no `set_load`, an output port loads its driver with nothing.
+        // (The `.sta` format keeps its own documented defaults.)
+        input_slew: 0.0,
+        output_load: 0.0,
         input_delay: 0.0,
         output_delay: 0.0,
         io_input_delays: Vec::new(),

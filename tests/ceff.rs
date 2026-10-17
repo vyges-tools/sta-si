@@ -24,14 +24,14 @@ const SPEF_R: &str = r#"
 *I *4:A I
 *CAP
 1 *3:Y 2.000000
-2 *fcap 200.000000
+2 *1:1 200.000000
 *RES
 1 *3:Y *4:A 1.000000
-2 *3:Y *fcap 5000.000000
+2 *3:Y *1:1 5000.000000
 *END
 "#;
 
-// same caps, NO resistors -> lumped load (pi_reduce returns None)
+// the same 202 fF all on the driver node, NO resistors -> a purely capacitive load
 const SPEF_LUMPED: &str = r#"
 *SPEF "IEEE 1481-1999"
 *C_UNIT 1 FF
@@ -45,8 +45,7 @@ const SPEF_LUMPED: &str = r#"
 *I *3:Y O
 *I *4:A I
 *CAP
-1 *3:Y 2.000000
-2 *fcap 200.000000
+1 *3:Y 202.000000
 *END
 "#;
 
