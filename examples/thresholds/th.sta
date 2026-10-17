@@ -1,0 +1,10 @@
+# Two libraries with different slew and delay thresholds: the inverter between the flops is from
+# the second. Its driver waveform is timed at its own library's thresholds, and each wire delay and
+# load slew is re-expressed at the load's library's.
+design:      seq
+netlist:     seq_th.v
+lib:         th_a.lib, th_b.lib
+clock:       clk 1.0
+input_slew:  0.02
+output_load: 0.005
+spef:        seq.spef

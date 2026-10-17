@@ -953,6 +953,38 @@ fn spef_scales(u: crate::liberty::LibUnits) -> (f64, f64, f64) {
     (pow10_exact(u.cap_f / 1e-15), pow10_exact(u.time_s / u.cap_f), pow10_exact(1e-15 / u.time_s))
 }
 
+/// `DelayCalcBase::thresholdAdjust`: a wire delay and load slew found at the DRIVER library's
+/// thresholds, re-expressed at the LOAD library's. The reference calls it only when the two
+/// libraries differ; with equal thresholds it is the identity. Its thresholds are floats, and so
+/// is its arithmetic, as here. ⚠️ The delay shift is ADDED on a rising edge and SUBTRACTED on a
+/// falling one, as the reference writes it.
+fn threshold_adjust(
+    drv: &crate::liberty::Thresholds,
+    load: &crate::liberty::Thresholds,
+    rise: bool,
+    wire_delay: f64,
+    load_slew: f64,
+) -> (f64, f64) {
+    let pick = |t: &crate::liberty::Thresholds, out: bool| {
+        let vth = match (rise, out) {
+            (true, true) => t.output_rise,
+            (false, true) => t.output_fall,
+            (true, false) => t.input_rise,
+            (false, false) => t.input_fall,
+        };
+        let (lo, hi) = if rise { (t.slew_lower_rise, t.slew_upper_rise) } else { (t.slew_lower_fall, t.slew_upper_fall) };
+        (vth as f32, lo as f32, hi as f32, t.slew_derate as f32)
+    };
+    let (drvr_vth, d_lo, d_hi, drvr_slew_derate) = pick(drv, true);
+    let (load_vth, l_lo, l_hi, load_slew_derate) = pick(load, false);
+    let drvr_slew_delta = d_hi - d_lo;
+    let wire_delay_delta = (load_slew as f32) * ((load_vth - drvr_vth) / drvr_slew_delta);
+    let wire_delay = wire_delay + if rise { wire_delay_delta as f64 } else { -(wire_delay_delta as f64) };
+    let load_slew_delta = l_hi - l_lo;
+    let load_slew = load_slew * ((load_slew_delta / load_slew_derate) / (drvr_slew_delta / drvr_slew_derate)) as f64;
+    (wire_delay, load_slew)
+}
+
 /// `x` as the exact power of ten it rounds to (`1.0 / 10^k` below one, as the literal reads),
 /// else `x` itself.
 pub(crate) fn pow10_exact(x: f64) -> f64 {
@@ -1078,6 +1110,10 @@ fn build_report(
     // range, a late one with the maximum — icsprout55 states ranges, and its reference min path
     // carries 0.000634 pF where the max is 0.000843. `[analysis][edge]`, see `pin_load_caps`.
     let mut pin_cap_node: HashMap<usize, [[f64; 2]; 2]> = HashMap::new();
+    // A pin of a cell from a later library whose thresholds differ from the first's: those
+    // thresholds. Every other pin, and every port, is timed with `lib.thresholds` (the reference's
+    // `thresholdLibrary`). Empty for a single library, so nothing below changes there.
+    let mut node_th: HashMap<usize, crate::liberty::Thresholds> = HashMap::new();
     let mut ck_node_list: Vec<usize> = Vec::new(); // nodes that are clock (CK) pins
     // (CK node, lane of the edge that triggers it) — see the push site for why Liberty's
     // CK->Q arc is where that lives.
@@ -1107,6 +1143,9 @@ fn build_report(
                 &mut labels,
                 &mut is_endpoint,
             );
+            if let Some(t) = cell.thresholds {
+                node_th.insert(idx, t);
+            }
             ensure_net(&mut nets, net);
             match cell.pins.get(pin).map(|p| p.direction) {
                 Some(Dir::Out) => {
@@ -1504,13 +1543,18 @@ fn build_report(
     // arrival, cell-stage depth, and variance (AOCV/POCV). On return we collapse
     // each node to its worst lane so every downstream consumer is unchanged.
     let input_slew = job.input_slew;
-    // Library thresholds per output edge (lane 0 = rise), as `DmpAlg::init` reads them.
-    let th_all = lib.thresholds;
-    let dmp_vth = move |ol: usize| crate::dmp::Vth {
-        vth: if ol == 0 { th_all.output_rise } else { th_all.output_fall },
-        vl: if ol == 0 { th_all.slew_lower_rise } else { th_all.slew_lower_fall },
-        vh: if ol == 0 { th_all.slew_upper_rise } else { th_all.slew_upper_fall },
-        slew_derate: th_all.slew_derate,
+    // The thresholds a pin is timed with (see `node_th`).
+    let th_of = |v: usize| node_th.get(&v).copied().unwrap_or(lib.thresholds);
+    // The DRIVER's library thresholds per output edge (lane 0 = rise), as `DmpAlg::init` reads
+    // them (`drvr_library->outputThreshold(rf)` ...).
+    let dmp_vth = |v: usize, ol: usize| {
+        let th = th_of(v);
+        crate::dmp::Vth {
+            vth: if ol == 0 { th.output_rise } else { th.output_fall },
+            vl: if ol == 0 { th.slew_lower_rise } else { th.slew_lower_fall },
+            vh: if ol == 0 { th.slew_upper_rise } else { th.slew_upper_fall },
+            slew_derate: th.slew_derate,
+        }
     };
     // `nd` = per-arc net delay, `ns` = per-arc degraded sink slew (0 = keep driver slew).
     // `seed_l` gives each source node its per-lane start time; `block_seq` stops
@@ -1784,19 +1828,21 @@ fn build_report(
                                     (false, Some((c2, rpi, c1))) => {
                                         let gate =
                                             |c: f64| (dt.lookup(sin, c), st.lookup(sin, c));
-                                        let t = dmp_vth(ol);
+                                        let t = dmp_vth(v, ol);
                                         let rd =
                                             crate::dmp::gate_model_rd_step(t.vth, &gate, c1, c2, cap_step);
                                         // ⚠️ Rpi is in ohms; the solver works in the library's
-                                        // time per capacitance (kΩ for ns and pF) so that rd·C
-                                        // and rpi·C land in its time unit.
-                                        Some(crate::dmp::solve_driver(
+                                        // time per capacitance (kΩ for ns and pF, Ω for ps and
+                                        // pF) so that rd·C and rpi·C land in its time unit — and
+                                        // takes that unit so its `rd < 1e-2` ohms holds in any.
+                                        Some(crate::dmp::solve_driver_r(
                                             rd,
                                             c2,
                                             rpi / ohm_per_r,
                                             c1,
                                             t,
                                             &gate,
+                                            ohm_per_r,
                                         ))
                                     }
                                     _ => None,
@@ -2090,7 +2136,12 @@ fn build_report(
                                 // promotes the float thresholds — but both results land in
                                 // `ArcDelay`/`Slew`, and `Delay.hh` has `typedef float
                                 // Delay`, which is a SECOND narrowing.
-                                let th = lib.thresholds;
+                                // The closed form reads the LOAD's library thresholds
+                                // (`dspfWireDelaySlew`, `thresholdLibrary(load_pin)`); a port
+                                // takes the first library's. The driver's are for the
+                                // conversion after (`thresholdAdjust`).
+                                let th = th_of(a.sink);
+                                let th_d = net_drv[i].map_or(lib.thresholds, th_of);
                                 let mut dl = [0.0f64; 2];
                                 let mut sl = [0.0f64; 2];
                                 // The reference's own per-sink model, when this edge's
@@ -2131,6 +2182,17 @@ fn build_report(
                                     // upstream's two guards
                                     dl[l] = if d < 0.0 { tau } else { d };
                                     sl[l] = sv.max(drvr_slew);
+                                }
+                                // Driver and load from libraries whose thresholds differ: the
+                                // reference re-expresses both at the load's. ⚠️ It does so on
+                                // the double before the float store; here on the stored float
+                                // (at most an f32 ulp apart). Never taken for one library.
+                                if th_d != th {
+                                    for l in 0..2 {
+                                        let (d, s) = threshold_adjust(&th_d, &th, l == 0, dl[l], sl[l]);
+                                        dl[l] = d as f32 as f64;
+                                        sl[l] = s as f32 as f64;
+                                    }
                                 }
                                 return (dl, sl);
                             }
@@ -3060,6 +3122,26 @@ mod per_edge_load {
 
     /// The parasitics' units in the library's: the literals a ns, pF library always used, to the
     /// bit; a ps, fF library keeps femtofarads, the same kΩ, and Ω·fF in ps.
+    /// `DelayCalcBase::thresholdAdjust`, measured on `examples/thresholds` (the reference's
+    /// `report_dcalc`): a 20/80, 50 % driver into a 10/90, 40 % load turns a 0.075445 load slew
+    /// into 0.100593 (x 0.8/0.6), and shifts the wire delay by slew x (0.4 - 0.5) / 0.6 — ADDED on
+    /// a rising edge, SUBTRACTED on a falling one. Equal thresholds: the identity.
+    #[test]
+    fn a_load_from_another_library_is_measured_at_its_thresholds() {
+        let lib = |lo: f64, hi: f64, vin: f64, vout: f64| crate::liberty::Thresholds {
+            slew_lower_rise: lo, slew_lower_fall: lo, slew_upper_rise: hi, slew_upper_fall: hi,
+            input_rise: vin, input_fall: vin, output_rise: vout, output_fall: vout,
+            ..crate::liberty::Thresholds::default()
+        };
+        let (a, b) = (lib(0.2, 0.8, 0.5, 0.5), lib(0.1, 0.9, 0.4, 0.6));
+        let (d, s) = threshold_adjust(&a, &b, true, 0.0, 0.075445);
+        assert!((s - 0.100593).abs() < 1e-6, "{s}");
+        assert!((d - (-0.075445 * 0.1 / 0.6)).abs() < 1e-7, "{d}");
+        let (d, _) = threshold_adjust(&a, &b, false, 0.0, 0.075445);
+        assert!(d > 0.0, "a falling edge shifts the other way: {d}");
+        assert_eq!(threshold_adjust(&a, &a, true, 0.0123, 0.0456), (0.0123, 0.0456));
+    }
+
     #[test]
     fn spef_scales_are_exact_powers_of_ten() {
         use crate::liberty::LibUnits;

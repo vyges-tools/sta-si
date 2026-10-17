@@ -188,7 +188,8 @@ pub fn load_inputs(
 ///
 /// ⛔ Each library was taken as nanoseconds and picofarads, later ones overriding earlier cells and
 /// none supplying its thresholds: a picosecond library beside a nanosecond one was timed 1000x
-/// off, silently. A later library whose thresholds differ is said so (the first one's are used).
+/// off, silently. A later library whose thresholds differ keeps them on its cells
+/// (`Cell::thresholds`): each driver is timed at its own, each load converted to its own.
 pub fn load_libs(job: &StaJob, opts: crate::liberty::LibOpts) -> Result<Lib, StaError> {
     let mut lib: Option<Lib> = None;
     for l in &job.libs {
@@ -197,8 +198,8 @@ pub fn load_libs(job: &StaJob, opts: crate::liberty::LibOpts) -> Result<Lib, Sta
             None => lib = Some(one),
             Some(first) => {
                 if one.thresholds != first.thresholds {
-                    let msg = format!("{l}: its slew and delay thresholds differ from the first library's, which are used for every cell");
-                    vyges_events::emit(&vyges_events::Event::new("vyges-sta-si", vyges_events::Severity::Warn, msg).with_code("STA-LIB-THRESHOLDS"));
+                    let msg = format!("{l}: its slew and delay thresholds differ from the first library's; its cells are timed at their own, and ports at the first library's");
+                    vyges_events::emit(&vyges_events::Event::new("vyges-sta-si", vyges_events::Severity::Info, msg).with_code("STA-LIB-THRESHOLDS"));
                 }
                 first.merge(one);
             }
