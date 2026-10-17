@@ -14,18 +14,18 @@ STA report — design tt_typ
        0.1481   0.0721   r2/Q
        0.1481   0.0721   r1/D
 
-  hold endpoints: 2    WHS: 0.1134 ns    THS: 0.0000 ns    [MET]
-  worst hold path to r2/D  (slack 0.1134 ns):
+  hold endpoints: 2    WHS: 0.1105 ns    THS: 0.0000 ns    [MET]
+  worst hold path to r2/D  (slack 0.1105 ns):
       arrival     slew   node
        0.0000   0.0500   clk
        0.0000   0.0500   r1/CK
-       0.0881   0.0253   r1/Q
-       0.0881   0.0253   g1/A
-       0.1064   0.0177   g1/Y
-       0.1064   0.0177   r2/D
+       0.0862   0.0233   r1/Q
+       0.0862   0.0233   g1/A
+       0.1035   0.0167   g1/Y
+       0.1035   0.0167   r2/D
 
   achievable: ~0.176 ns → ~5683.9 MHz   (target 2.000 ns → ~500.0 MHz)
 --- stderr ---
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 3 instance(s) of 2 master(s); 3 timed, 0 physical-only","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 2 cell(s) loaded, 2 used by the design","objects":["clock:clk"]}
-{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.8241 ns, TNS 0.0000 ns, WHS 0.1134 ns — 0 violation(s)"}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.8241 ns, TNS 0.0000 ns, WHS 0.1105 ns — 0 violation(s)"}

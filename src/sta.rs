@@ -315,13 +315,15 @@ struct Edge {
     kind: EdgeKind,
 }
 
-/// A receiver pin's load, per edge of the driving output (lane 0 rise, 1 fall): its rise / fall
-/// capacitance (the plain `capacitance` where the library states no per-edge value), or its CCS
-/// receiver model's Miller-aware load on both edges. One rule for the full and incremental timer.
-pub(crate) fn pin_load_caps(p: &crate::liberty::Pin) -> [f64; 2] {
+/// A receiver pin's load, `[analysis][edge]`: analysis 0 is EARLY (min caps, hold), 1 LATE
+/// (max caps, setup); edge 0 rise, 1 fall of the driving output. The rise / fall capacitance —
+/// its `_range` minimum for an early analysis — and the plain `capacitance` where the library
+/// states no per-edge value; a CCS receiver model's Miller-aware load everywhere. One rule for
+/// the full and the incremental timer.
+pub(crate) fn pin_load_caps(p: &crate::liberty::Pin) -> [[f64; 2]; 2] {
     match &p.recv {
-        Some(r) if !r.is_empty() => [p.load_cap(); 2],
-        _ => [p.caps.get(true, true), p.caps.get(false, true)],
+        Some(r) if !r.is_empty() => [[p.load_cap(); 2]; 2],
+        _ => [[p.caps.get(true, false), p.caps.get(false, false)], [p.caps.get(true, true), p.caps.get(false, true)]],
     }
 }
 
@@ -330,7 +332,7 @@ struct Net {
     sinks: Vec<usize>,
     /// Receiver pin caps + port loads, per edge of the DRIVER's output (lane 0 rise, 1 fall):
     /// the reference loads each edge with the pins' capacitance for that edge.
-    load: [f64; 2],
+    load: [[f64; 2]; 2],
 }
 
 /// Opaque handle to a timing-graph pin/node — an index into the committed graph. Returned
@@ -979,7 +981,7 @@ fn build_report(
         nets.entry(n.to_string()).or_insert(Net {
             driver: None,
             sinks: Vec::new(),
-            load: [0.0; 2],
+            load: [[0.0; 2]; 2],
         });
     };
 
@@ -1011,8 +1013,11 @@ fn build_report(
         ensure_net(&mut nets, p);
         let net = nets.get_mut(p).unwrap();
         net.sinks.push(idx);
-        net.load[0] += job.output_load;
-        net.load[1] += job.output_load;
+        for mm in 0..2 {
+            for l in 0..2 {
+                net.load[mm][l] += job.output_load;
+            }
+        }
         output_ports.push((idx, p.clone()));
     }
 
@@ -1037,7 +1042,11 @@ fn build_report(
     // attribute — was 4.8 % off either edge on average across sky130 hd's input pins, 10.2 %
     // at worst. Lane 0 rise, 1 fall, as everywhere in this timer. A pin with a CCS receiver
     // model keeps its Miller-aware load on both lanes.
-    let mut pin_cap_node: HashMap<usize, [f64; 2]> = HashMap::new();
+    //
+    // And per ANALYSIS: an early (hold) analysis loads with the minimum of each pin's capacitance
+    // range, a late one with the maximum — icsprout55 states ranges, and its reference min path
+    // carries 0.000634 pF where the max is 0.000843. `[analysis][edge]`, see `pin_load_caps`.
+    let mut pin_cap_node: HashMap<usize, [[f64; 2]; 2]> = HashMap::new();
     let mut ck_node_list: Vec<usize> = Vec::new(); // nodes that are clock (CK) pins
     // (CK node, lane of the edge that triggers it) — see the push site for why Liberty's
     // CK->Q arc is where that lives.
@@ -1085,8 +1094,11 @@ fn build_report(
                     pin_cap_node.insert(idx, cap);
                     let nref = nets.get_mut(net).unwrap();
                     nref.sinks.push(idx);
-                    nref.load[0] += cap[0];
-                    nref.load[1] += cap[1];
+                    for mm in 0..2 {
+                        for l in 0..2 {
+                            nref.load[mm][l] += cap[mm][l];
+                        }
+                    }
                     if cell.pins[pin].clock {
                         ck_node_list.push(idx); // clock pin — root of insertion-delay paths
                         // WHICH clock edge triggers this register. Liberty states it on the
@@ -1189,12 +1201,12 @@ fn build_report(
     for (idx, name) in &output_ports {
         endpoint_req[*idx] = period - job.output_delay_for(name) - job.setup_uncertainty;
     }
-    let mut node_load = vec![[0.0f64; 2]; n];
+    let mut node_load = vec![[[0.0f64; 2]; 2]; n];
     for (netname, net) in &nets {
         if let Some(d) = net.driver {
             // driver load = receiver pin caps + wire cap from SPEF (fF -> pF), per output edge
             let wire = spef.map(|s| s.wire_load_pf(netname)).unwrap_or(0.0);
-            node_load[d] = [net.load[0] + wire, net.load[1] + wire];
+            node_load[d] = net.load.map(|e| e.map(|c| c + wire));
         }
     }
 
@@ -1270,7 +1282,7 @@ fn build_report(
     // `fft_top`'s `input55`, where that SPEF node carries none at all — so reading the node
     // handed the gate ZERO near capacitance and `report_dcalc` disagreed by the whole Pi.
     // Per output edge: the receiver caps it sums are that edge's.
-    let mut shield: Vec<[Option<(f64, f64, f64)>; 2]> = vec![[None; 2]; n];
+    let mut shield: Vec<[[Option<(f64, f64, f64)>; 2]; 2]> = vec![[[None; 2]; 2]; n];
     if let Some(s) = spef {
         for (name, net) in &nets {
             if let Some(d) = net.driver {
@@ -1280,13 +1292,13 @@ fn build_report(
                         // the same capacitance content the reduction sees: coupling
                         // grounded at factor 1.0, plus Liberty receiver caps at the sinks
                         let cc: f64 = net_cpl[i].iter().map(|(_, c)| *c).sum();
-                        for lane in 0..2 {
+                        for (mm, lane) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
                         let mut pcap: BTreeMap<String, f64> = BTreeMap::new();
                         for &sk in &net.sinks {
                             if let Some((si, sp)) = ip_of(sk) {
                                 if let Some(nd) = rc.pin_node(&si, &sp) {
                                     *pcap.entry(nd.to_string()).or_default() +=
-                                        pin_cap_node.get(&sk).map_or(0.0, |c| c[lane]) * 1000.0;
+                                        pin_cap_node.get(&sk).map_or(0.0, |c| c[mm][lane]) * 1000.0;
                                 }
                             } else if output_ports.iter().any(|(idx, _)| *idx == sk) {
                                 // A top-level output port: its external load at its own node
@@ -1298,7 +1310,7 @@ fn build_report(
                             }
                         }
                         if let Some((c2_ff, rpi, c1_ff)) = rc.pi_reduce(dnode, cc, &pcap) {
-                            shield[d][lane] = Some((c2_ff / 1000.0, rpi, c1_ff / 1000.0));
+                            shield[d][mm][lane] = Some((c2_ff / 1000.0, rpi, c1_ff / 1000.0));
                         }
                         }
                     }
@@ -1584,7 +1596,8 @@ fn build_report(
             head += 1;
             for e in &out_edges[u] {
                 let v = e.to;
-                let load_lanes = node_load[v];
+                let mm = late as usize;
+                let load_lanes = node_load[v][mm];
                 // A flop's CK->Q arc starts a *new* launch, so a pass that is tracking
                 // where a clock edge itself gets to must stop here. The indeg bookkeeping
                 // below still runs — only the value is withheld, so the topological walk
@@ -1696,7 +1709,7 @@ fn build_report(
                                 // answers a question CCS does not ask.
                                 let ccs_arc = !arc.ccs.is_empty();
                                 let load = load_lanes[ol];
-                                let dmp = match (ccs_arc, shield[v][ol]) {
+                                let dmp = match (ccs_arc, shield[v][mm][ol]) {
                                     (false, Some((c2, rpi, c1))) => {
                                         let gate =
                                             |c: f64| (dt.lookup(sin, c), st.lookup(sin, c));
@@ -1716,7 +1729,7 @@ fn build_report(
                                     }
                                     _ => None,
                                 };
-                                let leff = match (&dmp, shield[v][ol]) {
+                                let leff = match (&dmp, shield[v][mm][ol]) {
                                     (Some(r), _) => r.ceff,
                                     (None, Some((c2, rpi, c1))) => crate::ccs::ceff_iter(
                                         c2,
@@ -1726,7 +1739,7 @@ fn build_report(
                                     ),
                                     (None, None) => load,
                                 };
-                                if shield[v][ol].is_some() {
+                                if shield[v][mm][ol].is_some() {
                                     ceff_used.borrow_mut()[v][ol] = leff;
                                 }
                                 if let Some(r) = &dmp {
@@ -1851,8 +1864,10 @@ fn build_report(
     // contributes to `downstreamCap` upstream. Built once: it does not depend on arrivals.
     // ⚠️ Liberty caps are pF and SPEF node caps are fF, so convert.
     // Per edge (lane 0 rise, 1 fall): each edge's Elmore walks that edge's receiver caps.
-    let net_pin_cap: Vec<[BTreeMap<String, f64>; 2]> = {
-        let mut v: Vec<[BTreeMap<String, f64>; 2]> = vec![[BTreeMap::new(), BTreeMap::new()]; nn];
+    // `[analysis][edge]` like the driver load.
+    let net_pin_cap: Vec<[[BTreeMap<String, f64>; 2]; 2]> = {
+        let e = || [BTreeMap::new(), BTreeMap::new()];
+        let mut v: Vec<[[BTreeMap<String, f64>; 2]; 2]> = (0..nn).map(|_| [e(), e()]).collect();
         if let Some(sp_all) = spef {
             for a in arcs.iter() {
                 let Some(rc) = sp_all.nets.get(&net_order[a.net_idx]) else {
@@ -1860,9 +1875,11 @@ fn build_report(
                 };
                 if let Some((si, spn)) = &a.sink_ip {
                     if let Some(node) = rc.pin_node(si, spn) {
-                        let c = pin_cap_node.get(&a.sink).copied().unwrap_or([0.0; 2]);
-                        for l in 0..2 {
-                            *v[a.net_idx][l].entry(node.to_string()).or_default() += c[l] * 1000.0;
+                        let c = pin_cap_node.get(&a.sink).copied().unwrap_or([[0.0; 2]; 2]);
+                        for mm in 0..2 {
+                            for l in 0..2 {
+                                *v[a.net_idx][mm][l].entry(node.to_string()).or_default() += c[mm][l] * 1000.0;
+                            }
                         }
                     }
                 }
@@ -1879,7 +1896,8 @@ fn build_report(
     // `RiseFall` — so both are per edge. Collapsing them to one value per arc forces a
     // single driver waveform onto both edges, which was measured to take data-hold rms
     // from 0.0329 to 0.0537 when the per-sink crossing solve was wired against it.
-    let compute = |sw: &[[f64; 2]], net_slew: &[[f64; 2]]| -> (Vec<[f64; 2]>, Vec<[f64; 2]>) {
+    // `mm`: the analysis (0 early, 1 late), whose receiver caps the Elmore walks.
+    let compute = |sw: &[[f64; 2]], net_slew: &[[f64; 2]], mm: usize| -> (Vec<[f64; 2]>, Vec<[f64; 2]>) {
         // Per-net coupling capacitance seen by the RC network, in fF.
         //
         // 🔑 BASE, and it was missing: a coupling capacitor is GROUNDED on the net at
@@ -1976,7 +1994,7 @@ fn build_report(
                 // does not.
                 if let (Some((di, dp)), Some((si, sp))) = (&net_drv_ip[i], &a.sink_ip) {
                     if let (Some(dt), Some(st)) = (rc.pin_node(di, dp), rc.pin_node(si, sp)) {
-                        let taus = [0, 1].map(|l| rc.elmore(dt, xc[i], &net_pin_cap[i][l]).and_then(|dl| dl.get(st).copied()));
+                        let taus = [0, 1].map(|l| rc.elmore(dt, xc[i], &net_pin_cap[i][mm][l]).and_then(|dl| dl.get(st).copied()));
                         if let [Some(_), Some(_)] = taus {
                             {
                                 mark(RC_TREE_ELMORE);
@@ -2073,7 +2091,7 @@ fn build_report(
     // A STARTING POINT for the iteration below, nothing more: no windows and no slews yet
     // exist, so this is a degenerate operating point and its delays are systematically
     // small. ⚠️ It is not a usable answer — see `early_d`/`early_s` after the loop.
-    let (nom_d, nom_s) = compute(&neg, &zero);
+    let (nom_d, nom_s) = compute(&neg, &zero, 1);
     let mut arc_d = nom_d.clone();
     let mut arc_s = nom_s.clone();
     // The converged per-net driver slew, kept past the loop: the EARLY interconnect has to
@@ -2095,7 +2113,7 @@ fn build_report(
         let net_slew: Vec<[f64; 2]> = (0..nn)
             .map(|i| net_drv[i].map(|d| slw[d]).unwrap_or([0.0; 2]))
             .collect();
-        let (nd, ns) = compute(&sw, &net_slew);
+        let (nd, ns) = compute(&sw, &net_slew, 1);
         let delta = (0..n_arcs)
             .map(|k| (nd[k][0] - arc_d[k][0]).abs().max((nd[k][1] - arc_d[k][1]).abs()))
             .fold(0.0, f64::max);
@@ -2124,7 +2142,7 @@ fn build_report(
         let with_pi: usize = nets
             .values()
             .filter_map(|nt| nt.driver)
-            .filter(|d| shield[*d].iter().any(Option::is_some))
+            .filter(|d| shield[*d][1].iter().any(Option::is_some))
             .count();
         eprintln!(
             "rc-trace: driver Pi (Ceff) available on {with_pi} of {drivers} driven net(s) — \
@@ -2190,7 +2208,7 @@ fn build_report(
                 std::env::var("VYGES_STA_RC_NET").ok().as_deref() == Some(nm.as_str())
             }) {
                 if let Some(d) = nt.driver {
-                    match shield[d][0] {
+                    match shield[d][1][0] {
                         Some((c2, rpi, c1)) => eprintln!(
                             "rc-trace: ASKED net {nm} DRIVER Pi — ours C2={c2:.4} \
                              Rpi={:.4}k C1={c1:.4} (total {:.4}) · Ceff rise={:.4}                              fall={:.4} · load {:.4} pF",
@@ -2198,12 +2216,12 @@ fn build_report(
                             c2 + c1,
                             ceff_used.borrow()[d][0],
                             ceff_used.borrow()[d][1],
-                            node_load[d][0]
+                            node_load[d][1][0]
                         ),
                         None => eprintln!(
                             "rc-trace: ASKED net {nm} DRIVER — NO Pi; gate sees the TOTAL \
                              load {:.4} pF",
-                            node_load[d][0]
+                            node_load[d][1][0]
                         ),
                     }
                 }
@@ -2245,13 +2263,13 @@ fn build_report(
     // one pin's cell delay came out 0.211 ns long and the endpoint read 0.277 ns
     // OPTIMISTIC — the direction that misses a real hold violation.
     let (early_d, early_s) = {
-        let (mut d, mut sl) = compute(&neg, &conv_net_slew); // seeded from the late point
+        let (mut d, mut sl) = compute(&neg, &conv_net_slew, 0); // seeded from the late point
         for _ in 0..MAX_SI_ITERS {
             let (_a, _s2, _f, _o, _ar, slw, _fl) = relax(&d, &sl, false, &seed_main, false);
             let e_net_slew: Vec<[f64; 2]> = (0..nn)
                 .map(|i| net_drv[i].map(|dv| slw[dv]).unwrap_or([0.0; 2]))
                 .collect();
-            let (nd, ns) = compute(&neg, &e_net_slew);
+            let (nd, ns) = compute(&neg, &e_net_slew, 0);
             let delta = (0..n_arcs)
                 .map(|k| (nd[k][0] - d[k][0]).abs().max((nd[k][1] - d[k][1]).abs()))
                 .fold(0.0, f64::max);
@@ -2631,13 +2649,13 @@ fn build_report(
         }
         let cell_dly = |arc: &Arc, sin: f64, vnode: usize| -> (f64, f64) {
             // the collapsed path takes the worse edge, each edge at its own load
-            let leff_of = |lane: usize| match shield[vnode][lane] {
+            let leff_of = |lane: usize| match shield[vnode][1][lane] {
                 Some((c2, rpi, c1)) => crate::ccs::ceff_iter(c2, c1, rpi * c1 * 1e-3, |c| {
                     arc.rise_transition
                         .lookup(sin, c)
                         .max(arc.fall_transition.lookup(sin, c))
                 }),
-                None => node_load[vnode][lane],
+                None => node_load[vnode][1][lane],
             };
             let leff = leff_of(0).max(leff_of(1));
             let (d, s) = if !arc.ccs.is_empty() {
@@ -2863,7 +2881,7 @@ fn build_report(
     // Retain a per-pin snapshot for the Timer's query API (Phase 1). Cloned, not moved:
     // closures above still hold immutable borrows of these arrays through the return.
     // the query API reports one load per driver: the larger edge's
-    let node_load_max: Vec<f64> = node_load.iter().map(|l| l[0].max(l[1])).collect();
+    let node_load_max: Vec<f64> = node_load.iter().map(|l| l[1][0].max(l[1][1])).collect();
     let timing = Timing::new(
         &labels,
         &is_endpoint,
@@ -2960,21 +2978,23 @@ mod per_edge_load {
 
     /// Reference rule: a receiver loads its driver's rising edge with its rise capacitance and
     /// the falling edge with its fall capacitance, `capacitance` only where those are absent.
+    /// An early (hold) analysis takes each range's minimum, a late (setup) one its maximum.
     /// Measured: icsprout55's two-flop example times setup to the reference's last digit with
     /// this (ss 1.680693, tt 1.824064), 6 ps off with the single `capacitance`.
     #[test]
     fn a_receiver_loads_each_edge_with_that_edges_capacitance() {
         let lib = crate::liberty::Lib::parse(
             r#"library(t) { capacitive_load_unit (1, pf);
-  cell (B) { pin(A) { direction : input; capacitance : 0.0020; rise_capacitance : 0.0022; fall_capacitance : 0.0018; }
+  cell (B) { pin(A) { direction : input; capacitance : 0.0020; rise_capacitance : 0.0022; fall_capacitance : 0.0018;
+                       rise_capacitance_range (0.0016, 0.0022); fall_capacitance_range (0.0012, 0.0018); }
              pin(C) { direction : input; capacitance : 0.0030; } }
 }"#,
         )
         .unwrap();
         let c = &lib.cells["B"];
-        // Liberty values are read as f32, as the reference reads them
+        // Liberty values are read as f32, as the reference reads them. [early min, late max][rise, fall]
         let f = |v: f32| v as f64;
-        assert_eq!(pin_load_caps(&c.pins["A"]), [f(0.0022), f(0.0018)]);
-        assert_eq!(pin_load_caps(&c.pins["C"]), [f(0.0030), f(0.0030)]);
+        assert_eq!(pin_load_caps(&c.pins["A"]), [[f(0.0016), f(0.0012)], [f(0.0022), f(0.0018)]]);
+        assert_eq!(pin_load_caps(&c.pins["C"]), [[f(0.0030); 2]; 2]);
     }
 }
