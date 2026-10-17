@@ -72,7 +72,8 @@ pub fn emit(design: &str, nl: &Netlist, lib: &Lib, spef: Option<&Spef>, t: &Time
     s.push_str("  (PROGRAM \"vyges-sta-si\")\n");
     s.push_str(&format!("  (VERSION \"{}\")\n", crate::VERSION));
     s.push_str("  (DIVIDER /)\n");
-    s.push_str("  (TIMESCALE 1ns)\n");
+    // the library's time unit: every delay below is in it
+    s.push_str(&format!("  (TIMESCALE {})\n", lib.units.time_name()));
 
     // per-instance cell delays + setup/hold
     for inst in &nl.insts {

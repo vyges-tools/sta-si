@@ -1,0 +1,8 @@
+# Library units, the reference's way. The two flop ring of examples/seq in a nanosecond library.
+# Every value here (period, slew, load) is in the FIRST library's units, as an SDC's are.
+design:      seq
+netlist:     seq.v
+lib:         units_ns.lib
+clock:       clk 1.0
+input_slew:  0.02
+output_load: 0.005

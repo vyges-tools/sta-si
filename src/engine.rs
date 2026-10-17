@@ -93,6 +93,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         worst_hold_path: Vec::new(),
         hold_slacks: Vec::new(),
         pba_wns: None,
+        units: Default::default(),
     });
     (job, rep)
 }
@@ -157,15 +158,7 @@ pub fn analyze_job_opts(
     lib_opts: crate::liberty::LibOpts,
 ) -> Result<TimingReport, StaError> {
     let nl = load_netlist(&job.resolve(&job.netlist))?;
-    let mut lib = Lib::default();
-    for l in &job.libs {
-        let one = Lib::load_opts(&job.resolve(l), lib_opts)
-            .map_err(|e| StaError::Parse(e.to_string()))?;
-        lib.cells.extend(one.cells); // later libs override earlier on name clash
-    }
-    if lib.cells.is_empty() {
-        return Err(StaError::Parse("no cells in any .lib".into()));
-    }
+    let lib = load_libs(job, lib_opts)?;
     let spef = match &job.spef {
         Some(p) => Some(load_spef(p, job, &nl)?),
         None => None,
@@ -175,6 +168,34 @@ pub fn analyze_job_opts(
         emit_spef_coverage(job, &nl, s);
     }
     sta::analyze(&nl, &lib, job, spef.as_ref())
+}
+
+/// The job's libraries as one, as the reference reads them: the FIRST library's units (every
+/// value is reported, and every SDC value read, in them), thresholds and voltage; each later
+/// library put in those units; a cell from the first library that holds it (`link_path *`).
+///
+/// ⛔ Each library was taken as nanoseconds and picofarads, later ones overriding earlier cells and
+/// none supplying its thresholds: a picosecond library beside a nanosecond one was timed 1000x
+/// off, silently. A later library whose thresholds differ is said so (the first one's are used).
+pub fn load_libs(job: &StaJob, opts: crate::liberty::LibOpts) -> Result<Lib, StaError> {
+    let mut lib: Option<Lib> = None;
+    for l in &job.libs {
+        let one = Lib::load_opts(&job.resolve(l), opts).map_err(|e| StaError::Parse(e.to_string()))?;
+        match lib.as_mut() {
+            None => lib = Some(one),
+            Some(first) => {
+                if one.thresholds != first.thresholds {
+                    let msg = format!("{l}: its slew and delay thresholds differ from the first library's, which are used for every cell");
+                    vyges_events::emit(&vyges_events::Event::new("vyges-sta-si", vyges_events::Severity::Warn, msg).with_code("STA-LIB-THRESHOLDS"));
+                }
+                first.merge(one);
+            }
+        }
+    }
+    match lib {
+        Some(l) if !l.cells.is_empty() => Ok(l),
+        _ => Err(StaError::Parse("no cells in any .lib".into())),
+    }
 }
 
 /// Read a SPEF and put it into the netlist's own spelling of net names.
@@ -203,15 +224,7 @@ pub fn sdf_for_job_opts(
     lib_opts: crate::liberty::LibOpts,
 ) -> Result<String, StaError> {
     let nl = load_netlist(&job.resolve(&job.netlist))?;
-    let mut lib = Lib::default();
-    for l in &job.libs {
-        let one = Lib::load_opts(&job.resolve(l), lib_opts)
-            .map_err(|e| StaError::Parse(e.to_string()))?;
-        lib.cells.extend(one.cells);
-    }
-    if lib.cells.is_empty() {
-        return Err(StaError::Parse("no cells in any .lib".into()));
-    }
+    let lib = load_libs(job, lib_opts)?;
     let spef = match &job.spef {
         Some(p) => Some(load_spef(p, job, &nl)?),
         None => None,
@@ -230,15 +243,7 @@ pub fn liberty_json_for_job(
     job: &StaJob,
     lib_opts: crate::liberty::LibOpts,
 ) -> Result<String, StaError> {
-    let mut lib = Lib::default();
-    for l in &job.libs {
-        let one = Lib::load_opts(&job.resolve(l), lib_opts)
-            .map_err(|e| StaError::Parse(e.to_string()))?;
-        lib.cells.extend(one.cells);
-    }
-    if lib.cells.is_empty() {
-        return Err(StaError::Parse("no cells in any .lib".into()));
-    }
+    let lib = load_libs(job, lib_opts)?;
     Ok(lib.to_json())
 }
 
@@ -246,14 +251,7 @@ pub fn liberty_json_for_job(
 /// Uses the job's SDC file if present, else the inline `.sta` clock definitions.
 pub fn lint_job(job: &StaJob) -> Result<crate::sdclint::LintReport, StaError> {
     let nl = load_netlist(&job.resolve(&job.netlist))?;
-    let mut lib = Lib::default();
-    for l in &job.libs {
-        let one = Lib::load(&job.resolve(l)).map_err(|e| StaError::Parse(e.to_string()))?;
-        lib.cells.extend(one.cells);
-    }
-    if lib.cells.is_empty() {
-        return Err(StaError::Parse("no cells in any .lib".into()));
-    }
+    let lib = load_libs(job, crate::liberty::LibOpts::default())?;
     let sdc = match &job.sdc {
         Some(p) => job.load_sdc(p).map_err(StaError::Parse)?,
         None => {
@@ -362,6 +360,11 @@ impl SlackDistribution {
     /// nothing is not zero, it is absent, and reporting zeros would read as "everything is
     /// exactly on the line".
     pub fn of(slacks: &[(crate::sta::PinId, f64)]) -> Option<SlackDistribution> {
+        SlackDistribution::of_in(slacks, crate::liberty::LibUnits::default())
+    }
+
+    /// [`SlackDistribution::of`] for slacks in `units` (the hold-critical margin is in ns).
+    pub fn of_in(slacks: &[(crate::sta::PinId, f64)], units: crate::liberty::LibUnits) -> Option<SlackDistribution> {
         let mut v: Vec<f64> = slacks
             .iter()
             .map(|&(_, s)| s)
@@ -385,7 +388,7 @@ impl SlackDistribution {
             median_ns: at(0.50),
             p90_ns: at(0.90),
             max_ns: v[v.len() - 1],
-            critical: v.iter().filter(|&&s| s <= HOLD_CRIT_MARGIN_NS).count(),
+            critical: v.iter().filter(|&&s| s * units.ns_per_unit() <= HOLD_CRIT_MARGIN_NS).count(),
         })
     }
 }
@@ -401,8 +404,10 @@ impl MarginAdvisory {
         // Minimum period the worst setup path needs. WNS>0 (margin) shrinks it; WNS<0
         // (violated) grows it beyond the target — i.e. the clock is too fast.
         let achievable = period_ns - rep.wns;
-        let (max_freq_mhz, over_margin_ratio) = if achievable > 1e-3 {
-            (Some(1000.0 / achievable), Some(period_ns / achievable))
+        // the report's time unit in ns: the period and slacks are in the first library's unit
+        let ns = rep.units.ns_per_unit();
+        let (max_freq_mhz, over_margin_ratio) = if achievable * ns > 1e-3 {
+            (Some(1000.0 / (achievable * ns)), Some(period_ns / achievable))
         } else {
             (None, None) // critical path ≈ 0 at this clock — finite freq not meaningful
         };
@@ -412,7 +417,7 @@ impl MarginAdvisory {
         let hold_critical = rep
             .hold_slacks
             .iter()
-            .filter(|&&(_, sl)| sl <= HOLD_CRIT_MARGIN_NS)
+            .filter(|&&(_, sl)| sl * ns <= HOLD_CRIT_MARGIN_NS)
             .count();
         let hold_flood = rep.hold_endpoints > 0
             && hold_critical >= HOLD_FLOOD_MIN
@@ -420,7 +425,7 @@ impl MarginAdvisory {
         Some(MarginAdvisory {
             achievable_ns: achievable,
             max_freq_mhz,
-            target_freq_mhz: 1000.0 / period_ns,
+            target_freq_mhz: 1000.0 / (period_ns * ns),
             over_margin_ratio,
             hold_critical,
             warn: over_margin && hold_flood,
@@ -431,12 +436,14 @@ impl MarginAdvisory {
 /// Render a human-readable timing report.
 pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
     let mut s = String::new();
+    // every time below is in the first library's unit
+    let tu = rep.units.time_label();
     s.push_str(&format!("STA report — design {}\n", job.design));
     if job.clocks.len() > 1 {
         let cl: Vec<String> = job
             .clocks
             .iter()
-            .map(|(n, _, p)| format!("{n}@{p:.2}ns"))
+            .map(|(n, _, p)| format!("{n}@{p:.2}{tu}"))
             .collect();
         s.push_str(&format!(
             "  clocks: {}   xtalk_miller {:.2}\n",
@@ -445,7 +452,7 @@ pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
         ));
     } else {
         s.push_str(&format!(
-            "  clock {}  period {:.3} ns   xtalk_miller {:.2}\n",
+            "  clock {}  period {:.3} {tu}   xtalk_miller {:.2}\n",
             job.clock_port, job.period_ns, job.miller
         ));
     }
@@ -469,7 +476,7 @@ pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
     if let Some(pba) = rep.pba_wns {
         let v = if pba >= 0.0 { "MET" } else { "VIOLATED" };
         s.push_str(&format!(
-            "  PBA WNS: {pba:.4} ns   [{v}]  (path-based re-timing)\n"
+            "  PBA WNS: {pba:.4} {tu}   [{v}]  (path-based re-timing)\n"
         ));
     }
     s.push_str(&format!("  endpoints: {}\n", rep.endpoints));
@@ -479,11 +486,11 @@ pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
     }
     let verdict = if rep.wns >= 0.0 { "MET" } else { "VIOLATED" };
     s.push_str(&format!(
-        "  WNS: {:.4} ns    TNS: {:.4} ns    [{}]\n\n",
+        "  WNS: {:.4} {tu}    TNS: {:.4} {tu}    [{}]\n\n",
         rep.wns, rep.tns, verdict
     ));
     s.push_str(&format!(
-        "  worst path to {}  (slack {:.4} ns):\n",
+        "  worst path to {}  (slack {:.4} {tu}):\n",
         rep.worst_endpoint, rep.wns
     ));
     s.push_str(&format!("    {:>9}  {:>7}   node\n", "arrival", "slew"));
@@ -496,11 +503,11 @@ pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
     if rep.hold_endpoints > 0 {
         let hverdict = if rep.whs >= 0.0 { "MET" } else { "VIOLATED" };
         s.push_str(&format!(
-            "\n  hold endpoints: {}    WHS: {:.4} ns    THS: {:.4} ns    [{}]\n",
+            "\n  hold endpoints: {}    WHS: {:.4} {tu}    THS: {:.4} {tu}    [{}]\n",
             rep.hold_endpoints, rep.whs, rep.ths, hverdict
         ));
         s.push_str(&format!(
-            "  worst hold path to {}  (slack {:.4} ns):\n",
+            "  worst hold path to {}  (slack {:.4} {tu}):\n",
             rep.worst_hold_endpoint, rep.whs
         ));
         s.push_str(&format!("    {:>9}  {:>7}   node\n", "arrival", "slew"));
@@ -515,11 +522,11 @@ pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
     if let Some(adv) = MarginAdvisory::compute(job.period_ns, rep) {
         match adv.max_freq_mhz {
             Some(f) => s.push_str(&format!(
-                "\n  achievable: ~{:.3} ns → ~{:.1} MHz   (target {:.3} ns → ~{:.1} MHz)\n",
+                "\n  achievable: ~{:.3} {tu} → ~{:.1} MHz   (target {:.3} {tu} → ~{:.1} MHz)\n",
                 adv.achievable_ns, f, job.period_ns, adv.target_freq_mhz
             )),
             None => s.push_str(&format!(
-                "\n  achievable: critical path ≈ 0 at this clock   (target {:.3} ns → ~{:.1} MHz)\n",
+                "\n  achievable: critical path ≈ 0 at this clock   (target {:.3} {tu} → ~{:.1} MHz)\n",
                 job.period_ns, adv.target_freq_mhz
             )),
         }
@@ -533,7 +540,7 @@ pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
                 .map(|f| format!("~{f:.1} MHz"))
                 .unwrap_or_else(|| "a higher frequency".to_string());
             s.push_str(&format!(
-                "  WARNING: over-margin — design closes {ratio} ({:.3} ns achievable vs {:.3} ns target);\n           {} of {} hold endpoints are hold-critical (≤ {:.2} ns) → expect a heavy hold-fix / buffer-budget burden.\n           Consider a faster clock ({freq} achievable) or accept the hold-fix cost.\n",
+                "  WARNING: over-margin — design closes {ratio} ({:.3} {tu} achievable vs {:.3} {tu} target);\n           {} of {} hold endpoints are hold-critical (≤ {:.2} ns) → expect a heavy hold-fix / buffer-budget burden.\n           Consider a faster clock ({freq} achievable) or accept the hold-fix cost.\n",
                 adv.achievable_ns, job.period_ns, adv.hold_critical, rep.hold_endpoints, HOLD_CRIT_MARGIN_NS
             ));
         }
@@ -554,6 +561,9 @@ pub fn report_json(job: &StaJob, rep: &TimingReport) -> String {
     s.push('{');
     s.push_str(&format!("\"design\":{:?},", job.design));
     s.push_str(&format!("\"clock\":{:?},", job.clock_port));
+    // the `_ns` fields are in this unit: the first library's (ns for a ns library)
+    s.push_str(&format!("\"time_unit\":{:?},", rep.units.time_name()));
+    s.push_str(&format!("\"cap_unit\":{:?},", rep.units.cap_name()));
     s.push_str(&format!("\"period_ns\":{:.6},", job.period_ns));
     s.push_str(&format!("\"xtalk_miller\":{:.2},", job.miller));
     s.push_str(&format!("\"endpoints\":{},", rep.endpoints));
@@ -605,7 +615,7 @@ pub fn report_json(job: &StaJob, rep: &TimingReport) -> String {
     }
     // The hold-slack shape, which is what distinguishes a flood from a few bad paths at the
     // same WHS — and therefore what predicts the hold-fix burden.
-    match SlackDistribution::of(&rep.hold_slacks) {
+    match SlackDistribution::of_in(&rep.hold_slacks, rep.units) {
         Some(d) => {
             s.push_str("\"hold_slack_distribution\":{");
             s.push_str(&format!("\"count\":{},", d.count));
@@ -748,6 +758,8 @@ fn scenario_label(path: &str) -> String {
 /// Human-readable MCMM report: per-scenario slacks + the worst corner per check.
 pub fn render_mcmm(job: &StaJob, rep: &McmmReport) -> String {
     let mut s = String::new();
+    // the first scenario's library unit (scenarios are corners of one library set)
+    let tu = rep.scenarios.first().map(|sc| sc.report.units.time_label()).unwrap_or_else(|| "ns".into());
     s.push_str(&format!("MCMM report — design {}\n", job.design));
     s.push_str(&format!("  scenarios: {}\n\n", rep.scenarios.len()));
     s.push_str(&format!(
@@ -782,7 +794,7 @@ pub fn render_mcmm(job: &StaJob, rep: &McmmReport) -> String {
     s.push('\n');
     match rep.worst_setup() {
         Some((name, wns)) => s.push_str(&format!(
-            "  worst setup: {:.4} ns  (scenario {})   [{}]\n",
+            "  worst setup: {:.4} {tu}  (scenario {})   [{}]\n",
             wns,
             name,
             if wns >= 0.0 { "MET" } else { "VIOLATED" }
@@ -791,7 +803,7 @@ pub fn render_mcmm(job: &StaJob, rep: &McmmReport) -> String {
     }
     match rep.worst_hold() {
         Some((name, whs)) => s.push_str(&format!(
-            "  worst hold:  {:.4} ns  (scenario {})   [{}]\n",
+            "  worst hold:  {:.4} {tu}  (scenario {})   [{}]\n",
             whs,
             name,
             if whs >= 0.0 { "MET" } else { "VIOLATED" }

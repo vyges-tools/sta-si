@@ -30,6 +30,7 @@ fn report(wns: f64, tns: f64, whs: f64, ths: f64) -> TimingReport {
         worst_hold_path: Vec::new(),
         hold_slacks: Vec::new(),
         pba_wns: None,
+        units: Default::default(),
     }
 }
 

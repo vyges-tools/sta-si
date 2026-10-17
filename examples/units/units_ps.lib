@@ -1,0 +1,72 @@
+library (units_ps) {
+  delay_model : table_lookup;
+  time_unit : "1ps";
+  capacitive_load_unit (1, "ff");
+
+  lu_table_template (t) { variable_1 : input_net_transition; variable_2 : total_output_net_capacitance; index_1 ("10.0, 80.0"); index_2 ("1.0, 10.0"); }
+  lu_table_template (c) { variable_1 : related_pin_transition; variable_2 : constrained_pin_transition; index_1 ("10.0, 80.0"); index_2 ("10.0, 80.0"); }
+  lu_table_template (s) { variable_1 : related_pin_transition; variable_2 : constrained_pin_transition; index_1 ("10.0, 80.0"); index_2 ("10.0, 80.0"); }
+
+  cell (INVP) {
+    pin (A) { direction : input; capacitance :  1.5; }
+    pin (Y) {
+      direction : output;
+      timing () {
+        related_pin : "A";
+        cell_rise (t)       { index_1 ("10.0, 80.0"); index_2 ("1.0, 10.0"); values ( "80.0, 200.0", "120.0, 280.0" ); }
+        cell_fall (t)       { index_1 ("10.0, 80.0"); index_2 ("1.0, 10.0"); values ( "70.0, 180.0", "110.0, 260.0" ); }
+        rise_transition (t) { index_1 ("10.0, 80.0"); index_2 ("1.0, 10.0"); values ( "30.0, 90.0", "40.0, 110.0" ); }
+        fall_transition (t) { index_1 ("10.0, 80.0"); index_2 ("1.0, 10.0"); values ( "30.0, 80.0", "40.0, 100.0" ); }
+      }
+    }
+  }
+
+  
+  
+  
+  cell (BUFP) {
+    pin (A) { direction : input; capacitance :  1.5; }
+    pin (Y) {
+      direction : output;
+      timing () {
+        related_pin : "A";
+        cell_rise (t)       { index_1 ("10.0, 80.0"); index_2 ("1.0, 10.0"); values ( "80.0, 200.0", "120.0, 280.0" ); }
+        cell_fall (t)       { index_1 ("10.0, 80.0"); index_2 ("1.0, 10.0"); values ( "70.0, 180.0", "110.0, 260.0" ); }
+        rise_transition (t) { index_1 ("10.0, 80.0"); index_2 ("1.0, 10.0"); values ( "30.0, 90.0", "40.0, 110.0" ); }
+        fall_transition (t) { index_1 ("10.0, 80.0"); index_2 ("1.0, 10.0"); values ( "30.0, 80.0", "40.0, 100.0" ); }
+      }
+    }
+  }
+
+  cell (DFFP) {
+    ff (IQ, IQN) { clocked_on : "CK"; next_state : "D"; }
+    pin (CK) { direction : input; clock : true; capacitance :  1.0; }
+    pin (D) {
+      direction : input;
+      capacitance :  1.0;
+      timing () {
+        related_pin : "CK";
+        timing_type : setup_rising;
+        rise_constraint (s) { index_1 ("10.0"); index_2 ("10.0"); values ( "50.0" ); }
+        fall_constraint (s) { index_1 ("10.0"); index_2 ("10.0"); values ( "50.0" ); }
+      }
+      timing () {
+        related_pin : "CK";
+        timing_type : hold_rising;
+        rise_constraint (s) { index_1 ("10.0"); index_2 ("10.0"); values ( "20.0" ); }
+        fall_constraint (s) { index_1 ("10.0"); index_2 ("10.0"); values ( "20.0" ); }
+      }
+    }
+    pin (Q) {
+      direction : output;
+      timing () {
+        related_pin : "CK";
+        timing_type : rising_edge;
+        cell_rise (t)       { index_1 ("10.0, 80.0"); index_2 ("1.0, 10.0"); values ( "100.0, 220.0", "140.0, 300.0" ); }
+        cell_fall (t)       { index_1 ("10.0, 80.0"); index_2 ("1.0, 10.0"); values ( "100.0, 220.0", "140.0, 300.0" ); }
+        rise_transition (t) { index_1 ("10.0, 80.0"); index_2 ("1.0, 10.0"); values ( "30.0, 90.0", "40.0, 110.0" ); }
+        fall_transition (t) { index_1 ("10.0, 80.0"); index_2 ("1.0, 10.0"); values ( "30.0, 90.0", "40.0, 110.0" ); }
+      }
+    }
+  }
+}

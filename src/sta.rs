@@ -303,6 +303,9 @@ pub struct TimingReport {
     // path-local slews (Some only when `pba` is enabled). Catches non-greedy worst
     // paths the graph-based max misses.
     pub pba_wns: Option<f64>,
+    /// The units every time and capacitance above is in: the first library's, as the
+    /// reference reports (the "ns" in the field comments is that unit for a ns library).
+    pub units: crate::liberty::LibUnits,
 }
 
 enum EdgeKind {
@@ -2923,6 +2926,7 @@ fn build_report(
         worst_hold_path,
         hold_slacks,
         pba_wns,
+        units: lib.units,
     };
     // Retain a per-pin snapshot for the Timer's query API (Phase 1). Cloned, not moved:
     // closures above still hold immutable borrows of these arrays through the return.

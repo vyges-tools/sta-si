@@ -1,0 +1,8 @@
+# The ps cells after a ns library: the first library's units are the job's, and the ps library
+# is put in them when merged — so this is ns.sta to the digit.
+design:      seq
+netlist:     seq_ps.v
+lib:         units_ns.lib, units_ps.lib
+clock:       clk 1.0
+input_slew:  0.02
+output_load: 0.005

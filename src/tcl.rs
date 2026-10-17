@@ -281,8 +281,8 @@ pub fn render(job: &StaJob, rep: &crate::sta::TimingReport, reports: &Reports) -
         crate::VERSION
     ));
     s.push_str(&format!(
-        "# design {}   clock {} @ {:.4} ns\n\n",
-        job.design, job.clock_port, job.period_ns
+        "# design {}   clock {} @ {:.4} {}\n\n",
+        job.design, job.clock_port, job.period_ns, rep.units.time_label()
     ));
 
     let want_max = reports.checks_max || reports.wns || reports.tns || reports.worst_slack;

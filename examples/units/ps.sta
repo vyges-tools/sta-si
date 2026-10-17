@@ -1,0 +1,8 @@
+# The same ring in units_ps.lib: the same cells written in picoseconds and femtofarads. The
+# values below are in ps and fF, and the report is the ns one times 1000, labelled ps.
+design:      seq
+netlist:     seq_ps.v
+lib:         units_ps.lib
+clock:       clk 1000
+input_slew:  20
+output_load: 5

@@ -309,6 +309,7 @@ fn render_lint_json(r: &vyges_sta_si::sdclint::LintReport) -> String {
 /// so it never mixes with the report (stdout / -o). code=STA-* is the clustering key;
 /// objects (the violating endpoint net + the clock) are the cross-stage co-reference keys.
 fn emit_sta_si_events(job: &StaJob, rep: &TimingReport) {
+    let tu = rep.units.time_label();
     use vyges_events::{Event, Severity};
     // shared objects: the endpoint net + the clock (when the job names one).
     let objs = |endpoint: &str| -> Vec<String> {
@@ -326,7 +327,7 @@ fn emit_sta_si_events(job: &StaJob, rep: &TimingReport) {
                 "vyges-sta-si",
                 Severity::Warn,
                 format!(
-                    "setup violation at {}: WNS {:.4} ns (TNS {:.4} ns over {} endpoint(s))",
+                    "setup violation at {}: WNS {:.4} {tu} (TNS {:.4} {tu} over {} endpoint(s))",
                     rep.worst_endpoint, rep.wns, rep.tns, rep.endpoints
                 ),
             )
@@ -340,7 +341,7 @@ fn emit_sta_si_events(job: &StaJob, rep: &TimingReport) {
                 "vyges-sta-si",
                 Severity::Warn,
                 format!(
-                    "hold violation at {}: WHS {:.4} ns (THS {:.4} ns over {} endpoint(s))",
+                    "hold violation at {}: WHS {:.4} {tu} (THS {:.4} {tu} over {} endpoint(s))",
                     rep.worst_hold_endpoint, rep.whs, rep.ths, rep.hold_endpoints
                 ),
             )
@@ -362,7 +363,7 @@ fn emit_sta_si_events(job: &StaJob, rep: &TimingReport) {
                     "vyges-sta-si",
                     Severity::Warn,
                     format!(
-                        "over-margin: closes at {:.3} ns ({freq}) vs {:.3} ns target; {} of {} hold endpoints hold-critical — expect heavy hold-fix / buffer-budget burden",
+                        "over-margin: closes at {:.3} {tu} ({freq}) vs {:.3} {tu} target; {} of {} hold endpoints hold-critical — expect heavy hold-fix / buffer-budget burden",
                         adv.achievable_ns, job.period_ns, adv.hold_critical, rep.hold_endpoints
                     ),
                 )
@@ -385,7 +386,7 @@ fn emit_sta_si_events(job: &StaJob, rep: &TimingReport) {
                 Severity::Warn
             },
             format!(
-                "sta complete: WNS {:.4} ns, TNS {:.4} ns, WHS {:.4} ns — {viol} violation(s)",
+                "sta complete: WNS {:.4} {tu}, TNS {:.4} {tu}, WHS {:.4} {tu} — {viol} violation(s)",
                 rep.wns, rep.tns, rep.whs
             ),
         )
@@ -394,6 +395,7 @@ fn emit_sta_si_events(job: &StaJob, rep: &TimingReport) {
 }
 
 fn emit(job: &StaJob, rep: &TimingReport, cli: &Cli) -> ! {
+    let tu = rep.units.time_label();
     emit_sta_si_events(job, rep); // vyges-events causal trail on stderr; report goes to stdout / -o
     let text = if cli.json {
         with_report_path(&engine::report_json(job, rep), cli.out.as_deref())
@@ -407,10 +409,10 @@ fn emit(job: &StaJob, rep: &TimingReport, cli: &Cli) -> ! {
         if setup_bad || hold_bad {
             if !cli.quiet {
                 if setup_bad {
-                    note(vyges_events::Severity::Error, "STA-VIOLATED", format!("setup VIOLATED: WNS {:.4} ns", rep.wns));
+                    note(vyges_events::Severity::Error, "STA-VIOLATED", format!("setup VIOLATED: WNS {:.4} {tu}", rep.wns));
                 }
                 if hold_bad {
-                    note(vyges_events::Severity::Error, "STA-VIOLATED", format!("hold VIOLATED: WHS {:.4} ns", rep.whs));
+                    note(vyges_events::Severity::Error, "STA-VIOLATED", format!("hold VIOLATED: WHS {:.4} {tu}", rep.whs));
                 }
             }
             exit(3);
@@ -451,6 +453,7 @@ fn emit_tcl(
     reports: &vyges_sta_si::tcl::Reports,
     cli: &Cli,
 ) -> ! {
+    let tu = rep.units.time_label();
     emit_sta_si_events(job, rep); // vyges-events causal trail on stderr
     let text = if cli.json {
         engine::report_json(job, rep)
@@ -464,10 +467,10 @@ fn emit_tcl(
         if setup_bad || hold_bad {
             if !cli.quiet {
                 if setup_bad {
-                    note(vyges_events::Severity::Error, "STA-VIOLATED", format!("setup VIOLATED: WNS {:.4} ns", rep.wns));
+                    note(vyges_events::Severity::Error, "STA-VIOLATED", format!("setup VIOLATED: WNS {:.4} {tu}", rep.wns));
                 }
                 if hold_bad {
-                    note(vyges_events::Severity::Error, "STA-VIOLATED", format!("hold VIOLATED: WHS {:.4} ns", rep.whs));
+                    note(vyges_events::Severity::Error, "STA-VIOLATED", format!("hold VIOLATED: WHS {:.4} {tu}", rep.whs));
                 }
             }
             exit(3);

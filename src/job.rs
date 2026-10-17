@@ -352,11 +352,7 @@ impl StaJob {
             return Ok(plain);
         }
         let nl = crate::engine::load_netlist(&self.resolve(&self.netlist)).map_err(|e| e.to_string())?;
-        let mut lib = crate::liberty::Lib::default();
-        for l in &self.libs {
-            let one = crate::liberty::Lib::load(&self.resolve(l)).map_err(|e| e.to_string())?;
-            lib.cells.extend(one.cells);
-        }
+        let lib = if self.libs.is_empty() { crate::liberty::Lib::default() } else { crate::engine::load_libs(self, crate::liberty::LibOpts::default()).map_err(|e| e.to_string())? };
         let design = crate::sdc::SdcDesign::from_netlist(&nl, Some(&lib));
         crate::sdc::Sdc::load_with(&resolved, &design).map_err(|e| e.to_string())
     }
