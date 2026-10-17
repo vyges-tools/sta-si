@@ -621,7 +621,7 @@ fn main() {
                 // re-parse; cheap). The health line names only what can move a slack — commands
                 // not applied, exceptions refused, timing-affecting commands not modelled; the
                 // full list of unmodelled commands is verbose.
-                if let Ok(sdc) = vyges_sta_si::sdc::Sdc::load(&job.resolve(sdc_path)) {
+                if let Ok(sdc) = job.load_sdc(sdc_path) {
                     if let Some(h) = sdc.health().filter(|_| !cli.quiet) {
                         eprintln!("warning: sdc: {h}");
                     }

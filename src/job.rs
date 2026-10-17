@@ -329,12 +329,30 @@ impl StaJob {
             .unwrap_or(".");
         let mut job = StaJob::parse(&text, base)?;
         if let Some(sdc_path) = job.sdc.clone() {
-            let resolved = job.resolve(&sdc_path);
-            let sdc = crate::sdc::Sdc::load(&resolved).map_err(|e| JobError(e.to_string()))?;
+            let sdc = job.load_sdc(&sdc_path).map_err(JobError)?;
             merge_sdc_into(&sdc, &mut job);
             job.validate()?; // now that SDC has supplied the clock
         }
         Ok(job)
+    }
+
+    /// The job's constraints, read as the reference reads them after linking: a file whose
+    /// object queries (`-filter`, `-of_objects`) need the design is read again against the
+    /// job's netlist and libraries. Read plainly otherwise, so a file without them costs nothing.
+    pub fn load_sdc(&self, sdc_path: &str) -> Result<crate::sdc::Sdc, String> {
+        let resolved = self.resolve(sdc_path);
+        let plain = crate::sdc::Sdc::load(&resolved).map_err(|e| e.to_string())?;
+        if plain.unevaluated_queries.is_empty() || self.netlist.is_empty() {
+            return Ok(plain);
+        }
+        let nl = crate::engine::load_netlist(&self.resolve(&self.netlist)).map_err(|e| e.to_string())?;
+        let mut lib = crate::liberty::Lib::default();
+        for l in &self.libs {
+            let one = crate::liberty::Lib::load(&self.resolve(l)).map_err(|e| e.to_string())?;
+            lib.cells.extend(one.cells);
+        }
+        let design = crate::sdc::SdcDesign::from_netlist(&nl, Some(&lib));
+        crate::sdc::Sdc::load_with(&resolved, &design).map_err(|e| e.to_string())
     }
 
     pub fn resolve(&self, rel: &str) -> String {

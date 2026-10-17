@@ -254,9 +254,7 @@ pub fn lint_job(job: &StaJob) -> Result<crate::sdclint::LintReport, StaError> {
         return Err(StaError::Parse("no cells in any .lib".into()));
     }
     let sdc = match &job.sdc {
-        Some(p) => {
-            crate::sdc::Sdc::load(&job.resolve(p)).map_err(|e| StaError::Parse(e.to_string()))?
-        }
+        Some(p) => job.load_sdc(p).map_err(StaError::Parse)?,
         None => {
             // no SDC file — lint the inline `.sta` clocks (still catches a bad period,
             // a duplicate, a registered design with no clock at all).
