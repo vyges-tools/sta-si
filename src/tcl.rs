@@ -262,6 +262,7 @@ fn base_job(
         scenarios: Vec::new(),
         exceptions: Vec::new(),
         async_groups: Vec::new(),
+        clock_groups: vec![],
         sdc: None,
         metadata: None,
         base_dir: base_dir.to_string(),

@@ -100,6 +100,9 @@ pub struct StaJob {
     /// `set_clock_groups -asynchronous` groups (clock names). Launch<->capture
     /// paths crossing two different groups are cut (setup and hold).
     pub async_groups: Vec<Vec<String>>,
+    /// The SDC's `set_clock_groups`, per command — when present, the clock separation rule
+    /// (`crate::sdc::clocks_unrelated`) is read from these, not from `async_groups`.
+    pub clock_groups: Vec<crate::sdc::ClockGroups>,
     pub sdc: Option<String>, // optional SDC constraints file (merged at load)
     /// Optional `vyges-metadata.json`. Only the constraint linter reads it, for the IP's
     /// declared `clock_domains` — the one input that says how many clocks the design was
@@ -305,6 +308,7 @@ impl StaJob {
             scenarios,
             exceptions,
             async_groups: Vec::new(),
+            clock_groups: Vec::new(),
             sdc,
             metadata,
             base_dir: base_dir.to_string(),
@@ -374,6 +378,7 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
     if !sdc.async_groups.is_empty() {
         job.async_groups = sdc.async_groups.clone();
     }
+    job.clock_groups = sdc.clock_groups.clone();
     // clocks: SDC is authoritative when present.
     if !sdc.clocks.is_empty() {
         job.clocks = sdc

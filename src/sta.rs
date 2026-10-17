@@ -2375,7 +2375,28 @@ fn build_report(
             .into_iter()
             .find_map(|n| clock_group_node.get(&n).copied())
     };
+    // From an SDC, clocks are separated PER COMMAND, by the reference's rule — see
+    // `sdc::clocks_unrelated`; each clock's source node is mapped to its NAME for that. Groups
+    // from a job file keep the one-list rule.
+    let clock_name_node: HashMap<usize, &str> = job
+        .clocks
+        .iter()
+        .filter_map(|(name, src, _)| {
+            let node = match split_inst_pin(src) {
+                Some((inst, pin)) => key2idx.get(&pin_key(inst, pin)).copied(),
+                None => key2idx.get(&port_key(src)).copied(),
+            };
+            node.map(|nd| (nd, name.as_str()))
+        })
+        .collect();
+    let clock_name_of = |ck: usize| -> Option<&str> { path_to_root(ck).into_iter().find_map(|n| clock_name_node.get(&n).copied()) };
     let is_async = |lck: Option<usize>, cap: Option<usize>| -> bool {
+        if !job.clock_groups.is_empty() {
+            return match (lck.and_then(clock_name_of), cap.and_then(clock_name_of)) {
+                (Some(a), Some(b)) => crate::sdc::clocks_unrelated(&job.clock_groups, a, b),
+                _ => false,
+            };
+        }
         match (lck.and_then(clock_group_of), cap.and_then(clock_group_of)) {
             (Some(a), Some(b)) => a != b,
             _ => false,
