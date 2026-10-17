@@ -11,8 +11,8 @@ create_clock -name core_clk -period $clk_period [get_ports clk]
 set_input_delay  2.0 -clock core_clk [all_inputs]
 set_output_delay 3.0 -clock core_clk [all_outputs]
 set_input_delay  1.5 -clock core_clk [get_ports data_in]
-set_clock_uncertainty 0.25 -setup
-set_clock_uncertainty 0.10 -hold
+set_clock_uncertainty 0.25 -setup [get_clocks core_clk]
+set_clock_uncertainty 0.10 -hold [get_clocks core_clk]
 set_input_transition 0.08 [all_inputs]
 set_load 0.012 [all_outputs]
 set_timing_derate -late 1.06
