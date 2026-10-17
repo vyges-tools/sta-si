@@ -418,9 +418,16 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
         job.clock_port = if c.1.is_empty() { c.0.clone() } else { c.1.clone() };
         job.period_ns = c.2;
     }
-    // I/O timing: default + per-port. Source latency adds to the I/O budget
-    // (an input arrives `latency` later; an output must settle `latency` earlier),
-    // matching propagated-clock intent on the boundary.
+    // I/O timing: default + per-port.
+    //
+    // ⛔ Clock latency is NOT added to the I/O delays. It was — the largest `set_clock_latency`
+    // value onto every input and output delay — and the reference does no such thing: a clock's
+    // latency (source or network, ideal or propagated clock) is on BOTH the launch and the capture
+    // side of a path, so on a path launched and captured by one clock it cancels. Measured on a
+    // two-flop design with an input and an output delay: every slack in the reference is the same
+    // with 0, 0.5 network, 0.4 source and both; folding it in moved the worst slack by exactly
+    // the latency. Where latency does not cancel (clocks with different latencies, latency on a
+    // pin, a delay that says it includes latency) see `latency_not_modelled`.
     let mut in_def = None;
     for d in &sdc.input_delays {
         if d.default {
@@ -428,11 +435,11 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
         }
         for p in &d.ports {
             job.io_input_delays
-                .push((p.clone(), d.value + sdc.clock_latency));
+                .push((p.clone(), d.value));
         }
     }
     if let Some(v) = in_def {
-        job.input_delay = v + sdc.clock_latency;
+        job.input_delay = v;
         job.input_delay_declared = true;
     }
     let mut out_def = None;
@@ -442,11 +449,11 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
         }
         for p in &d.ports {
             job.io_output_delays
-                .push((p.clone(), d.value + sdc.clock_latency));
+                .push((p.clone(), d.value));
         }
     }
     if let Some(v) = out_def {
-        job.output_delay = v + sdc.clock_latency;
+        job.output_delay = v;
     }
     job.setup_uncertainty = sdc.setup_uncertainty;
     job.hold_uncertainty = sdc.hold_uncertainty;
@@ -463,4 +470,76 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
         job.early_derate = v;
     }
     job.exceptions.extend(sdc.exceptions.iter().cloned());
+}
+
+/// The clock latency a constraint file states that this timer does not model, in words — `None`
+/// when every latency cancels (one latency per clock, the same for every clock, on clocks only).
+/// A latency on a clock is on both sides of a path that clock launches and captures; it moves a
+/// slack only between clocks of different latency, when it is on a pin or port rather than a
+/// clock, or when an I/O delay declares it already includes the latency.
+pub fn latency_not_modelled(sdc: &crate::sdc::Sdc) -> Option<String> {
+    if sdc.clock_latencies.is_empty() {
+        return None;
+    }
+    let mut why = Vec::new();
+    if sdc.clock_latencies.iter().any(|l| l.accessor != "get_clocks") {
+        why.push("set on a pin or port".to_string());
+    }
+    // per clock and kind (source / network), the values stated
+    let mut per: std::collections::BTreeMap<(bool, String), Vec<f64>> = Default::default();
+    for l in sdc.clock_latencies.iter().filter(|l| l.accessor == "get_clocks") {
+        let source = l.flags.iter().any(|f| f == "-source");
+        for c in &l.objects {
+            per.entry((source, c.clone())).or_default().push(l.value);
+        }
+    }
+    let clocks: std::collections::BTreeSet<&String> = sdc.clocks.iter().map(|c| &c.name).collect();
+    for source in [false, true] {
+        let vals: Vec<Vec<f64>> = clocks.iter().map(|c| per.get(&(source, c.to_string())).cloned().unwrap_or_default()).collect();
+        let first = vals.first().cloned().unwrap_or_default();
+        if vals.iter().any(|v| v != &first) || first.windows(2).any(|w| w[0] != w[1]) {
+            why.push(format!("{} latency differs between clocks or edges", if source { "source" } else { "network" }));
+        }
+    }
+    let included = ["-source_latency_included", "-network_latency_included"];
+    if sdc.input_delays.iter().chain(&sdc.output_delays).any(|d| d.flags.iter().any(|f| included.contains(&f.as_str()))) {
+        why.push("an I/O delay that includes it".to_string());
+    }
+    (!why.is_empty()).then(|| format!("clock latency not modelled where it does not cancel: {}", why.join("; ")))
+}
+
+#[cfg(test)]
+mod clock_latency_rule {
+    use super::*;
+
+    /// Reference rule: a clock's latency is on both the launch and the capture side, so on one
+    /// clock it cancels — the I/O delays are not shifted by it (measured: every slack unchanged).
+    #[test]
+    fn latency_on_one_clock_moves_no_io_delay() {
+        let sdc = crate::sdc::Sdc::parse(
+            "create_clock -name clk -period 1 [get_ports clk]\n\
+             set_input_delay 0.2 -clock clk [get_ports a]\n\
+             set_output_delay 0.3 -clock clk [get_ports y]\n\
+             set_clock_latency 0.5 [get_clocks clk]\n\
+             set_clock_latency -source 0.4 [get_clocks clk]\n",
+        )
+        .unwrap();
+        let mut job = StaJob::parse("design: t\nnetlist: t.v\nlib: t.lib\nclock: clk 1.0\n", ".").unwrap();
+        merge_sdc_into(&sdc, &mut job);
+        assert_eq!(job.io_input_delays, vec![("a".to_string(), 0.2)]);
+        assert_eq!(job.io_output_delays, vec![("y".to_string(), 0.3)]);
+        assert!(latency_not_modelled(&sdc).is_none());
+    }
+
+    /// Where it does not cancel, the run is told.
+    #[test]
+    fn latency_that_does_not_cancel_is_named() {
+        let two = "create_clock -name a -period 1 [get_ports ca]\ncreate_clock -name b -period 1 [get_ports cb]\n";
+        let differ = crate::sdc::Sdc::parse(&format!("{two}set_clock_latency 0.5 [get_clocks a]\n")).unwrap();
+        assert!(latency_not_modelled(&differ).unwrap().contains("network latency differs"));
+        let same = crate::sdc::Sdc::parse(&format!("{two}set_clock_latency 0.5 [get_clocks {{a b}}]\n")).unwrap();
+        assert!(latency_not_modelled(&same).is_none());
+        let pin = crate::sdc::Sdc::parse(&format!("{two}set_clock_latency 0.5 [get_pins r1/CK]\n")).unwrap();
+        assert!(latency_not_modelled(&pin).unwrap().contains("pin or port"));
+    }
 }

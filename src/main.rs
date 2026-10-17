@@ -625,6 +625,9 @@ fn main() {
                     if let Some(h) = sdc.health().filter(|_| !cli.quiet) {
                         eprintln!("warning: sdc: {h}");
                     }
+                    if let Some(l) = vyges_sta_si::job::latency_not_modelled(&sdc).filter(|_| !cli.quiet) {
+                        eprintln!("warning: sdc: {l}");
+                    }
                     if cli.verbose && !sdc.ignored.is_empty() {
                         let mut u = sdc.ignored.clone();
                         u.sort();
