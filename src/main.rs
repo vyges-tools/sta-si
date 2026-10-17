@@ -33,6 +33,11 @@ fn diag_line(msg: String) {
     }
 }
 
+/// One message through the events path, with its code (text on a terminal, JSONL when piped).
+fn note(severity: vyges_events::Severity, code: &str, msg: impl Into<String>) {
+    vyges_events::emit(&vyges_events::Event::new("vyges-sta-si", severity, msg.into()).with_code(code));
+}
+
 macro_rules! diag {
     ($($t:tt)*) => { diag_line(format!($($t)*)) };
 }
@@ -235,7 +240,7 @@ fn write_out(text: &str, cli: &Cli) {
         Some(path) => match std::fs::write(path, text) {
             Ok(_) => {
                 if !cli.quiet {
-                    eprintln!("wrote {path}");
+                    note(vyges_events::Severity::Info, "STA-WROTE", format!("wrote {path}"));
                 }
                 if cli.json {
                     print!("{text}");
@@ -402,10 +407,10 @@ fn emit(job: &StaJob, rep: &TimingReport, cli: &Cli) -> ! {
         if setup_bad || hold_bad {
             if !cli.quiet {
                 if setup_bad {
-                    eprintln!("setup VIOLATED: WNS {:.4} ns", rep.wns);
+                    note(vyges_events::Severity::Error, "STA-VIOLATED", format!("setup VIOLATED: WNS {:.4} ns", rep.wns));
                 }
                 if hold_bad {
-                    eprintln!("hold VIOLATED: WHS {:.4} ns", rep.whs);
+                    note(vyges_events::Severity::Error, "STA-VIOLATED", format!("hold VIOLATED: WHS {:.4} ns", rep.whs));
                 }
             }
             exit(3);
@@ -430,7 +435,7 @@ fn emit_mcmm(job: &StaJob, rep: &engine::McmmReport, cli: &Cli) -> ! {
         let hold_bad = rep.worst_hold().map(|x| x.1 < 0.0).unwrap_or(false);
         if setup_bad || hold_bad {
             if !cli.quiet {
-                eprintln!("MCMM timing VIOLATED");
+                note(vyges_events::Severity::Error, "STA-VIOLATED", "MCMM timing VIOLATED");
             }
             exit(3);
         }
@@ -459,10 +464,10 @@ fn emit_tcl(
         if setup_bad || hold_bad {
             if !cli.quiet {
                 if setup_bad {
-                    eprintln!("setup VIOLATED: WNS {:.4} ns", rep.wns);
+                    note(vyges_events::Severity::Error, "STA-VIOLATED", format!("setup VIOLATED: WNS {:.4} ns", rep.wns));
                 }
                 if hold_bad {
-                    eprintln!("hold VIOLATED: WHS {:.4} ns", rep.whs);
+                    note(vyges_events::Severity::Error, "STA-VIOLATED", format!("hold VIOLATED: WHS {:.4} ns", rep.whs));
                 }
             }
             exit(3);
@@ -595,7 +600,7 @@ fn main() {
             }
             if job.is_mcmm() {
                 if cli.verbose {
-                    eprintln!("MCMM: {} scenario(s)", job.scenarios.len());
+                    note(vyges_events::Severity::Info, "STA-MCMM", format!("MCMM: {} scenario(s)", job.scenarios.len()));
                 }
                 match engine::analyze_mcmm(&job, lib_opts) {
                     Ok(rep) => emit_mcmm(&job, &rep, &cli),
@@ -606,15 +611,14 @@ fn main() {
                 }
             }
             if cli.verbose {
-                eprintln!("loaded {} ({} lib(s))", job.netlist, job.libs.len());
+                note(vyges_events::Severity::Info, "STA-LOADED", format!("loaded {} ({} lib(s))", job.netlist, job.libs.len()));
             }
             if let Some(sdc_path) = &job.sdc {
                 if cli.verbose {
-                    eprintln!(
-                        "  sdc: {} -> {} clock(s), {} exception(s)",
-                        sdc_path,
-                        job.clocks.len(),
-                        job.exceptions.len()
+                    note(
+                        vyges_events::Severity::Info,
+                        "STA-SDC-READ",
+                        format!("sdc: {} -> {} clock(s), {} exception(s)", sdc_path, job.clocks.len(), job.exceptions.len()),
                     );
                 }
                 // Never silently drop a constraint: what was not applied, on every run (a
@@ -625,17 +629,17 @@ fn main() {
                     // the reader lists what IT does not model; this timer models these
                     sdc.ignored.retain(|c| !vyges_sta_si::job::MODELLED_HERE.contains(&c.as_str()));
                     if let Some(h) = sdc.health().filter(|_| !cli.quiet) {
-                        eprintln!("warning: sdc: {h}");
+                        note(vyges_events::Severity::Warn, "STA-SDC-HEALTH", format!("sdc: {h}"));
                     }
                     if let Some(l) = vyges_sta_si::job::latency_not_modelled(&sdc).filter(|_| !cli.quiet) {
-                        eprintln!("warning: sdc: {l}");
+                        note(vyges_events::Severity::Warn, "STA-SDC-LATENCY", format!("sdc: {l}"));
                     }
 
                     if cli.verbose && !sdc.ignored.is_empty() {
                         let mut u = sdc.ignored.clone();
                         u.sort();
                         u.dedup();
-                        eprintln!("  sdc: unsupported (ignored): {}", u.join(", "));
+                        note(vyges_events::Severity::Info, "STA-SDC-UNMODELLED", format!("sdc: unsupported (ignored): {}", u.join(", ")));
                     }
                 }
             }
@@ -647,7 +651,7 @@ fn main() {
                             exit(1);
                         }
                         if !cli.quiet {
-                            eprintln!("wrote SDF: {sdf_out}");
+                            note(vyges_events::Severity::Info, "STA-WROTE", format!("wrote SDF: {sdf_out}"));
                         }
                     }
                     Err(e) => {
@@ -664,7 +668,7 @@ fn main() {
                             exit(1);
                         }
                         if !cli.quiet {
-                            eprintln!("wrote liberty JSON: {json_out}");
+                            note(vyges_events::Severity::Info, "STA-WROTE", format!("wrote liberty JSON: {json_out}"));
                         }
                     }
                     Err(e) => {

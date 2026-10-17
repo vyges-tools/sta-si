@@ -280,7 +280,7 @@ pub fn lint_job(job: &StaJob) -> Result<crate::sdclint::LintReport, StaError> {
         Some(p) => match crate::ipmeta::IpMeta::load(&job.resolve(p)) {
             Ok(m) => Some(m),
             Err(e) => {
-                eprintln!("warning: {e} — linting without the IP's declared clock domains");
+                vyges_events::emit(&vyges_events::Event::new("vyges-sta-si", vyges_events::Severity::Warn, format!("{e} — linting without the IP's declared clock domains")).with_code("STA-IPMETA"));
                 None
             }
         },

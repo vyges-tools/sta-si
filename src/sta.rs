@@ -1188,11 +1188,18 @@ fn build_report(
         shown.dedup();
         let n_shown = shown.len();
         let head: Vec<&str> = shown.into_iter().take(5).collect();
-        eprintln!(
-            "note: {n_shown} input port(s) have no declared arrival and start no timed path \
-             ({}{}). Add set_input_delay to time them.",
-            head.join(", "),
-            if n_shown > head.len() { ", …" } else { "" }
+        vyges_events::emit(
+            &vyges_events::Event::new(
+                "vyges-sta-si",
+                vyges_events::Severity::Warn,
+                format!(
+                    "{n_shown} input port(s) have no declared arrival and start no timed path ({}{}). Add set_input_delay to time them.",
+                    head.join(", "),
+                    if n_shown > head.len() { ", …" } else { "" }
+                ),
+            )
+            .with_code("STA-UNCONSTRAINED-INPUT")
+            .with_objects(head.iter().map(|p| format!("port:{p}")).collect()),
         );
     }
 
@@ -2408,17 +2415,19 @@ fn build_report(
         if !unclocked.is_empty() {
             let total = is_ck.iter().filter(|&&b| b).count();
             let head: Vec<&str> = unclocked.iter().take(5).map(|&i| labels[i].as_str()).collect();
-            eprintln!(
-                "note: {} of {total} register clock pin(s) are not reached by a declared \
-                 clock and carry no setup/hold/recovery/removal check ({}{}). Add \
-                 create_clock for the missing clock.",
-                unclocked.len(),
-                head.join(", "),
-                if unclocked.len() > head.len() {
-                    ", \u{2026}"
-                } else {
-                    ""
-                }
+            vyges_events::emit(
+                &vyges_events::Event::new(
+                    "vyges-sta-si",
+                    vyges_events::Severity::Warn,
+                    format!(
+                        "{} of {total} register clock pin(s) are not reached by a declared clock and carry no setup/hold/recovery/removal check ({}{}). Add create_clock for the missing clock.",
+                        unclocked.len(),
+                        head.join(", "),
+                        if unclocked.len() > head.len() { ", \u{2026}" } else { "" }
+                    ),
+                )
+                .with_code("STA-UNCLOCKED-REGISTER")
+                .with_objects(head.iter().map(|p| format!("pin:{p}")).collect()),
             );
         }
     }
