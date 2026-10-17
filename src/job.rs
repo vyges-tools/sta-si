@@ -212,6 +212,7 @@ impl StaJob {
                         kind: ExcKind::FalsePath,
                         from: vec![from.to_string()],
                         to: vec![to.to_string()],
+                        ..Default::default()
                     },
                     ("multicycle", [from, to, n]) => {
                         let cyc: u32 = n
@@ -221,6 +222,7 @@ impl StaJob {
                             kind: ExcKind::Multicycle(cyc),
                             from: vec![from.to_string()],
                             to: vec![to.to_string()],
+                            ..Default::default()
                         }
                     }
                     _ => return Err(JobError(format!("bad exception: {line:?}"))),

@@ -29,7 +29,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::inc::{HoldRec, InEdge, IncGraph, IncState, IncTopo, Lanes, SetupRec};
-use crate::job::{ExcKind, StaJob};
+use crate::job::{ExcKind, Exception, StaJob};
 use crate::liberty::{Arc, ClkEdge, Constraint, Dir, Lib};
 use crate::names::{instance_of, split_inst_pin};
 use crate::netlist::Netlist;
@@ -2450,10 +2450,13 @@ fn build_report(
         let pl = lck.map(&clock_period_of).unwrap_or(pc);
         let (mut setup_rel, _) = edge_relation(pl, pc);
         let ln = lck.map(&inst_of).unwrap_or_default();
-        if let Some(e) = match_exc(&ln, &inst_of(*idx)) {
+        // A `-hold` multicycle does not move the SETUP check, and `-start` counts the launch
+        // clock's cycles where the default `-end` counts the capture clock's.
+        let setup_exc = |e: &&Exception| !(matches!(e.kind, ExcKind::Multicycle(_)) && e.hold);
+        if let Some(e) = job.exceptions.iter().filter(setup_exc).find(|e| e.covers(&ln, &inst_of(*idx))) {
             match e.kind {
                 ExcKind::FalsePath => excluded_setup[*idx] = true,
-                ExcKind::Multicycle(cyc) => setup_rel += cyc.saturating_sub(1) as f64 * pc,
+                ExcKind::Multicycle(cyc) => setup_rel += cyc.saturating_sub(1) as f64 * if e.start { pl } else { pc },
             }
         }
         if is_async(lck, cap) {

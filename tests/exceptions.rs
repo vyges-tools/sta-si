@@ -97,6 +97,7 @@ fn exc(kind: ExcKind, from: &str, to: &str) -> Exception {
         kind,
         from: vec![from.into()],
         to: vec![to.into()],
+        ..Default::default()
     }
 }
 
