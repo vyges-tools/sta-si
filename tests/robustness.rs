@@ -24,9 +24,10 @@ fn spef_pf_units_scale_to_ff() {
 "#;
     let s = Spef::parse(spef);
     let rc = s.nets.get("n1").expect("n1");
+    // the wire load is what the caps sum to (the reference ignores the *D_NET total of 0.02 pF)
     assert!(
-        (rc.cap_ff - 20.0).abs() < 1e-6,
-        "D_NET 0.02 pF -> 20 fF, got {}",
+        (rc.cap_ff - 10.0).abs() < 1e-6,
+        "*CAP 0.010 pF -> 10 fF, got {}",
         rc.cap_ff
     );
     assert!(

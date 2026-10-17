@@ -105,11 +105,12 @@ fn job() -> StaJob {
 fn parses_total_cap_and_summed_res() {
     let s = Spef::parse(SPEF);
     let n1 = s.nets.get("n1").unwrap();
-    assert!((n1.cap_ff - 20.0).abs() < 1e-9); // *D_NET total
+    // the caps' sum, 10 + 10 grounded + 5 coupling — the reference ignores the *D_NET total (20)
+    assert!((n1.cap_ff - 25.0).abs() < 1e-9);
     assert!((n1.res_ohm - 1000.0).abs() < 1e-9); // 500 + 500 summed *RES
-    assert!((s.wire_load_pf("n1") - 0.020).abs() < 1e-9); // fF -> pF
-                                                          // Elmore = R*C -> ns : 1000 * 20 * 1e-6 = 0.02 ns
-    assert!((s.net_delay_ns("n1") - 0.02).abs() < 1e-9);
+    assert!((s.wire_load_pf("n1") - 0.025).abs() < 1e-9); // fF -> pF
+    // Elmore = R*C -> ns : 1000 * 25 * 1e-6 = 0.025 ns
+    assert!((s.net_delay_ns("n1") - 0.025).abs() < 1e-9);
     assert!((n1.coupling_ff - 5.0).abs() < 1e-9); // two-node *CAP entry
 }
 
