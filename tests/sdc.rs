@@ -77,8 +77,10 @@ fn generated_clock_period_resolves() {
     assert_eq!(g.source, "div/Q");
 }
 
+/// `set_units` ASSERTS the library's units; it does not rescale the file — the reference's
+/// rule (it warns when the two differ). Values stay as written; the declaration is kept.
 #[test]
-fn units_scale_ps_to_ns() {
+fn set_units_is_checked_not_applied() {
     let sdc = r#"
         set_units -time 1ps -capacitance 1fF
         create_clock -name clk -period 5000 [get_ports clk]
@@ -86,9 +88,10 @@ fn units_scale_ps_to_ns() {
         set_load 12 [all_outputs]
     "#;
     let s = Sdc::parse(sdc).unwrap();
-    assert!((s.clocks[0].period - 5.0).abs() < 1e-9, "5000 ps -> 5 ns");
-    assert!(s.input_delays[0].default && (s.input_delays[0].value - 1.0).abs() < 1e-9);
-    assert!((s.load.unwrap() - 0.012).abs() < 1e-9, "12 fF -> 0.012 pF");
+    assert_eq!(s.clocks[0].period, 5000.0, "in the library's units, as written");
+    assert!(s.input_delays[0].default && s.input_delays[0].value == 1000.0);
+    assert_eq!(s.load, Some(12.0));
+    assert_eq!(s.declared_units, [("-time".to_string(), "1ps".to_string()), ("-capacitance".into(), "1fF".into())]);
 }
 
 #[test]
