@@ -80,6 +80,7 @@ fn job(pba: bool) -> StaJob {
         async_groups: vec![],
         clock_groups: vec![],
         ideal_clocks: Default::default(),
+        driving_cells: Default::default(),
         crpr: true,
         pba,
         input_delay: 0.0,

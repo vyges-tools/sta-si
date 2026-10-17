@@ -82,8 +82,13 @@ if [ -z "$STA_BIN" ]; then
 fi
 
 # ---- the job ---------------------------------------------------------------------------------
-# Constraints reconstructed from the design's resolved LibreLane knobs; see the header comments
-# in the internal correlation notes for why each value is what it is.
+# Constraints reconstructed from the design's resolved LibreLane knobs and its base SDC; see the
+# header comments in the internal correlation notes for why each value is what it is.
+#   - every input, the clock included, is driven by SYNTH_DRIVING_CELL (inv_2/Y), as the base
+#     SDC sets it — so the input slew applies to no port;
+#   - NO derate, although the knobs ask for 5 %: the checked-in reports are a run without it
+#     (re-timing the block with the reference reproduces them to the last digit with no derate,
+#     and moves setup 0.078 ns and hold 0.168 ns with 5 %).
 job="$(mktemp -t correlate-sky130-XXXXXX).sta"
 cat > "$job" <<EOM
 design:      fft_ctrl_tlul
@@ -95,10 +100,11 @@ input_delay:  5.0
 output_delay: 5.0
 setup_uncertainty: 0.25
 hold_uncertainty:  0.25
-late_derate:  1.05
-early_derate: 0.95
+late_derate:  1.0
+early_derate: 1.0
 input_slew:  0.15
 output_load: 0.033442
+driving_cell: sky130_fd_sc_hd__inv_2/Y
 EOM
 
 echo "== running the engine on a routed sky130 block =="

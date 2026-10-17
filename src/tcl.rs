@@ -195,7 +195,8 @@ pub fn adapt(script_path: &str) -> Result<Adapted, TclError> {
     if !combined_sdc.trim().is_empty() {
         let sdc = Sdc::parse(&combined_sdc).map_err(|e| TclError(e.to_string()))?;
         crate::job::merge_sdc_into(&sdc, &mut job);
-        for ig in &sdc.ignored {
+        // the reader lists what IT does not model; this timer models these
+        for ig in sdc.ignored.iter().filter(|c| !crate::job::MODELLED_HERE.contains(&c.as_str())) {
             ignored.push(format!("(sdc) {ig}"));
         }
     }
@@ -264,6 +265,7 @@ fn base_job(
         async_groups: Vec::new(),
         clock_groups: vec![],
         ideal_clocks: Default::default(),
+        driving_cells: Default::default(),
         sdc: None,
         metadata: None,
         base_dir: base_dir.to_string(),

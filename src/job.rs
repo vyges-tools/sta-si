@@ -40,6 +40,18 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+/// One `set_driving_cell`: the library cell, the pin it drives from (`-from_pin`, else the
+/// first of the cell's pins with an arc to `pin`) and to (`-pin`, else its one output), and the
+/// transition at its input per edge `[rise, fall]` (`-input_transition_rise/-fall`, 0 when not
+/// given), in the job's time unit.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DriveSpec {
+    pub cell: String,
+    pub from_pin: Option<String>,
+    pub pin: Option<String>,
+    pub input_transition: [f64; 2],
+}
+
 #[derive(Debug, Clone)]
 pub struct StaJob {
     pub design: String,
@@ -108,6 +120,11 @@ pub struct StaJob {
     /// it, as in the reference; a `.sta` file's own `clock:` lines are propagated (that format's
     /// rule), so they never appear here.
     pub ideal_clocks: std::collections::BTreeMap<String, [f64; 2]>,
+    /// `set_driving_cell` per input port, in the SDC's order (a later one for the same port
+    /// wins): the port (`*INPUTS*` for every input, the clock source included, as `all_inputs`
+    /// names them) and the cell that drives it. A `.sta` file's `driving_cell: CELL/PIN` is one
+    /// for every input.
+    pub driving_cells: Vec<(String, DriveSpec)>,
     pub sdc: Option<String>, // optional SDC constraints file (merged at load)
     /// Optional `vyges-metadata.json`. Only the constraint linter reads it, for the IP's
     /// declared `clock_domains` — the one input that says how many clocks the design was
@@ -315,6 +332,14 @@ impl StaJob {
             async_groups: Vec::new(),
             clock_groups: Vec::new(),
             ideal_clocks: Default::default(),
+            driving_cells: kv
+                .get("driving_cell")
+                .filter(|s| !s.is_empty())
+                .map(|s| {
+                    let (cell, pin) = s.split_once('/').map_or((s.as_str(), None), |(c, p)| (c, Some(p.to_string())));
+                    vec![("*INPUTS*".to_string(), DriveSpec { cell: cell.to_string(), from_pin: None, pin, input_transition: [0.0; 2] })]
+                })
+                .unwrap_or_default(),
             sdc,
             metadata,
             base_dir: base_dir.to_string(),
@@ -463,6 +488,13 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
     if let Some(v) = sdc.input_transition {
         job.input_slew = v;
     }
+    for d in &sdc.driving_cells {
+        let Some(cell) = d.lib_cell.clone() else { continue };
+        let spec = DriveSpec { cell, from_pin: d.from_pin.clone(), pin: d.pin.clone(), input_transition: d.input_transition };
+        for o in &d.objects {
+            job.driving_cells.push((o.clone(), spec.clone()));
+        }
+    }
     if let Some(v) = sdc.load {
         job.output_load = v;
     }
@@ -549,7 +581,7 @@ mod clock_latency_rule {
 
 /// Commands the SDC reader lists as not modelled that this timer DOES model: ideal versus
 /// propagated clocks (`ideal_clocks`) and the ideal clock's transition.
-pub const MODELLED_HERE: &[&str] = &["set_propagated_clock", "set_clock_transition"];
+pub const MODELLED_HERE: &[&str] = &["set_propagated_clock", "set_clock_transition", "set_driving_cell"];
 
 /// The SDC's ideal clocks — every clock with a source that no `set_propagated_clock` names (by
 /// clock, `[all_clocks]`, or its source port / pin) — with its `set_clock_transition` per edge

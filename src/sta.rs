@@ -1397,6 +1397,96 @@ fn build_report(
         }
     }
 
+    // ---- input ports with a driving cell (`GraphDelayCalc::findInputDriverDelay`) -------
+    // Per analysis and port edge, each arc of the cell from its `from` pin into `pin` ending in
+    // that edge, at the transition given for its from-edge (`findInputArcDelay`): the gate at the
+    // port net's load — DMP on the net's Pi when it has one, else lumped — and at no load (the
+    // intrinsic delay). The port's slew IS the gate's; each load's wire delay and slew come from
+    // the gate's waveform (`loadDelaySlew`, then `thresholdAdjust` from the cell's library), and
+    // every wire edge from the port also carries `gate - intrinsic` (`annotateLoadDelays`). A
+    // later arc for the same edge overwrites. ⚠️ Without `-from_pin` the reference takes the first
+    // of the cell's pins (declaration order) with an arc to `pin`; this takes the first timing
+    // group's — the same pin for a one-input cell.
+    struct PortDrive {
+        slew: [[f64; 2]; 2],
+        extra: [[f64; 2]; 2],
+        wave: [[Option<crate::dmp::DriverWaveform>; 2]; 2],
+        th: crate::liberty::Thresholds,
+    }
+    let mut port_drive: HashMap<usize, PortDrive> = HashMap::new();
+    for (idx, name) in input_ports.iter().filter(|_| !job.driving_cells.is_empty()) {
+        let Some(spec) = job.driving_cells.iter().rev().find(|(o, _)| o == "*INPUTS*" || o == name).map(|(_, s)| s) else { continue };
+        let Some(cell) = lib.cell(&spec.cell) else {
+            let msg = format!("set_driving_cell: cell {} not in any library; {name} keeps its input slew", spec.cell);
+            vyges_events::emit(&vyges_events::Event::new("vyges-sta-si", vyges_events::Severity::Warn, msg).with_code("STA-DRIVING-CELL"));
+            continue;
+        };
+        let to = spec.pin.clone().or_else(|| cell.pins.iter().find(|(_, p)| p.direction == Dir::Out).map(|(n, _)| n.clone()));
+        let Some(tp) = to.as_ref().and_then(|t| cell.pins.get(t)) else { continue };
+        let from = spec.from_pin.clone().or_else(|| tp.arcs.first().map(|a| a.related_pin.clone()));
+        let arcs: Vec<&crate::liberty::Arc> = tp.arcs.iter().filter(|a| Some(&a.related_pin) == from.as_ref() && a.clk_edge.is_none()).collect();
+        let th = lib.cell_thresholds(&spec.cell);
+        let Some(&i) = net_idx.get(name.as_str()) else { continue };
+        let Some(net) = nets.get(name) else { continue };
+        let mut pd = PortDrive { slew: [[job.input_slew; 2]; 2], extra: [[0.0; 2]; 2], wave: [[None; 2]; 2], th };
+        for mm in 0..2 {
+            for ol in 0..2 {
+                // the port net's Pi, with the same capacitance content as a gate driver's
+                let pi = spef.and_then(|s| s.nets.get(name)).and_then(|rc| {
+                    let cc: f64 = net_cpl[i].iter().map(|(_, c)| *c).sum();
+                    let mut pcap: BTreeMap<String, f64> = BTreeMap::new();
+                    for &sk in &net.sinks {
+                        if let Some((si, sp)) = ip_of(sk) {
+                            if let Some(nd) = rc.pin_node(&si, &sp) {
+                                *pcap.entry(nd.to_string()).or_default() += pin_cap_node.get(&sk).map_or(0.0, |c| c[mm][ol]) * ff_per_cap;
+                            }
+                        } else if output_ports.iter().any(|(o, _)| *o == sk) {
+                            *pcap.entry(labels[sk].clone()).or_default() += job.output_load * ff_per_cap;
+                        }
+                    }
+                    rc.pi_reduce(name, cc, &pcap).map(|(c2, rpi, c1)| (c2 / ff_per_cap, rpi, c1 / ff_per_cap))
+                });
+                for arc in arcs.iter().filter(|a| a.out_edges.drives(ol == 0)) {
+                    let (dt, st) = if ol == 0 { (&arc.cell_rise, &arc.rise_transition) } else { (&arc.cell_fall, &arc.fall_transition) };
+                    for il in 0..2 {
+                        let feeds = match arc.sense.as_str() {
+                            "positive_unate" => il == ol,
+                            "negative_unate" => il != ol,
+                            _ => true,
+                        };
+                        if !feeds {
+                            continue;
+                        }
+                        let sin = spec.input_transition[il];
+                        let intrinsic = dt.lookup(sin, 0.0);
+                        let vth = crate::dmp::Vth {
+                            vth: if ol == 0 { th.output_rise } else { th.output_fall },
+                            vl: if ol == 0 { th.slew_lower_rise } else { th.slew_lower_fall },
+                            vh: if ol == 0 { th.slew_upper_rise } else { th.slew_upper_fall },
+                            slew_derate: th.slew_derate,
+                        };
+                        let (gate, slew, wave) = match pi {
+                            Some((c2, rpi, c1)) => {
+                                let g = |c: f64| (dt.lookup(sin, c), st.lookup(sin, c));
+                                let rd = crate::dmp::gate_model_rd_step(vth.vth, &g, c1, c2, cap_step);
+                                let r = crate::dmp::solve_driver_r(rd, c2, rpi / ohm_per_r, c1, vth, &g, ohm_per_r);
+                                (r.delay, r.slew, r.waveform)
+                            }
+                            None => (dt.lookup(sin, net.load[mm][ol]), st.lookup(sin, net.load[mm][ol]), None),
+                        };
+                        if std::env::var_os("VYGES_STA_DMP_TRACE").is_some() {
+                            eprintln!("drive|{name}|mm={mm}|ol={ol}|il={il}|in_slew={sin}|pi={pi:?}|gate={gate}|intrinsic={intrinsic}|slew={slew}");
+                        }
+                        pd.slew[mm][ol] = slew;
+                        pd.extra[mm][ol] = f64::from(gate as f32 - intrinsic as f32);
+                        pd.wave[mm][ol] = wave;
+                    }
+                }
+            }
+        }
+        port_drive.insert(*idx, pd);
+    }
+
     // net arcs: driver -> each sink. Each arc gets its own delay (per-pin Elmore),
     // indexed by an arc id. Record the sink's (inst,pin) to resolve its SPEF node.
     struct ArcInfo {
@@ -1679,6 +1769,10 @@ fn build_report(
         let mut var = vec![[0.0f64; 2]; n];
         let mut depth = vec![[0usize; 2]; n];
         let mut slew = vec![[input_slew; 2]; n];
+        // a port with a driving cell starts from that cell's slew, not the input slew
+        for (p, d) in &port_drive {
+            slew[*p] = d.slew[late as usize];
+        }
         let mut from: Vec<[Option<usize>; 2]> = vec![[None; 2]; n];
         let mut indeg_work = indeg.clone();
         let mut order: Vec<usize> = Vec::new();
@@ -2021,9 +2115,9 @@ fn build_report(
                     // takes it (`ReduceToPi::pinCapacitance` → `Sdc::portExtCap`) — the reduction
                     // that gives the Pi also gives each load's Elmore. Without it the wire delay to
                     // every other load of a net that drives a port missed the port's load.
-                    for mm in 0..2 {
-                        for l in 0..2 {
-                            *v[a.net_idx][mm][l].entry(labels[a.sink].clone()).or_default() += job.output_load * ff_per_cap;
+                    for lanes in v[a.net_idx].iter_mut() {
+                        for caps in lanes.iter_mut() {
+                            *caps.entry(labels[a.sink].clone()).or_default() += job.output_load * ff_per_cap;
                         }
                     }
                 }
@@ -2041,7 +2135,7 @@ fn build_report(
     // single driver waveform onto both edges, which was measured to take data-hold rms
     // from 0.0329 to 0.0537 when the per-sink crossing solve was wired against it.
     // `mm`: the analysis (0 early, 1 late), whose receiver caps the Elmore walks.
-    let compute = |sw: &[[f64; 2]], net_slew: &[[f64; 2]], mm: usize| -> (Vec<[f64; 2]>, Vec<[f64; 2]>) {
+    let compute_wires = |sw: &[[f64; 2]], net_slew: &[[f64; 2]], mm: usize| -> (Vec<[f64; 2]>, Vec<[f64; 2]>) {
         // Per-net coupling capacitance seen by the RC network, in fF.
         //
         // 🔑 BASE, and it was missing: a coupling capacitor is GROUNDED on the net at
@@ -2138,8 +2232,19 @@ fn build_report(
                 // so the rise thresholds are used for both. sky130 declares them symmetric
                 // (0.2/0.8/0.5), so it costs nothing here — but it would on a library that
                 // does not.
-                if let (Some((di, dp)), Some((si, sp))) = (&net_drv_ip[i], &a.sink_ip) {
-                    if let (Some(dt), Some(st)) = (rc.pin_node(di, dp), rc.pin_node(si, sp)) {
+                // A port end is its own node, named by the port: an input port drives its net
+                // (with its driving cell's waveform, else the closed form) and an output port is
+                // a load with its own Elmore, as an instance pin is.
+                {
+                    let dnode = match &net_drv_ip[i] {
+                        Some((di, dp)) => rc.pin_node(di, dp),
+                        None => net_drv[i].map(|d| labels[d].as_str()),
+                    };
+                    let snode = match &a.sink_ip {
+                        Some((si, sp)) => rc.pin_node(si, sp),
+                        None => Some(labels[a.sink].as_str()),
+                    };
+                    if let (Some(dt), Some(st)) = (dnode, snode) {
                         let taus = [0, 1].map(|l| rc.elmore(dt, xc[i], &net_pin_cap[i][mm][l]).and_then(|dl| dl.get(st).copied()));
                         if let [Some(_), Some(_)] = taus {
                             {
@@ -2162,7 +2267,7 @@ fn build_report(
                                 // takes the first library's. The driver's are for the
                                 // conversion after (`thresholdAdjust`).
                                 let th = th_of(a.sink);
-                                let th_d = net_drv[i].map_or(lib.thresholds, th_of);
+                                let th_d = net_drv[i].map_or(lib.thresholds, |dn| port_drive.get(&dn).map_or_else(|| th_of(dn), |pd| pd.th));
                                 let mut dl = [0.0f64; 2];
                                 let mut sl = [0.0f64; 2];
                                 // The reference's own per-sink model, when this edge's
@@ -2171,7 +2276,7 @@ fn build_report(
                                 // Vth/Vl/Vh crossings. Its degenerate branch is the closed
                                 // form's degenerate branch, so the fallback below is only
                                 // for an edge that has not been evaluated yet.
-                                let wv = net_drv[i].map(|dn| drvr_wave.borrow()[dn]);
+                                let wv = net_drv[i].map(|dn| port_drive.get(&dn).map_or_else(|| drvr_wave.borrow()[dn], |pd| pd.wave[mm]));
                                 for l in 0..2 {
                                     // this edge's Elmore: its own receiver caps
                                     let tau = taus[l];
@@ -2244,6 +2349,22 @@ fn build_report(
                 ([d, d], [0.0, 0.0])
             })
             .unzip()
+    };
+
+    // every wire edge from a port with a driving cell also carries the cell's load-dependent
+    // delay, `gate - intrinsic` (`annotateLoadDelays`)
+    let compute = |sw: &[[f64; 2]], net_slew: &[[f64; 2]], mm: usize| -> (Vec<[f64; 2]>, Vec<[f64; 2]>) {
+        let (mut d, s) = compute_wires(sw, net_slew, mm);
+        if !port_drive.is_empty() {
+            for (dk, a) in d.iter_mut().zip(arcs.iter()) {
+                if let Some(pd) = net_drv[a.net_idx].and_then(|dn| port_drive.get(&dn)) {
+                    for (x, e) in dk.iter_mut().zip(pd.extra[mm]) {
+                        *x += e;
+                    }
+                }
+            }
+        }
+        (d, s)
     };
 
     const MAX_SI_ITERS: usize = 20;

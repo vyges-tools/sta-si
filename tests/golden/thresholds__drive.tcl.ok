@@ -1,0 +1,36 @@
+$ vyges-sta-si tcl examples/thresholds/drive.tcl
+exit: 0
+--- stdout ---
+# vyges-sta-si <VERSION> — OpenSTA-compatible adapter (Vyges engine)
+# design seq   clock clk @ 1.0000 ns
+
+Path Type: max (Setup)
+  Startpoint: clk
+  Endpoint:   r2/D
+  Path Group: clk
+       Arrival      Slew   Node
+        0.0000    0.0351   clk
+        0.0254    0.0351   r1/CK
+        0.2034    0.0869   r1/Q
+        0.2208    0.1160   g1/A
+        0.4191    0.1028   g1/Y
+        0.4196    0.0733   r2/D
+    slack 0.5558 (MET)
+
+Path Type: min (Hold)
+  Startpoint: clk
+  Endpoint:   r1/D
+  Path Group: clk
+       Arrival      Slew   Node
+        0.0000    0.0351   clk
+        0.0254    0.0351   r2/CK
+        0.2685    0.1645   r2/Q
+        0.2747    0.1649   r1/D
+    slack 0.2293 (MET)
+
+--- stderr ---
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIB-THRESHOLDS","raw_msg":"th_b.lib: its slew and delay thresholds differ from the first library's; its cells are timed at their own, and ports at the first library's"}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 3 instance(s) of 2 master(s); 3 timed, 0 physical-only","objects":["clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 6 cell(s) loaded, 2 used by the design","objects":["clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-SPEF","raw_msg":"SPEF covers 3 of 4 design net(s) (75.0%); 3 net(s) in the file, all named","objects":["clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 0.5558 ns, TNS 0.0000 ns, WHS 0.2293 ns — 0 violation(s)"}
