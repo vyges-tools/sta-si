@@ -808,6 +808,7 @@ impl Timer {
                     cell,
                     name: name.clone(),
                     conns: vec![(cell_in, old_net), (cell_out, new_net)],
+                    ties: Vec::new(),
                 });
                 self.inst_idx.insert(name, self.nl.insts.len() - 1);
                 // topology changed, so the cone-localized incremental path cannot be trusted:
