@@ -14,21 +14,14 @@
 //! Usage: `cargo run --release --example dump_pin_state -- JOB.sta > pins.csv`
 
 use vyges_sta_si::job::StaJob;
-use vyges_sta_si::liberty::Lib;
 use vyges_sta_si::sta::Timer;
 
 fn main() {
     let job_path = std::env::args().nth(1).expect("usage: dump_pin_state JOB.sta");
     let job = StaJob::load(&job_path).expect("load job");
-    let nl = vyges_sta_si::netlist::load(&job.resolve(&job.netlist)).expect("load netlist");
-    let mut lib = Lib::default();
-    for l in &job.libs {
-        lib.cells.extend(Lib::load(&job.resolve(l)).expect("load lib").cells);
-    }
-    let spef = job
-        .spef
-        .as_ref()
-        .map(|p| vyges_sta_si::spef::Spef::load(&job.resolve(p)).expect("load spef"));
+    // the timer's own reader, so a dump shows what the timer saw
+    let (nl, lib, spef) =
+        vyges_sta_si::engine::load_inputs(&job, Default::default()).expect("load inputs");
     let t = Timer::build(&nl, &lib, &job, spef.as_ref()).expect("build timer");
 
     // hold slack is per-endpoint rather than per-pin, so index it up front

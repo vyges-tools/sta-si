@@ -157,17 +157,29 @@ pub fn analyze_job_opts(
     job: &StaJob,
     lib_opts: crate::liberty::LibOpts,
 ) -> Result<TimingReport, StaError> {
+    let (nl, lib, spef) = load_inputs(job, lib_opts)?;
+    emit_input_coverage(job, &nl, &lib);
+    if let Some(s) = spef.as_ref() {
+        emit_spef_coverage(job, &nl, s);
+    }
+    sta::analyze(&nl, &lib, job, spef.as_ref())
+}
+
+/// The job's netlist, libraries (one, by [`load_libs`]) and SPEF (in the netlist's net names),
+/// read as the timer reads them. ⛔ Every engine that builds a [`Timer`](crate::sta::Timer) from a
+/// job reads through here: four repair engines each had their own loop, which merged libraries
+/// without their units (last cell winning) and joined the SPEF without the netlist's aliases.
+pub fn load_inputs(
+    job: &StaJob,
+    lib_opts: crate::liberty::LibOpts,
+) -> Result<(crate::netlist::Netlist, Lib, Option<Spef>), StaError> {
     let nl = load_netlist(&job.resolve(&job.netlist))?;
     let lib = load_libs(job, lib_opts)?;
     let spef = match &job.spef {
         Some(p) => Some(load_spef(p, job, &nl)?),
         None => None,
     };
-    emit_input_coverage(job, &nl, &lib);
-    if let Some(s) = spef.as_ref() {
-        emit_spef_coverage(job, &nl, s);
-    }
-    sta::analyze(&nl, &lib, job, spef.as_ref())
+    Ok((nl, lib, spef))
 }
 
 /// The job's libraries as one, as the reference reads them: the FIRST library's units (every
