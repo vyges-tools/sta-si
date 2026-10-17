@@ -1094,10 +1094,8 @@ fn build_report(
                     pin_cap_node.insert(idx, cap);
                     let nref = nets.get_mut(net).unwrap();
                     nref.sinks.push(idx);
-                    for mm in 0..2 {
-                        for l in 0..2 {
-                            nref.load[mm][l] += cap[mm][l];
-                        }
+                    for (load, c) in nref.load.iter_mut().flatten().zip(cap.iter().flatten()) {
+                        *load += c;
                     }
                     if cell.pins[pin].clock {
                         ck_node_list.push(idx); // clock pin — root of insertion-delay paths
@@ -1282,7 +1280,9 @@ fn build_report(
     // `fft_top`'s `input55`, where that SPEF node carries none at all — so reading the node
     // handed the gate ZERO near capacitance and `report_dcalc` disagreed by the whole Pi.
     // Per output edge: the receiver caps it sums are that edge's.
-    let mut shield: Vec<[[Option<(f64, f64, f64)>; 2]; 2]> = vec![[[None; 2]; 2]; n];
+    // `[analysis][edge]`, each a (C2 near pF, Rpi, C1 far pF) Pi.
+    type Pi = Option<(f64, f64, f64)>;
+    let mut shield: Vec<[[Pi; 2]; 2]> = vec![[[None; 2]; 2]; n];
     if let Some(s) = spef {
         for (name, net) in &nets {
             if let Some(d) = net.driver {
