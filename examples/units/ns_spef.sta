@@ -1,0 +1,8 @@
+# ns.sta with parasitics. A SPEF is in its own units (fF, ohms), whatever the library's.
+design:      seq
+netlist:     seq.v
+lib:         units_ns.lib
+clock:       clk 1.0
+input_slew:  0.02
+output_load: 0.005
+spef:        seq.spef

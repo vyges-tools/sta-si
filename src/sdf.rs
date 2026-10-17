@@ -189,7 +189,10 @@ pub fn emit(design: &str, nl: &Netlist, lib: &Lib, spef: Option<&Spef>, t: &Time
                 let elmore = netrc
                     .and_then(|rc| rc.pin_node(&inst.name, &out.name))
                     .and_then(|d| netrc.unwrap().elmore(d, 0.0, &std::collections::BTreeMap::new()));
-                let lumped = sp.net_delay_ns(net);
+                // the RC delays are in ns: the file is in the library's time unit
+                let time_per_ns = crate::sta::pow10_exact(1e-9 / lib.units.time_s);
+                let elmore = elmore.map(|m| m.into_iter().map(|(n, d)| (n, d * time_per_ns)).collect::<std::collections::BTreeMap<_, _>>());
+                let lumped = sp.net_delay_ns(net) * time_per_ns;
                 for (si, sp_pin) in sinks {
                     let d = match (&elmore, netrc.and_then(|rc| rc.pin_node(si, sp_pin))) {
                         (Some(m), Some(n)) => m.get(n).copied().unwrap_or(lumped),

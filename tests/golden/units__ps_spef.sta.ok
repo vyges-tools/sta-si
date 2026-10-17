@@ -1,0 +1,32 @@
+$ vyges-sta-si run examples/units/ps_spef.sta
+exit: 0
+--- stdout ---
+STA report — design seq
+  clock clk  period 1000.000 ps   xtalk_miller 2.00
+  OCV: flat derate — late 1.000 / early 1.000   CRPR: on
+  endpoints: 3
+  WNS: 606.9447 ps    TNS: 0.0000 ps    [MET]
+
+  worst path to r2/D  (slack 606.9447 ps):
+      arrival     slew   node
+       0.0000  20.0000   clk
+       0.0000  20.0000   r1/CK
+     165.2334  81.6006   r1/Q
+     168.1086  81.8724   g1/A
+     341.4967  78.1071   g1/Y
+     343.0553  78.1071   r2/D
+
+  hold endpoints: 2    WHS: 210.9248 ps    THS: 0.0000 ps    [MET]
+  worst hold path to r1/D  (slack 210.9248 ps):
+      arrival     slew   node
+       0.0000  20.0000   clk
+       0.0000  20.0000   r2/CK
+     227.3668  154.4288   r2/Q
+     230.9248  154.6418   r1/D
+
+  achievable: ~393.055 ps → ~2544.2 MHz   (target 1000.000 ps → ~1000.0 MHz)
+--- stderr ---
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 3 instance(s) of 2 master(s); 3 timed, 0 physical-only","objects":["clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 3 cell(s) loaded, 2 used by the design","objects":["clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-SPEF","raw_msg":"SPEF covers 3 of 4 design net(s) (75.0%); 3 net(s) in the file, all named","objects":["clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 606.9447 ps, TNS 0.0000 ps, WHS 210.9248 ps — 0 violation(s)"}

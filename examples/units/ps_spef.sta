@@ -1,0 +1,8 @@
+# ps.sta with parasitics: the same SPEF, and the ns_spef report times 1000, labelled ps.
+design:      seq
+netlist:     seq_ps.v
+lib:         units_ps.lib
+clock:       clk 1000
+input_slew:  20
+output_load: 5
+spef:        seq.spef

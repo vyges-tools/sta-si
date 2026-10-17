@@ -1,0 +1,53 @@
+*SPEF "IEEE 1481-1999"
+*DESIGN "seq"
+*DIVIDER /
+*DELIMITER :
+*BUS_DELIMITER [ ]
+*T_UNIT 1 PS
+*C_UNIT 1 FF
+*R_UNIT 1 OHM
+*L_UNIT 1 HENRY
+
+*PORTS
+y O
+
+*D_NET q1 4.0
+*CONN
+*I r1:Q O
+*I g1:A I
+*CAP
+1 r1:Q 1.0
+2 q1:1 2.0
+3 g1:A 1.0
+*RES
+1 r1:Q q1:1 400.0
+2 q1:1 g1:A 400.0
+*END
+
+*D_NET n1 3.0
+*CONN
+*I g1:Y O
+*I r2:D I
+*CAP
+1 g1:Y 1.0
+2 n1:1 1.0
+3 r2:D 1.0
+*RES
+1 g1:Y n1:1 300.0
+2 n1:1 r2:D 300.0
+*END
+
+*D_NET y 5.0
+*CONN
+*I r2:Q O
+*I r1:D I
+*P y O
+*CAP
+1 r2:Q 1.0
+2 y:1 3.0
+3 r1:D 1.0
+*RES
+1 r2:Q y:1 500.0
+2 y:1 r1:D 500.0
+3 y:1 y 100.0
+*END

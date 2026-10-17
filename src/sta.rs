@@ -944,6 +944,27 @@ pub fn analyze(
     Ok(build_report(nl, lib, job, spef, false)?.0)
 }
 
+/// The factors that put a parasitic's femtofarads and ohms in the library's units: femtofarads
+/// per capacitance unit, ohms per resistance unit (time unit / capacitance unit, so R·C is in the
+/// time unit: 1 kΩ for both ns·pF and ps·fF) and time units per femtosecond (an Ω·fF product).
+/// 1000, 1000 and 1e-6 for a ns, pF library — each an exact power of ten, so those runs are
+/// unchanged to the bit.
+fn spef_scales(u: crate::liberty::LibUnits) -> (f64, f64, f64) {
+    (pow10_exact(u.cap_f / 1e-15), pow10_exact(u.time_s / u.cap_f), pow10_exact(1e-15 / u.time_s))
+}
+
+/// `x` as the exact power of ten it rounds to (`1.0 / 10^k` below one, as the literal reads),
+/// else `x` itself.
+pub(crate) fn pow10_exact(x: f64) -> f64 {
+    let k = x.log10().round() as i32;
+    let p = if k >= 0 { 10f64.powi(k) } else { 1.0 / 10f64.powi(-k) };
+    if ((p - x) / x).abs() < 1e-9 {
+        p
+    } else {
+        x
+    }
+}
+
 /// Build the timing graph, propagate arrival/required, and return the report.
 ///
 /// (Phase 1+ splits this into persistent graph construction + propagation that the
@@ -955,6 +976,13 @@ fn build_report(
     spef: Option<&Spef>,
     capture: bool,
 ) -> Result<(TimingReport, Timing, Option<IncGraph>), StaError> {
+    // The parasitics' femtofarads and ohms in the library's units (see `spef_scales`).
+    let (ff_per_cap, ohm_per_r, fs_to_time) = spef_scales(lib.units);
+    let r_scale = 1.0 / ohm_per_r;
+    // `gateModelRd`'s 1e-15 F step in the library's capacitance unit (1e-3 for pF, 1 for fF)
+    let cap_step = 1.0 / ff_per_cap;
+    // the RC solves (Elmore, transient) work in ns: their times to and from the library's unit
+    let (ns_per_time, time_per_ns) = (pow10_exact(lib.units.time_s / 1e-9), pow10_exact(1e-9 / lib.units.time_s));
     let mut labels: Vec<String> = Vec::new();
     let mut key2idx: HashMap<String, usize> = HashMap::new();
     let mut is_endpoint: Vec<bool> = Vec::new();
@@ -1212,8 +1240,9 @@ fn build_report(
     let mut node_load = vec![[[0.0f64; 2]; 2]; n];
     for (netname, net) in &nets {
         if let Some(d) = net.driver {
-            // driver load = receiver pin caps + wire cap from SPEF (fF -> pF), per output edge
-            let wire = spef.map(|s| s.wire_load_pf(netname)).unwrap_or(0.0);
+            // driver load = receiver pin caps + wire cap from SPEF (fF -> the library's unit),
+            // per output edge
+            let wire = spef.and_then(|s| s.nets.get(netname)).map_or(0.0, |rc| rc.cap_ff / ff_per_cap);
             node_load[d] = net.load.map(|e| e.map(|c| c + wire));
         }
     }
@@ -1308,7 +1337,7 @@ fn build_report(
                             if let Some((si, sp)) = ip_of(sk) {
                                 if let Some(nd) = rc.pin_node(&si, &sp) {
                                     *pcap.entry(nd.to_string()).or_default() +=
-                                        pin_cap_node.get(&sk).map_or(0.0, |c| c[mm][lane]) * 1000.0;
+                                        pin_cap_node.get(&sk).map_or(0.0, |c| c[mm][lane]) * ff_per_cap;
                                 }
                             } else if output_ports.iter().any(|(idx, _)| *idx == sk) {
                                 // A top-level output port: its external load at its own node
@@ -1316,11 +1345,11 @@ fn build_report(
                                 // it the Pi of a net driving a port carries only the wire, and
                                 // the gate sees almost no load (fft_ctrl_tlul's sram_clk_o:
                                 // 0.0706 ns against sign-off's 0.2125 ns at output140).
-                                *pcap.entry(labels[sk].clone()).or_default() += job.output_load * 1000.0;
+                                *pcap.entry(labels[sk].clone()).or_default() += job.output_load * ff_per_cap;
                             }
                         }
                         if let Some((c2_ff, rpi, c1_ff)) = rc.pi_reduce(dnode, cc, &pcap) {
-                            shield[d][mm][lane] = Some((c2_ff / 1000.0, rpi, c1_ff / 1000.0));
+                            shield[d][mm][lane] = Some((c2_ff / ff_per_cap, rpi, c1_ff / ff_per_cap));
                         }
                         }
                     }
@@ -1757,13 +1786,14 @@ fn build_report(
                                             |c: f64| (dt.lookup(sin, c), st.lookup(sin, c));
                                         let t = dmp_vth(ol);
                                         let rd =
-                                            crate::dmp::gate_model_rd(t.vth, &gate, c1, c2);
-                                        // ⚠️ Rpi is in ohms; the solver works in kΩ so that
-                                        // rd·C and rpi·C land in ns.
+                                            crate::dmp::gate_model_rd_step(t.vth, &gate, c1, c2, cap_step);
+                                        // ⚠️ Rpi is in ohms; the solver works in the library's
+                                        // time per capacitance (kΩ for ns and pF) so that rd·C
+                                        // and rpi·C land in its time unit.
                                         Some(crate::dmp::solve_driver(
                                             rd,
                                             c2,
-                                            rpi / 1000.0,
+                                            rpi / ohm_per_r,
                                             c1,
                                             t,
                                             &gate,
@@ -1776,7 +1806,7 @@ fn build_report(
                                     (None, Some((c2, rpi, c1))) => crate::ccs::ceff_iter(
                                         c2,
                                         c1,
-                                        rpi * c1 * 1e-3,
+                                        rpi * c1 * r_scale,
                                         |c| st.lookup(sin, c),
                                     ),
                                     (None, None) => load,
@@ -1925,7 +1955,7 @@ fn build_report(
                         let c = pin_cap_node.get(&a.sink).copied().unwrap_or([[0.0; 2]; 2]);
                         for mm in 0..2 {
                             for l in 0..2 {
-                                *v[a.net_idx][mm][l].entry(node.to_string()).or_default() += c[mm][l] * 1000.0;
+                                *v[a.net_idx][mm][l].entry(node.to_string()).or_default() += c[mm][l] * ff_per_cap;
                             }
                         }
                     }
@@ -1989,7 +2019,9 @@ fn build_report(
                 let rc = spef?.nets.get(&net_order[i])?;
                 let (di, dp) = net_drv_ip[i].as_ref()?;
                 let dn = rc.pin_node(di, dp)?;
-                rc.transient(dn, slw_of(net_slew[i]), xc[i], lib.thresholds)
+                // the solve is in ns: the driver slew in, each delay and slew out
+                let map = rc.transient(dn, slw_of(net_slew[i]) * ns_per_time, xc[i], lib.thresholds)?;
+                Some(map.into_iter().map(|(n, (d, s))| (n, (d * time_per_ns, s * time_per_ns))).collect())
             })
             .collect();
         // each arc -> (net delay, degraded sink slew); slew 0 means "keep driver slew"
@@ -2051,7 +2083,7 @@ fn build_report(
                                 // float)` and `findElmore(..., float &elmore, ...)`. So the
                                 // double the DFS accumulated is rounded to f32 before any
                                 // consumer sees it.
-                                let taus = taus.map(|t| t.unwrap() as f32 as f64);
+                                let taus = taus.map(|t| (t.unwrap() * time_per_ns) as f32 as f64);
                                 // PER EDGE: each lane has its own driver slew and its own
                                 // thresholds, exactly as the reference evaluates one arc.
                                 // The arithmetic is double — `1.0` in `log(1.0 - vth)`
@@ -2125,7 +2157,7 @@ fn build_report(
                 // that lands here degrades no slew at all, and every downstream delay is
                 // looked up at too sharp a transition.
                 mark(RC_LUMPED);
-                let d = net_res[i] * net_cap[i] * 1e-6 + net_res[i] * xc[i] * 1e-6;
+                let d = net_res[i] * net_cap[i] * fs_to_time + net_res[i] * xc[i] * fs_to_time;
                 ([d, d], [0.0, 0.0])
             })
             .unzip()
@@ -2259,7 +2291,7 @@ fn build_report(
                         Some((c2, rpi, c1)) => eprintln!(
                             "rc-trace: ASKED net {nm} DRIVER Pi — ours C2={c2:.4} \
                              Rpi={:.4}k C1={c1:.4} (total {:.4}) · Ceff rise={:.4}                              fall={:.4} · load {:.4} pF",
-                            rpi / 1000.0,
+                            rpi / ohm_per_r,
                             c2 + c1,
                             ceff_used.borrow()[d][0],
                             ceff_used.borrow()[d][1],
@@ -2699,7 +2731,7 @@ fn build_report(
         let cell_dly = |arc: &Arc, sin: f64, vnode: usize| -> (f64, f64) {
             // the collapsed path takes the worse edge, each edge at its own load
             let leff_of = |lane: usize| match shield[vnode][1][lane] {
-                Some((c2, rpi, c1)) => crate::ccs::ceff_iter(c2, c1, rpi * c1 * 1e-3, |c| {
+                Some((c2, rpi, c1)) => crate::ccs::ceff_iter(c2, c1, rpi * c1 * r_scale, |c| {
                     arc.rise_transition
                         .lookup(sin, c)
                         .max(arc.fall_transition.lookup(sin, c))
@@ -3025,6 +3057,18 @@ fn build_report(
 #[cfg(test)]
 mod per_edge_load {
     use super::*;
+
+    /// The parasitics' units in the library's: the literals a ns, pF library always used, to the
+    /// bit; a ps, fF library keeps femtofarads, the same kΩ, and Ω·fF in ps.
+    #[test]
+    fn spef_scales_are_exact_powers_of_ten() {
+        use crate::liberty::LibUnits;
+        assert_eq!(spef_scales(LibUnits::default()), (1000.0, 1000.0, 1e-6));
+        let ps = LibUnits { time_s: 1e-12, cap_f: 1e-15, ..LibUnits::default() };
+        assert_eq!(spef_scales(ps), (1.0, 1000.0, 1e-3));
+        assert_eq!(1.0 / spef_scales(LibUnits::default()).1, 1e-3);
+        assert_eq!(1.0 / spef_scales(LibUnits::default()).0, 1e-3);
+    }
 
     /// Reference rule: a receiver loads its driver's rising edge with its rise capacitance and
     /// the falling edge with its fall capacitance, `capacitance` only where those are absent.
