@@ -101,3 +101,17 @@ fn bilinear_interpolation_extrapolates_past_the_axis() {
         "clamping would return exactly the far corner 0.40"
     );
 }
+
+/// A gzipped library (`.lib.gz`, as the reference's asap7 libraries ship) reads as its text and
+/// times the same design to the same report. The fixture is `gzip -n -9` of `examples/seq/seq.lib`.
+#[test]
+fn a_gzipped_library_times_as_its_text() {
+    use vyges_sta_si::engine::analyze_job;
+    use vyges_sta_si::job::StaJob;
+    let plain = Lib::load("examples/seq/seq.lib").expect("seq.lib");
+    let gz = Lib::load("examples/seq_gz/seq.lib.gz").expect("seq.lib.gz");
+    assert_eq!(format!("{plain:?}"), format!("{gz:?}"), "the library read differs");
+    let a = analyze_job(&StaJob::load("examples/seq/seq.sta").unwrap()).unwrap();
+    let b = analyze_job(&StaJob::load("examples/seq_gz/seq_gz.sta").unwrap()).unwrap();
+    assert_eq!(format!("{a:?}"), format!("{b:?}"), "the report differs");
+}

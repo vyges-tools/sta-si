@@ -62,7 +62,7 @@ a reader never drags a whole application in behind it (see
 ## The problem it solves
 
 Given a **gate-level netlist** (`*.v`), one or more **Liberty** libraries
-(`*.lib`), a **clock**, and *(optional)* **SPEF** parasitics (`*.spef`), it
+(`*.lib`, or gzipped `*.lib.gz`), a **clock**, and *(optional)* **SPEF** parasitics (`*.spef`), it
 builds a timing graph — cell arcs (delay from the NLDM tables, interpolated on
 input slew × output load) and net arcs (the SPEF interconnect delay) — propagates
 arrival and required times, and reports **WNS** (worst negative slack), **TNS**
@@ -565,8 +565,8 @@ critical path and its fan-in alternatives with strictly path-local slews, removi
 the pessimism of the graph-based merge (each node's worst slew over all its arcs). It also writes **SDF
 back-annotation** (`--sdf`: IOPATH + setup/hold TIMINGCHECK + SPEF INTERCONNECT, for
 gate-level sim) and lints constraints with **`sdc-lint`** (completeness/consistency
-of the SDC, independent of the timing run). Fully offline, no external deps, 216 tests
-green.
+of the SDC, independent of the timing run). Fully offline; one third-party dependency (`miniz_oxide`, pure Rust, for gzipped inputs).
+
 It **closes the loop with the other engines**: it reads the
 Liberty `vyges-char` emits and the SPEF (incl. coupling + RC tree) `vyges-extract`
 emits — the SI margin OpenSTA lacks.
