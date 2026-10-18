@@ -47,7 +47,31 @@ pub(crate) enum InEdge {
 pub(crate) struct Lanes {
     pub arr: Vec<[f64; 2]>,
     pub slew: Vec<[f64; 2]>,
-    pub from: Vec<[Option<usize>; 2]>,
+    pub from: Vec<[Pred; 2]>,
+}
+
+/// A lane's predecessor: `(node, that node's lane)`. An inverting or non-unate arc feeds an
+/// output edge from the OTHER input edge, so the node alone cannot be followed edge by edge.
+pub(crate) type Pred = Option<(usize, usize)>;
+
+/// The path into `v` on edge `l` (0 = rise, 1 = fall), followed lane by lane: every node at
+/// the edge the path actually carries there — what the reference reports for one path end.
+pub(crate) fn lane_path(labels: &[String], arr: &[[f64; 2]], slew: &[[f64; 2]], from: &[[Pred; 2]], v: usize, l: usize) -> Vec<PathNode> {
+    let mut chain = vec![(v, l)];
+    let (mut v, mut l) = (v, l);
+    while let Some((u, ul)) = from[v][l] {
+        chain.push((u, ul));
+        (v, l) = (u, ul);
+    }
+    chain.reverse();
+    chain
+        .into_iter()
+        .map(|(i, k)| PathNode {
+            label: labels[i].clone(),
+            arrival: arr[i][k],
+            slew: slew[i][k],
+        })
+        .collect()
 }
 
 /// A setup capture endpoint whose required time depends on the data slew at the pin
@@ -232,7 +256,7 @@ impl IncGraph {
                         if better {
                             arr[l] = a; // zero net delay
                             slew[l] = lanes.slew[*u][l]; // sink slew passes through
-                            from[l] = Some(*u);
+                            from[l] = Some((*u, l));
                         }
                     }
                 }
@@ -279,7 +303,7 @@ impl IncGraph {
                             if better {
                                 arr[ol] = metric;
                                 slew[ol] = sout;
-                                from[ol] = Some(*u);
+                                from[ol] = Some((*u, il));
                             }
                         }
                     }
@@ -465,11 +489,11 @@ impl IncGraph {
             let l = pick(&late, v, true);
             arrival[v] = late.arr[v][l];
             slew[v] = late.slew[v][l];
-            from[v] = late.from[v][l];
+            from[v] = late.from[v][l].map(|p| p.0);
             let m = pick(&early, v, false);
             arr_min[v] = early.arr[v][m];
             slew_min[v] = early.slew[v][m];
-            from_min[v] = early.from[v][m];
+            from_min[v] = early.from[v][m].map(|p| p.0);
         }
 
         // recompute the slew-dependent endpoint required times for cone-touched setup
@@ -540,7 +564,25 @@ impl IncGraph {
                 worst = Some(v);
             }
         }
-        let (worst_endpoint, worst_path) = self.trace(worst, &arrival, &slew, &from);
+        // A per-edge setup check reports the path of the edge that set its slack (as the full
+        // pass does); an output port or a clock-launched arrival keeps the collapsed path.
+        let worst_edge = worst.and_then(|v| {
+            let clk_a = self.state.clk_arrival.get(v).copied().unwrap_or(f64::NEG_INFINITY);
+            if clk_a > arrival[v] {
+                return None;
+            }
+            let r = self.topo.setup_recs.iter().find(|r| r.idx == v)?;
+            let cons = cons_override.get(&v).map(|(su, _)| su).unwrap_or(&r.cons);
+            (0..2)
+                .filter(|&l| late.arr[v][l].is_finite())
+                .map(|l| (l, r.base - eval_cons_edge(cons, l == 0, r.ck_slew, late.slew[v][l]) - late.arr[v][l]))
+                .fold(None, |b: Option<(usize, f64)>, (l, s)| if b.is_none_or(|(_, bs)| s < bs) { Some((l, s)) } else { b })
+                .map(|(l, _)| (v, l))
+        });
+        let (worst_endpoint, worst_path) = match worst_edge {
+            Some((v, l)) => (self.topo.labels[v].clone(), lane_path(&self.topo.labels, &late.arr, &late.slew, &late.from, v, l)),
+            None => self.trace(worst, &arrival, &slew, &from),
+        };
 
         let mut whs = f64::INFINITY;
         let mut ths = 0.0;
@@ -554,13 +596,17 @@ impl IncGraph {
             hold_endpoints += 1;
             let cons = cons_override.get(&r.idx).map(|(_, ho)| ho).unwrap_or(&r.cons);
             let mut slack = f64::INFINITY;
+            let mut slack_lane = 0;
             for l in 0..2 {
                 let a = early.arr[r.idx][l];
                 if !a.is_finite() {
                     continue;
                 }
                 let hv = eval_cons_edge(cons, l == 0, r.ck_slew, early.slew[r.idx][l]);
-                slack = slack.min(a + r.base - hv);
+                if a + r.base - hv < slack {
+                    slack = a + r.base - hv;
+                    slack_lane = l;
+                }
             }
             if !slack.is_finite() {
                 hold_endpoints -= 1;
@@ -572,11 +618,13 @@ impl IncGraph {
             }
             if slack < whs {
                 whs = slack;
-                worst_hold = Some(r.idx);
+                worst_hold = Some((r.idx, slack_lane));
             }
         }
-        let (worst_hold_endpoint, worst_hold_path) =
-            self.trace(worst_hold, &arr_min, &slew_min, &from_min);
+        let (worst_hold_endpoint, worst_hold_path) = match worst_hold {
+            Some((v, l)) => (self.topo.labels[v].clone(), lane_path(&self.topo.labels, &early.arr, &early.slew, &early.from, v, l)),
+            None => (String::new(), Vec::new()),
+        };
 
         let report = TimingReport {
             wns: if endpoints == 0 { f64::INFINITY } else { wns },

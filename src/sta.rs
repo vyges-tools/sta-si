@@ -28,7 +28,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::inc::{HoldRec, InEdge, IncGraph, IncState, IncTopo, Lanes, SetupRec};
+use crate::inc::{HoldRec, InEdge, IncGraph, IncState, IncTopo, Lanes, Pred, SetupRec};
 use crate::job::{ExcKind, Exception, StaJob};
 use crate::liberty::{Arc, ClkEdge, Constraint, Dir, Lib};
 use crate::names::{instance_of, split_inst_pin};
@@ -1757,7 +1757,7 @@ fn build_report(
         Vec<usize>,
         Vec<[f64; 2]>,
         Vec<[f64; 2]>,
-        Vec<[Option<usize>; 2]>,
+        Vec<[Pred; 2]>,
     ) {
         let init = if late {
             f64::NEG_INFINITY
@@ -1773,7 +1773,9 @@ fn build_report(
         for (p, d) in &port_drive {
             slew[*p] = d.slew[late as usize];
         }
-        let mut from: Vec<[Option<usize>; 2]> = vec![[None; 2]; n];
+        // each lane's predecessor AND the predecessor's lane: an inverting arc feeds the other edge,
+        // and a reported path has to follow the edge that set the slack, node by node.
+        let mut from: Vec<[Pred; 2]> = vec![[None; 2]; n];
         let mut indeg_work = indeg.clone();
         let mut order: Vec<usize> = Vec::new();
         for v in 0..n {
@@ -1840,7 +1842,7 @@ fn build_report(
                                 } else {
                                     slew[u][l]
                                 };
-                                from[v][l] = Some(u);
+                                from[v][l] = Some((u, l));
                             }
                         }
                     }
@@ -2025,7 +2027,7 @@ fn build_report(
                                     var[v][ol] = var_c;
                                     depth[v][ol] = stage;
                                     slew[v][ol] = sout;
-                                    from[v][ol] = Some(u);
+                                    from[v][ol] = Some((u, il));
                                 }
                             }
                         }
@@ -2064,7 +2066,7 @@ fn build_report(
             let l = ck_lane[v].unwrap_or_else(|| pick(arr[v]));
             arrival[v] = arr[v][l];
             slew_c[v] = slew[v][l];
-            from_c[v] = from[v][l];
+            from_c[v] = from[v][l].map(|p| p.0);
         }
         // also hand back the per-lane arrays so the incremental fast path can seed a cone
         // recompute from the committed state (only captured by the final passes when asked).
@@ -2849,6 +2851,7 @@ fn build_report(
     let mut tns = 0.0;
     let mut worst = None;
     let mut worst_is_clk_launched = false;
+    let mut worst_lane: Option<usize> = None;
     let mut endpoints = 0;
     for v in 0..n {
         if !is_endpoint[v] || excluded_setup[v] {
@@ -2870,11 +2873,13 @@ fn build_report(
         // The clock-launched arrival is collapsed (it carries an absolute edge time, not a
         // per-lane delay), so it is scored against the tighter required, as before.
         let mut slack = f64::INFINITY;
+        let mut slack_lane = None;
         if !req_edge[v][0].is_nan() && !clk_launched {
             for l in 0..2 {
                 let a = late_arr[v][l];
-                if a.is_finite() {
-                    slack = slack.min(req_edge[v][l] - a);
+                if a.is_finite() && req_edge[v][l] - a < slack {
+                    slack = req_edge[v][l] - a;
+                    slack_lane = Some(l);
                 }
             }
         }
@@ -2887,12 +2892,18 @@ fn build_report(
         if slack < wns {
             wns = slack;
             worst = Some(v);
+            worst_lane = slack_lane;
             worst_is_clk_launched = clk_launched;
         }
     }
 
     let mut worst_path = Vec::new();
     let worst_endpoint = match worst {
+        // scored per edge: that edge's own path
+        Some(v) if worst_lane.is_some() => {
+            worst_path = crate::inc::lane_path(&labels, &late_arr, &late_slew, &late_from, v, worst_lane.unwrap_or(0));
+            labels[v].clone()
+        }
         Some(mut v) => {
             let end_label = labels[v].clone();
             // trace through the pass that produced the reported slack, so the printed
@@ -3086,6 +3097,7 @@ fn build_report(
         // path is `^` at every node, while the minimum over lanes is the falling (assert)
         // edge. Measured on fft_top: all 132 async endpoints pessimistic, mean −0.1414.
         let mut slack = f64::INFINITY;
+        let mut slack_lane = 0;
         for l in 0..2 {
             let a = early_arr[idx][l];
             if !a.is_finite() {
@@ -3098,6 +3110,7 @@ fn build_report(
             let sl = a + base - hv;
             if sl < slack {
                 slack = sl;
+                slack_lane = l;
             }
         }
         if !slack.is_finite() {
@@ -3120,29 +3133,14 @@ fn build_report(
         }
         if slack < whs {
             whs = slack;
-            worst_hold = Some(idx);
+            worst_hold = Some((idx, slack_lane));
         }
     }
-    let mut worst_hold_path = Vec::new();
-    let worst_hold_endpoint = match worst_hold {
-        Some(mut v) => {
-            let end_label = labels[v].clone();
-            let mut chain = vec![v];
-            while let Some(u) = from_min[v] {
-                chain.push(u);
-                v = u;
-            }
-            chain.reverse();
-            for idx in chain {
-                worst_hold_path.push(PathNode {
-                    label: labels[idx].clone(),
-                    arrival: arr_min[idx],
-                    slew: slew_min[idx],
-                });
-            }
-            end_label
-        }
-        None => String::new(),
+    // The path of the edge whose check set the slack — not the earliest lane at each node,
+    // which can be the other edge's path printed beside this one's slack.
+    let (worst_hold_endpoint, worst_hold_path) = match worst_hold {
+        Some((v, l)) => (labels[v].clone(), crate::inc::lane_path(&labels, &early_arr, &early_slew, &early_from, v, l)),
+        None => (String::new(), Vec::new()),
     };
 
     let report = TimingReport {

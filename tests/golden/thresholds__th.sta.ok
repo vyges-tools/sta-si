@@ -13,7 +13,7 @@ STA report — design seq
        0.0000   0.0200   r1/CK
        0.1652   0.0819   r1/Q
        0.1818   0.1094   g1/A
-       0.3750   0.1008   g1/Y
+       0.3618   0.0956   g1/Y
        0.3753   0.0718   r2/D
 
   hold endpoints: 2    WHS: 0.2135 ns    THS: 0.0000 ns    [MET]
