@@ -2829,6 +2829,12 @@ fn build_report(
     // Required time PER DATA EDGE. `endpoint_req` keeps the tighter of the two so the
     // query API still answers with one number; the scoring loop below uses the pair.
     let mut req_edge = vec![[f64::NAN; 2]; n];
+    // An output port's requirement is the same for either data edge; scored per edge like a
+    // register's, so its reported path is the edge that set the slack, followed lane by lane
+    // (collapsed, each node's latest edge was printed — `_414_/Q` rise beside a falling path).
+    for (idx, _) in &output_ports {
+        req_edge[*idx] = [endpoint_req[*idx]; 2];
+    }
 
     // setup capture uses the EARLY clock; CRPR adds back the shared-path pessimism;
     // the capture window is the launch→capture edge relation (one period intra-domain),
