@@ -17,8 +17,21 @@ Path Type: max (Setup)
         0.2579    0.0301   out
     slack 1.7421 (MET)
 
+Path Type: min (Hold)
+  Startpoint: in1
+  Endpoint:   out
+  Path Group: clk
+       Arrival      Slew   Node
+        0.0000    0.0200   in1
+        0.0000    0.0200   u1/A
+        0.1403    0.1596   u1/Y
+        0.1934    0.1883   u2/A
+        0.2196    0.0199   u2/Y
+        0.2196    0.0199   out
+    slack 0.2196 (MET)
+
 --- stderr ---
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 2 instance(s) of 2 master(s); 2 timed, 0 physical-only","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 2 cell(s) loaded, 2 used by the design","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-SPEF","raw_msg":"SPEF covers 1 of 4 design net(s) (25.0%); 1 net(s) in the file, all named","objects":["clock:clk"]}
-{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.7421 ns, TNS 0.0000 ns, WHS inf ns — 0 violation(s)"}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.7421 ns, TNS 0.0000 ns, WHS 0.2196 ns — 0 violation(s)"}

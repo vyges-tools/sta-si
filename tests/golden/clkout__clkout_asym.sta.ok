@@ -16,7 +16,7 @@ STA report — design clkout_asym
        1.1193   0.0264   ob0/X
        1.1193   0.0264   clk_o
 
-  hold endpoints: 1    WHS: 0.0243 ns    THS: 0.0000 ns    [MET]
+  hold endpoints: 3    WHS: 0.0243 ns    THS: 0.0000 ns    [MET]
   worst hold path to r0/D  (slack 0.0243 ns):
       arrival     slew   node
        0.1000   0.0200   d_i

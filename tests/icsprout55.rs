@@ -39,6 +39,7 @@ fn job() -> StaJob {
         pba: false,
         input_delay: 0.0,
         output_delay: 0.0,
+        output_delay_declared: false,
         io_input_delays: vec![],
         io_output_delays: vec![],
         setup_uncertainty: 0.0,

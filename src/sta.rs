@@ -3176,7 +3176,53 @@ fn build_report(
                 cons: hold.clone(),
                 ck_slew,
                 launch_ck: lck,
+                port: false,
             });
+        }
+        if slack < 0.0 {
+            ths += slack;
+        }
+        if slack < whs {
+            whs = slack;
+            worst_hold = Some((idx, slack_lane));
+        }
+    }
+    // An output port's HOLD check. `set_output_delay` constrains both analyses (the reference's
+    // `PathEndOutputDelay`): the data must not arrive before the capture edge less the
+    // external delay — required = hold edge − output delay (+ hold uncertainty), per edge.
+    // Without it no output was ever hold-checked: the reference's min report on a design
+    // whose only endpoint is an output port says `0.2196 slack`, this timer said nothing.
+    for (idx, name) in &output_ports {
+        let idx = *idx;
+        if excluded_setup[idx] || !arr_min[idx].is_finite() || !job.output_delay_declared_for(name) {
+            continue; // false-pathed, unreached, or unconstrained
+        }
+        let lck = launch_ck(idx, &from_min);
+        let pl = lck.map(&clock_period_of).unwrap_or(period);
+        let (_, mut hold_rel) = edge_relation(pl, period);
+        let ln = lck.map(&inst_of).unwrap_or_default();
+        if let Some(e) = match_exc(&ln, name) {
+            match e.kind {
+                ExcKind::FalsePath => continue,
+                ExcKind::Multicycle(cyc) => hold_rel += cyc.saturating_sub(1) as f64 * period,
+            }
+        }
+        let base = job.output_delay_for(name) - hold_rel - job.hold_uncertainty;
+        let mut slack = f64::INFINITY;
+        let mut slack_lane = 0;
+        for (l, &a) in early_arr[idx].iter().enumerate() {
+            if a.is_finite() && a + base < slack {
+                slack = a + base;
+                slack_lane = l;
+            }
+        }
+        if !slack.is_finite() {
+            continue;
+        }
+        hold_endpoints += 1;
+        hold_slacks.push((idx, slack));
+        if simple_ctx {
+            inc_hold.push(HoldRec { idx, base, cons: Vec::new(), ck_slew: input_slew, launch_ck: lck, port: true });
         }
         if slack < 0.0 {
             ths += slack;

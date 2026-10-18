@@ -94,6 +94,8 @@ pub(crate) struct HoldRec {
     pub cons: Vec<Constraint>,
     pub ck_slew: f64,
     pub launch_ck: Option<usize>,
+    /// an output port's check: no library constraint, `base` is the whole requirement
+    pub port: bool,
 }
 
 /// Whether swapping `old` for `new` leaves the **clock network** untouched.
@@ -602,7 +604,7 @@ impl IncGraph {
                 if !a.is_finite() {
                     continue;
                 }
-                let hv = eval_cons_edge(cons, l == 0, r.ck_slew, early.slew[r.idx][l]);
+                let hv = if r.port { 0.0 } else { eval_cons_edge(cons, l == 0, r.ck_slew, early.slew[r.idx][l]) };
                 if a + r.base - hv < slack {
                     slack = a + r.base - hv;
                     slack_lane = l;

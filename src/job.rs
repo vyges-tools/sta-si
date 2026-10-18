@@ -95,6 +95,10 @@ pub struct StaJob {
     /// -1.07 ns against OpenSTA's +0.88 on a block whose SDC constrained no inputs.
     pub input_delay_declared: bool,
     pub output_delay: f64,
+    /// `output_delay` applies to every output port (a `.sta` `output_delay:` key, or an SDC
+    /// default). A port with neither it nor its own `set_output_delay` is UNCONSTRAINED: the
+    /// reference makes no hold check there.
+    pub output_delay_declared: bool,
     pub io_input_delays: Vec<(String, f64)>,
     pub io_output_delays: Vec<(String, f64)>,
     // clock uncertainty (SDC set_clock_uncertainty): tightens setup required time,
@@ -187,6 +191,12 @@ impl StaJob {
             }
         }
         s
+    }
+
+    /// Whether output port `port` carries an output delay — its own, or a declared default. One
+    /// that does not is unconstrained (no hold check there, as in the reference).
+    pub fn output_delay_declared_for(&self, port: &str) -> bool {
+        self.output_delay_declared || self.io_output_delays.iter().any(|(p, _)| vyges_loom::sdc::object_matches(p, port))
     }
 
     /// Resolve the external output delay for a primary output port.
@@ -339,6 +349,7 @@ impl StaJob {
             output_load: num("output_load", 0.005),
             input_delay: num("input_delay", 0.0),
             input_delay_declared: kv.contains_key("input_delay"),
+            output_delay_declared: kv.contains_key("output_delay"),
             output_delay: num("output_delay", 0.0),
             io_input_delays: Vec::new(),
             io_output_delays: Vec::new(),
@@ -526,6 +537,7 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
     }
     if let Some(v) = out_def {
         job.output_delay = v;
+        job.output_delay_declared = true;
     }
     job.setup_uncertainty = sdc.setup_uncertainty;
     job.hold_uncertainty = sdc.hold_uncertainty;

@@ -11,3 +11,4 @@ set_output_delay -clock clk 0 out
 set_input_transition 0.02 [get_ports in1]
 set_input_transition 0.35 [get_ports in2]
 report_checks -path_delay max -fields {slew} -digits 6
+report_checks -path_delay min -fields {slew} -digits 6

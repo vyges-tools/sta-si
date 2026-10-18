@@ -253,6 +253,7 @@ fn base_job(
         output_load: 0.0,
         input_delay: 0.0,
         output_delay: 0.0,
+        output_delay_declared: false,
         io_input_delays: Vec::new(),
         io_output_delays: Vec::new(),
         setup_uncertainty: 0.0,
