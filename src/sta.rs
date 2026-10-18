@@ -1010,6 +1010,32 @@ fn build_report(
     spef: Option<&Spef>,
     capture: bool,
 ) -> Result<(TimingReport, Timing, Option<IncGraph>), StaError> {
+    // A clock source written as a pattern (`create_clock … [get_ports *clk*]`) is every port it
+    // matches, as the reference's `get_ports` resolves it. Kept literal it named no port, the
+    // clock reached nothing, and every register went unchecked ("no constrained paths").
+    let expanded;
+    let job = if job.clocks.iter().any(|(_, s, _)| s.contains(['*', '?'])) {
+        let ports: Vec<&String> = nl.inputs.iter().chain(nl.outputs.iter()).collect();
+        let mut j = job.clone();
+        j.clocks = job
+            .clocks
+            .iter()
+            .flat_map(|(n, s, p)| {
+                if s.contains(['*', '?']) {
+                    ports.iter().filter(|q| vyges_loom::sdc::object_matches(s, q)).map(|q| (n.clone(), (*q).clone(), *p)).collect()
+                } else {
+                    vec![(n.clone(), s.clone(), *p)]
+                }
+            })
+            .collect();
+        if j.clock_port.contains(['*', '?']) {
+            j.clock_port = j.clocks.first().map(|c| c.1.clone()).unwrap_or_default();
+        }
+        expanded = j;
+        &expanded
+    } else {
+        job
+    };
     // The parasitics' femtofarads and ohms in the library's units (see `spef_scales`).
     let (ff_per_cap, ohm_per_r, fs_to_time) = spef_scales(lib.units);
     let r_scale = 1.0 / ohm_per_r;
@@ -1272,6 +1298,35 @@ fn build_report(
             )
             .with_code("STA-UNCONSTRAINED-INPUT")
             .with_objects(head.iter().map(|p| format!("port:{p}")).collect()),
+        );
+    }
+
+    // Path-end checks the reference makes and this timer does not (non-sequential setup/hold,
+    // skew), on cells the design uses: SAID, since a design checked only by them reports nothing
+    // at all otherwise.
+    let mut unmodelled: Vec<String> = nl
+        .insts
+        .iter()
+        .filter_map(|i| lib.cell(&i.cell))
+        // pulse width and period are `report_check_types` checks, not path ends — not these
+        .flat_map(|c| c.pins.values().flat_map(move |p| p.unmodelled_checks.iter().filter(|k| k.starts_with("non_seq") || k.starts_with("skew")).map(move |k| format!("{}/{} {k}", c.name, p.name))))
+        .collect();
+    unmodelled.sort_unstable();
+    unmodelled.dedup();
+    if !unmodelled.is_empty() {
+        let head: Vec<&str> = unmodelled.iter().take(5).map(String::as_str).collect();
+        vyges_events::emit(
+            &vyges_events::Event::new(
+                "vyges-sta-si",
+                vyges_events::Severity::Warn,
+                format!(
+                    "{} library check(s) on cells in the design are not modelled and not reported ({}{})",
+                    unmodelled.len(),
+                    head.join(", "),
+                    if unmodelled.len() > head.len() { ", …" } else { "" }
+                ),
+            )
+            .with_code("STA-UNMODELLED-CHECK"),
         );
     }
 
@@ -2826,6 +2881,14 @@ fn build_report(
     // rule for that lives once in `Exception::covers` rather than being re-derived here.
     let match_exc = |ln: &str, cn: &str| job.exceptions.iter().find(|e| e.covers(ln, cn));
     let mut excluded_setup = vec![false; n]; // false-path endpoints (skip setup)
+    // the reference's rule, where the job asks for it: an output with no output delay ends no path
+    if job.unconstrained_outputs {
+        for (idx, name) in &output_ports {
+            if !job.output_delay_declared_for(name) {
+                excluded_setup[*idx] = true;
+            }
+        }
+    }
     // Required time PER DATA EDGE. `endpoint_req` keeps the tighter of the two so the
     // query API still answers with one number; the scoring loop below uses the pair.
     let mut req_edge = vec![[f64::NAN; 2]; n];

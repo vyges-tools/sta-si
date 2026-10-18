@@ -99,6 +99,10 @@ pub struct StaJob {
     /// default). A port with neither it nor its own `set_output_delay` is UNCONSTRAINED: the
     /// reference makes no hold check there.
     pub output_delay_declared: bool,
+    /// The reference's rule for an output with no output delay: UNCONSTRAINED, no setup check
+    /// either. On for the Tcl adapter (a reference script); off for a `.sta` job, whose format
+    /// has always checked every output at the default output delay.
+    pub unconstrained_outputs: bool,
     pub io_input_delays: Vec<(String, f64)>,
     pub io_output_delays: Vec<(String, f64)>,
     // clock uncertainty (SDC set_clock_uncertainty): tightens setup required time,
@@ -350,6 +354,7 @@ impl StaJob {
             input_delay: num("input_delay", 0.0),
             input_delay_declared: kv.contains_key("input_delay"),
             output_delay_declared: kv.contains_key("output_delay"),
+            unconstrained_outputs: false,
             output_delay: num("output_delay", 0.0),
             io_input_delays: Vec::new(),
             io_output_delays: Vec::new(),

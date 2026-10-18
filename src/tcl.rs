@@ -111,6 +111,7 @@ pub fn adapt(script_path: &str) -> Result<Adapted, TclError> {
     let mut design = String::new();
     let mut netlist = String::new();
     let mut libs: Vec<String> = Vec::new();
+    let mut min_libs: Vec<String> = Vec::new();
     let mut spef: Option<String> = None;
     let mut combined_sdc = String::new(); // sourced .sdc contents + inline SDC lines, in order
     let mut reports = Reports::default();
@@ -133,7 +134,16 @@ pub fn adapt(script_path: &str) -> Result<Adapted, TclError> {
             }
             "read_liberty" => {
                 if let Some(f) = first_file(&toks) {
-                    libs.push(f);
+                    // A `-min` library times the reference's min (hold) analysis only. One
+                    // library set times both analyses here, so it is set aside — and SAID so —
+                    // rather than merged in, where a cell it shares with the max library
+                    // silently took whichever was read first.
+                    if has_flag(&toks, "-min") && !has_flag(&toks, "-max") {
+                        ignored.push(format!("read_liberty -min {f} (a min-analysis library: the max library times both analyses)"));
+                        min_libs.push(f);
+                    } else {
+                        libs.push(f);
+                    }
                 }
             }
             "read_spef" => {
@@ -185,6 +195,10 @@ pub fn adapt(script_path: &str) -> Result<Adapted, TclError> {
     }
     if netlist.is_empty() {
         return Err(TclError("no `read_verilog <netlist>`".into()));
+    }
+    if libs.is_empty() {
+        // only `-min` libraries: they are all there is to time with
+        libs.append(&mut min_libs);
     }
     if libs.is_empty() {
         return Err(TclError("no `read_liberty <lib>`".into()));
@@ -254,6 +268,7 @@ fn base_job(
         input_delay: 0.0,
         output_delay: 0.0,
         output_delay_declared: false,
+        unconstrained_outputs: true,
         io_input_delays: Vec::new(),
         io_output_delays: Vec::new(),
         setup_uncertainty: 0.0,

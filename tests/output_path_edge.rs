@@ -48,3 +48,27 @@ fn an_output_path_is_the_edge_that_set_its_slack() {
     let q = rep.worst_path.iter().find(|p| p.label == "r1/Q").expect("r1/Q on the path");
     assert!((q.arrival - 0.1).abs() < 1e-6, "Q on the falling edge that feeds y's rise, got {}", q.arrival);
 }
+
+// Rule: `create_clock … [get_ports *clk*]` clocks every port the pattern matches (the reference's
+// `get_ports`). Kept literal, `*clk*` named no port and every register went unchecked.
+#[test]
+fn a_clock_source_pattern_is_the_ports_it_matches() {
+    let mut job = StaJob::parse("design: t\nnetlist: x\nlib: x\nclock: clk 5.0\noutput_delay: 0\ninput_slew: 0.05\noutput_load: 0\n", ".").unwrap();
+    job.clocks = vec![("clk".into(), "*cl*".into(), 5.0)];
+    job.clock_port = "*cl*".into();
+    let rep = analyze_inputs(NL, LIB, &job).unwrap();
+    assert_eq!(rep.worst_endpoint, "y", "the register launches once its clock is found");
+    assert!((rep.wns - (5.0 - 1.1)).abs() < 1e-6, "{}", rep.wns);
+}
+
+// Rule (reference scripts): an output with no output delay is UNCONSTRAINED — it ends no path.
+// The `.sta` format keeps checking it at the default delay; the Tcl adapter sets this.
+#[test]
+fn an_output_without_an_output_delay_ends_no_path_in_reference_mode() {
+    let mut job = StaJob::parse("design: t\nnetlist: x\nlib: x\nclock: clk 5.0\ninput_slew: 0.05\noutput_load: 0\n", ".").unwrap();
+    assert_eq!(analyze_inputs(NL, LIB, &job).unwrap().worst_endpoint, "y", ".sta: checked at the default");
+    job.unconstrained_outputs = true;
+    let rep = analyze_inputs(NL, LIB, &job).unwrap();
+    // r1/D is fed by `d`, itself unconstrained (no input delay): nothing is left to check
+    assert_eq!(rep.endpoints, 0, "{}", rep.worst_endpoint);
+}
