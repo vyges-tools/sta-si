@@ -1,0 +1,27 @@
+*SPEF "IEEE 1481-1998"
+*DESIGN "top"
+*DATE "x"
+*VENDOR "x"
+*PROGRAM "x"
+*VERSION "x"
+*DESIGN_FLOW "x"
+*DIVIDER /
+*DELIMITER :
+*BUS_DELIMITER [ ]
+*T_UNIT 1 NS
+*C_UNIT 1 PF
+*R_UNIT 1 KOHM
+*L_UNIT 1 HENRY
+
+*D_NET y 0.04
+*CONN
+*I u1:Y O
+*I u2:A I
+*CAP
+1 u1:Y 0.02
+2 y:1 0.01
+3 u2:A 0.01
+*RES
+1 u1:Y y:1 1.5
+2 y:1 u2:A 2.0
+*END

@@ -83,6 +83,7 @@ fn job() -> StaJob {
         period_ns: 2.0,
         clocks: vec![],
         input_slew: 0.02,
+        input_slews: Vec::new(),
         output_load: 0.005,
         late_derate: 1.10,  // OCV: clock buffer is late ×1.10 on launch...
         early_derate: 0.90, // ...and early ×0.90 on capture -> shared-path pessimism

@@ -52,6 +52,19 @@ pub struct DriveSpec {
     pub input_transition: [f64; 2],
 }
 
+/// One `set_input_transition` on input ports, as written: the object (a port, a pattern, or the
+/// `*INPUTS*` of `[all_inputs]`, `-no_clocks` kept), and which edges (`-rise` / `-fall`, both
+/// when neither) and analyses (`-min` / `-max`, both when neither) its value sets. Applied in
+/// order — a later command replaces what it names — over `input_slew`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PortSlew {
+    pub object: String,
+    pub no_clocks: bool,
+    pub rf: [bool; 2],
+    pub mm: [bool; 2],
+    pub value: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct StaJob {
     pub design: String,
@@ -65,6 +78,8 @@ pub struct StaJob {
     // entry whose source is an internal pin and period the divided value.
     pub clocks: Vec<(String, String, f64)>,
     pub input_slew: f64,
+    /// per-port `set_input_transition`s over `input_slew` — see [`PortSlew`]
+    pub input_slews: Vec<PortSlew>,
     pub output_load: f64,
     // I/O timing budget (from SDC set_input_delay / set_output_delay). `input_delay`
     // is the default arrival at primary inputs; `output_delay` the external delay
@@ -150,6 +165,28 @@ impl StaJob {
             } else {
                 None
             })
+    }
+
+    /// The input transition of input port `port`, `[analysis][edge]` (analysis 0 early / min,
+    /// 1 late / max; edge 0 rise): `input_slew`, then every `set_input_transition` naming the port
+    /// in order, each setting the edges and analyses it names. `is_clock`: the port is a clock
+    /// source, which `[all_inputs -no_clocks]` leaves out.
+    pub fn input_slew_for(&self, port: &str, is_clock: bool) -> [[f64; 2]; 2] {
+        let mut s = [[self.input_slew; 2]; 2];
+        for p in &self.input_slews {
+            let hit = if p.object == "*INPUTS*" { !(p.no_clocks && is_clock) } else { vyges_loom::sdc::object_matches(&p.object, port) };
+            if !hit {
+                continue;
+            }
+            for (mm, row) in s.iter_mut().enumerate() {
+                for (rf, v) in row.iter_mut().enumerate() {
+                    if p.mm[mm] && p.rf[rf] {
+                        *v = p.value;
+                    }
+                }
+            }
+        }
+        s
     }
 
     /// Resolve the external output delay for a primary output port.
@@ -298,6 +335,7 @@ impl StaJob {
             period_ns,
             clocks,
             input_slew: num("input_slew", 0.05),
+            input_slews: Vec::new(),
             output_load: num("output_load", 0.005),
             input_delay: num("input_delay", 0.0),
             input_delay_declared: kv.contains_key("input_delay"),
@@ -491,8 +529,21 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
     }
     job.setup_uncertainty = sdc.setup_uncertainty;
     job.hold_uncertainty = sdc.hold_uncertainty;
-    if let Some(v) = sdc.input_transition {
-        job.input_slew = v;
+    // Each command on the ports it names, per edge and analysis (the reference's
+    // `Sdc::setInputSlew`); one design-wide value let the last command set every input's slew.
+    for e in sdc.env.iter().filter(|e| e.cmd == "set_input_transition") {
+        let has = |f: &str| e.flags.iter().any(|x| x == f);
+        let rf = if has("-rise") || has("-fall") { [has("-rise"), has("-fall")] } else { [true, true] };
+        let mm = if has("-min") || has("-max") { [has("-min"), has("-max")] } else { [true, true] };
+        let no_clocks = e.accessor_flags.iter().any(|f| f == "-no_clocks");
+        // every input, both edges, both analyses: also the design-wide `input_slew` that
+        // consumers reading the scalar see
+        if e.objects.iter().any(|o| o == "*INPUTS*") && !no_clocks && rf == [true, true] && mm == [true, true] {
+            job.input_slew = e.value;
+        }
+        for o in &e.objects {
+            job.input_slews.push(PortSlew { object: o.clone(), no_clocks, rf, mm, value: e.value });
+        }
     }
     for d in &sdc.driving_cells {
         let Some(cell) = d.lib_cell.clone() else { continue };

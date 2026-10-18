@@ -249,6 +249,7 @@ fn base_job(
         // input starts from slew 0; no `set_load`, an output port loads its driver with nothing.
         // (The `.sta` format keeps its own documented defaults.)
         input_slew: 0.0,
+        input_slews: Vec::new(),
         output_load: 0.0,
         input_delay: 0.0,
         output_delay: 0.0,
@@ -570,6 +571,23 @@ mod tests {
         let b = adapt_text("dec", &format!("{HEAD}create_clock -name clk -period 5 [get_ports clk]\nset_input_delay -clock clk 0 {{in1 in2}}\n"));
         assert_eq!(b.job.input_delay_for("in1"), Some(0.0));
         assert_eq!(b.job.input_delay_for("in3"), None);
+    }
+
+    // Rule: each `set_input_transition` sets the ports it names, for the edges (`-rise`/`-fall`)
+    // and analyses (`-min`/`-max`) it names, a later command replacing what it names; one
+    // design-wide value let the last command set every input.
+    #[test]
+    fn input_transitions_are_per_port_edge_and_analysis() {
+        let a = adapt_text(
+            "slew",
+            &format!(
+                "{HEAD}create_clock -name clk -period 5 [get_ports clk]\nset_input_transition 0.1 [all_inputs]\n\
+                 set_input_transition 0.02 [get_ports in1]\nset_input_transition -rise -max 0.4 [get_ports in2]\n"
+            ),
+        );
+        assert_eq!(a.job.input_slew_for("in1", false), [[0.02; 2]; 2]);
+        assert_eq!(a.job.input_slew_for("in2", false), [[0.1, 0.1], [0.4, 0.1]]);
+        assert_eq!(a.job.input_slew_for("in3", false), [[0.1; 2]; 2]);
     }
 
     #[test]

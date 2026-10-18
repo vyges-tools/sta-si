@@ -23,7 +23,7 @@
 //! clocks (incl. generated) are supported — cross-domain paths use the tightest
 //! launch→capture edge relation — and false-path / multicycle **exceptions** drop or
 //! shift paths. With `pba` on, a path-based pass re-times the critical path and its
-//! fan-in alternatives (path-local slew) to catch non-greedy worst paths. Pure std
+//! fan-in alternatives (path-local slew), without GBA's merged worst slew. Pure std
 //! — unit-tested.
 
 use std::collections::{BTreeMap, HashMap};
@@ -300,8 +300,8 @@ pub struct TimingReport {
     // list a hold-fix ECO ranks candidate delay insertions from. Consistent with whs/ths.
     pub hold_slacks: Vec<(PinId, f64)>,
     // path-based analysis: worst setup slack after re-timing critical paths with
-    // path-local slews (Some only when `pba` is enabled). Catches non-greedy worst
-    // paths the graph-based max misses.
+    // path-local slews (Some only when `pba` is enabled): no merged worst slew at each node,
+    // so never more pessimistic than the graph-based number.
     pub pba_wns: Option<f64>,
     /// The units every time and capacitance above is in: the first library's, as the
     /// reference reports (the "ns" in the field comments is that unit for a ns library).
@@ -321,13 +321,15 @@ struct Edge {
 /// A receiver pin's load, `[analysis][edge]`: analysis 0 is EARLY (min caps, hold), 1 LATE
 /// (max caps, setup); edge 0 rise, 1 fall of the driving output. The rise / fall capacitance —
 /// its `_range` minimum for an early analysis — and the plain `capacitance` where the library
-/// states no per-edge value; a CCS receiver model's Miller-aware load everywhere. One rule for
-/// the full and the incremental timer.
+/// states no per-edge value. One rule for the full and the incremental timer.
+///
+/// ⛔ A CCS `receiver_capacitance` model does NOT replace it: the reference's default delay
+/// calculator reduces each net with `Sdc::pinCapacitance` (`ReduceToPi::pinCapacitance`), the
+/// Liberty port's capacitance for that edge and analysis, whatever receiver model the pin also
+/// carries. Measured on the reference's reg1_asap7 test: u2/B loads u1/Y's rising edge with
+/// 0.526025 fF (`rise_capacitance`, the range maximum); the receiver model gave 0.3034.
 pub(crate) fn pin_load_caps(p: &crate::liberty::Pin) -> [[f64; 2]; 2] {
-    match &p.recv {
-        Some(r) if !r.is_empty() => [[p.load_cap(); 2]; 2],
-        _ => [[p.caps.get(true, false), p.caps.get(false, false)], [p.caps.get(true, true), p.caps.get(false, true)]],
-    }
+    [[p.caps.get(true, false), p.caps.get(false, false)], [p.caps.get(true, true), p.caps.get(false, true)]]
 }
 
 struct Net {
@@ -1413,6 +1415,13 @@ fn build_report(
         wave: [[Option<crate::dmp::DriverWaveform>; 2]; 2],
         th: crate::liberty::Thresholds,
     }
+    // Input ports a `set_input_transition` names: their slews, `[analysis][edge]`.
+    let port_slew: HashMap<usize, [[f64; 2]; 2]> = if job.input_slews.is_empty() {
+        HashMap::new()
+    } else {
+        let clock_srcs: std::collections::HashSet<&str> = job.clocks.iter().map(|(_, s, _)| s.as_str()).collect();
+        input_ports.iter().map(|(i, name)| (*i, job.input_slew_for(name, clock_srcs.contains(name.as_str()) || *name == job.clock_port))).collect()
+    };
     let mut port_drive: HashMap<usize, PortDrive> = HashMap::new();
     for (idx, name) in input_ports.iter().filter(|_| !job.driving_cells.is_empty()) {
         let Some(spec) = job.driving_cells.iter().rev().find(|(o, _)| o == "*INPUTS*" || o == name).map(|(_, s)| s) else { continue };
@@ -1580,8 +1589,14 @@ fn build_report(
     // across — and the interconnect loop already alternates the two, which is the fixed
     // point that makes it converge. The FIRST `compute` has no waveform and falls back to
     // the closed form, exactly as before.
-    let drvr_wave: std::cell::RefCell<Vec<[Option<crate::dmp::DriverWaveform>; 2]>> =
-        std::cell::RefCell::new(vec![[None, None]; n]);
+    //
+    // ⛔ PER ANALYSIS AND PER ARC. Every arc into a driver evaluates the gate and its loads, and
+    // arcs with the same output edge MERGE their wire delays and load slews to the worse one for
+    // that analysis (`GraphDelayCalc::annotateLoadDelays`, `delayGreater(.., min_max)`: larger
+    // late, smaller early, delay and slew compared separately). One waveform per driver edge
+    // let the last arc evaluated — in either analysis — decide every wire from that driver.
+    let drvr_wave: std::cell::RefCell<[Vec<[Vec<crate::dmp::DriverWaveform>; 2]>; 2]> =
+        std::cell::RefCell::new([vec![[Vec::new(), Vec::new()]; n], vec![[Vec::new(), Vec::new()]; n]]);
     let mut is_ck = vec![false; n];
     for &i in &ck_node_list {
         is_ck[i] = true;
@@ -1764,11 +1779,20 @@ fn build_report(
         } else {
             f64::INFINITY
         };
+        // this pass re-evaluates every arc of its analysis; the clock-launched pass re-times the
+        // same arcs and leaves the main pass's waveforms as they are
+        if !block_seq {
+            drvr_wave.borrow_mut()[late as usize].iter_mut().for_each(|w| w.iter_mut().for_each(Vec::clear));
+        }
         let mut arr = vec![[init; 2]; n]; // per-lane metric (derated / +-N*sigma)
         let mut arr_nom = vec![[0.0f64; 2]; n];
         let mut var = vec![[0.0f64; 2]; n];
         let mut depth = vec![[0usize; 2]; n];
         let mut slew = vec![[input_slew; 2]; n];
+        // each input port its own `set_input_transition`, per edge, this analysis
+        for (p, s) in &port_slew {
+            slew[*p] = s[late as usize];
+        }
         // a port with a driving cell starts from that cell's slew, not the input slew
         for (p, d) in &port_drive {
             slew[*p] = d.slew[late as usize];
@@ -1776,6 +1800,8 @@ fn build_report(
         // each lane's predecessor AND the predecessor's lane: an inverting arc feeds the other edge,
         // and a reported path has to follow the edge that set the slack, node by node.
         let mut from: Vec<[Pred; 2]> = vec![[None; 2]; n];
+        // a driver lane's slew has been set by one of its arcs (merged from then on)
+        let mut slew_set = vec![[false; 2]; n];
         let mut indeg_work = indeg.clone();
         let mut order: Vec<usize> = Vec::new();
         for v in 0..n {
@@ -1967,8 +1993,8 @@ fn build_report(
                                 if shield[v][mm][ol].is_some() {
                                     ceff_used.borrow_mut()[v][ol] = leff;
                                 }
-                                if let Some(r) = &dmp {
-                                    drvr_wave.borrow_mut()[v][ol] = r.waveform;
+                                if let Some(w) = dmp.as_ref().and_then(|r| r.waveform).filter(|_| !block_seq) {
+                                    drvr_wave.borrow_mut()[late as usize][v][ol].push(w);
                                 }
                                 // CCS current-source delay when the arc carries it; else the
                                 // DMP result, else a plain NLDM lookup.
@@ -2016,6 +2042,15 @@ fn build_report(
                                 } else {
                                     nom
                                 };
+                                // ⛔ The driver's slew merges over its arcs ON ITS OWN — the
+                                // worse for this analysis (`annotateDelaySlew`: `delayGreater(
+                                // gate_slew, prev, min_max)`), not the slew of whichever arc
+                                // wins the arrival. A fast-input arc can set the arrival while
+                                // a slow-input arc sets the slew.
+                                if !slew_set[v][ol] || (late && sout > slew[v][ol]) || (!late && sout < slew[v][ol]) {
+                                    slew[v][ol] = sout;
+                                    slew_set[v][ol] = true;
+                                }
                                 let better = if late {
                                     metric > arr[v][ol]
                                 } else {
@@ -2026,7 +2061,6 @@ fn build_report(
                                     arr_nom[v][ol] = nom;
                                     var[v][ol] = var_c;
                                     depth[v][ol] = stage;
-                                    slew[v][ol] = sout;
                                     from[v][ol] = Some((u, il));
                                 }
                             }
@@ -2278,14 +2312,30 @@ fn build_report(
                                 // Vth/Vl/Vh crossings. Its degenerate branch is the closed
                                 // form's degenerate branch, so the fallback below is only
                                 // for an edge that has not been evaluated yet.
-                                let wv = net_drv[i].map(|dn| port_drive.get(&dn).map_or_else(|| drvr_wave.borrow()[dn], |pd| pd.wave[mm]));
+                                let waves = drvr_wave.borrow();
                                 for l in 0..2 {
                                     // this edge's Elmore: its own receiver caps
                                     let tau = taus[l];
-                                    if let Some(Some(w)) = wv.map(|x| x[l]) {
-                                        let (d, sv) = w.load_delay_slew(tau);
-                                        dl[l] = d as f32 as f64;
-                                        sl[l] = sv as f32 as f64;
+                                    // every arc's waveform onto this edge, merged to the worse
+                                    // for this analysis (a port: its one drive waveform)
+                                    let ws: Vec<crate::dmp::DriverWaveform> = match net_drv[i] {
+                                        Some(dn) => match port_drive.get(&dn) {
+                                            Some(pd) => pd.wave[mm][l].into_iter().collect(),
+                                            None => waves[mm][dn][l].clone(),
+                                        },
+                                        None => Vec::new(),
+                                    };
+                                    if !ws.is_empty() {
+                                        let worse = |a: f64, b: f64| if mm == 1 { a.max(b) } else { a.min(b) };
+                                        let mut merged: Option<(f64, f64)> = None;
+                                        for w in &ws {
+                                            let (d, sv) = w.load_delay_slew(tau);
+                                            let (d, sv) = (d as f32 as f64, sv as f32 as f64);
+                                            merged = Some(merged.map_or((d, sv), |(md, ms)| (worse(md, d), worse(ms, sv))));
+                                        }
+                                        let (d, sv) = merged.expect("non-empty");
+                                        dl[l] = d;
+                                        sl[l] = sv;
                                         continue;
                                     }
                                     let drvr_slew = net_slew[i][l];
@@ -2933,9 +2983,9 @@ fn build_report(
 
     // ---- path-based analysis (optional) ---------------------------------
     // Re-time the worst path and its 1-exchange fan-in alternatives with strictly
-    // path-local slew (flat late derate; AOCV-depth not re-applied). Catches a
-    // non-greedy worst path: where GBA's local max-arrival pick at a reconvergent
-    // node took the faster-slew fan-in but a slower-slew one is worse downstream.
+    // path-local slew (flat late derate; AOCV-depth not re-applied). GBA merges each
+    // node's worst slew over all its arcs, so a path can carry a slew it never had; each
+    // path re-timed with its own slews is what that pessimism costs.
     let pba_wns = if job.pba {
         let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
         for (u, edges) in out_edges.iter().enumerate() {
@@ -3290,6 +3340,30 @@ mod per_edge_load {
         assert_eq!(spef_scales(ps), (1.0, 1000.0, 1e-3));
         assert_eq!(1.0 / spef_scales(LibUnits::default()).1, 1e-3);
         assert_eq!(1.0 / spef_scales(LibUnits::default()).0, 1e-3);
+    }
+
+    /// Reference rule: the default delay calculator loads a net with each pin's Liberty
+    /// capacitance (`Sdc::pinCapacitance` in `ReduceToPi`), per edge and analysis, even where the
+    /// pin also carries a CCS `receiver_capacitance` model. The reference's reg1_asap7 test: u2/B
+    /// loads u1/Y's rise with 0.526025 fF (rise range maximum), not the receiver model's 0.3034.
+    #[test]
+    fn a_receiver_model_does_not_replace_the_pin_capacitance() {
+        let lib = crate::liberty::Lib::parse(
+            r#"library(t) { capacitive_load_unit (1, pf);
+  lu_table_template (r) { variable_1 : input_net_transition; variable_2 : total_output_net_capacitance; index_1 ("0.05"); index_2 ("0.005"); }
+  cell (R) { pin(A) { direction : input; capacitance : 0.0019; rise_capacitance : 0.0021; fall_capacitance : 0.0017;
+                       rise_capacitance_range (0.0015, 0.0021); fall_capacitance_range (0.0011, 0.0017);
+      receiver_capacitance () {
+        receiver_capacitance1_rise (r) { values ("0.0030"); } receiver_capacitance2_rise (r) { values ("0.0030"); }
+        receiver_capacitance1_fall (r) { values ("0.0030"); } receiver_capacitance2_fall (r) { values ("0.0030"); } } }
+    pin(Y) { direction : output; } } }"#,
+        )
+        .unwrap();
+        let a = &lib.cell("R").unwrap().pins["A"];
+        assert!(a.recv.as_ref().is_some_and(|r| !r.is_empty()), "the receiver model is read");
+        let c = pin_load_caps(a);
+        let r = |x: f64| (x * 1e7).round() / 1e7;
+        assert_eq!([r(c[0][0]), r(c[0][1]), r(c[1][0]), r(c[1][1])], [0.0015, 0.0011, 0.0021, 0.0017]);
     }
 
     /// Reference rule: a receiver loads its driver's rising edge with its rise capacitance and

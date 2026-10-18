@@ -1,0 +1,38 @@
+library (m) {
+  delay_model : table_lookup;
+  time_unit : "1ns"; voltage_unit : "1V"; current_unit : "1mA"; pulling_resistance_unit : "1kohm";
+  capacitive_load_unit (1, pf);
+  input_threshold_pct_rise : 50; input_threshold_pct_fall : 50;
+  output_threshold_pct_rise : 50; output_threshold_pct_fall : 50;
+  slew_lower_threshold_pct_rise : 20; slew_upper_threshold_pct_rise : 80;
+  slew_lower_threshold_pct_fall : 20; slew_upper_threshold_pct_fall : 80;
+  nom_voltage : 1.0;
+  lu_table_template (t2) { variable_1 : input_net_transition; variable_2 : total_output_net_capacitance;
+    index_1 ("0.01, 0.4"); index_2 ("0.001, 0.05"); }
+  cell (AND2) {
+    area : 2;
+    pin (A) { direction : input; capacitance : 0.002; }
+    pin (B) { direction : input; capacitance : 0.002; }
+    pin (Y) { direction : output; function : "(A&B)";
+      timing () { related_pin : "A"; timing_sense : positive_unate;
+        cell_rise (t2) { values ("0.020, 0.200", "0.060, 0.260"); }
+        cell_fall (t2) { values ("0.018, 0.180", "0.055, 0.240"); }
+        rise_transition (t2) { values ("0.010, 0.300", "0.050, 0.340"); }
+        fall_transition (t2) { values ("0.009, 0.280", "0.045, 0.320"); } }
+      timing () { related_pin : "B"; timing_sense : positive_unate;
+        cell_rise (t2) { values ("0.030, 0.150", "0.090, 0.210"); }
+        cell_fall (t2) { values ("0.028, 0.140", "0.085, 0.200"); }
+        rise_transition (t2) { values ("0.020, 0.120", "0.090, 0.200"); }
+        fall_transition (t2) { values ("0.018, 0.110", "0.085, 0.190"); } } }
+  }
+  cell (BUF) {
+    area : 1;
+    pin (A) { direction : input; capacitance : 0.002; }
+    pin (Y) { direction : output; function : "A";
+      timing () { related_pin : "A"; timing_sense : positive_unate;
+        cell_rise (t2) { values ("0.015, 0.180", "0.050, 0.230"); }
+        cell_fall (t2) { values ("0.014, 0.170", "0.048, 0.220"); }
+        rise_transition (t2) { values ("0.010, 0.300", "0.050, 0.340"); }
+        fall_transition (t2) { values ("0.009, 0.280", "0.045, 0.320"); } } }
+  }
+}

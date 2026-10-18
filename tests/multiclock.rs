@@ -69,6 +69,7 @@ fn job(clocks: Vec<(String, String, f64)>) -> StaJob {
         period_ns: 10.0,
         clocks,
         input_slew: 0.02,
+        input_slews: Vec::new(),
         output_load: 0.005,
         late_derate: 1.0,
         early_derate: 1.0,

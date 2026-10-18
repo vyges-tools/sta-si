@@ -293,8 +293,8 @@ Run with `--json` for machine-readable output. Capture:
   verdict — the slack numbers and pass/fail.
 - **`worst_endpoint` + `worst_path`** (and the hold path) — the launch/capture pins
   and per-node arrival/slew: **where** the problem is.
-- **`pba_wns_ns`** (if `pba: true`) — flags a non-greedy worst path the graph-based
-  number can miss.
+- **`pba_wns_ns`** (if `pba: true`) — the worst path re-timed with its own slews,
+  without the graph-based number's merged worst slew at each node.
 - For **MCMM**, the worst setup/hold **and the binding corner** per check.
 
 How those feed the next step:
@@ -561,8 +561,8 @@ taken from the resulting waveform's threshold crossings. A resistive net therefo
 hands the next stage a slower edge, raising its delay. (A transient
 waveform-into-RC solve is also available, `rc_model: transient`, as an explicit
 opt-in beside that model rather than in front of it.) With `pba: true` it adds **path-based analysis** — re-timing the
-critical path and its fan-in alternatives with strictly path-local slews, catching
-a non-greedy worst path that the graph-based max can miss. It also writes **SDF
+critical path and its fan-in alternatives with strictly path-local slews, removing
+the pessimism of the graph-based merge (each node's worst slew over all its arcs). It also writes **SDF
 back-annotation** (`--sdf`: IOPATH + setup/hold TIMINGCHECK + SPEF INTERCONNECT, for
 gate-level sim) and lints constraints with **`sdc-lint`** (completeness/consistency
 of the SDC, independent of the timing run). Fully offline, no external deps, 216 tests

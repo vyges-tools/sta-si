@@ -1,0 +1,24 @@
+$ vyges-sta-si tcl examples/arc_merge/arc_merge.tcl
+exit: 0
+--- stdout ---
+# vyges-sta-si <VERSION> — OpenSTA-compatible adapter (Vyges engine)
+# design top   clock clk @ 2.0000 ns
+
+Path Type: max (Setup)
+  Startpoint: in2
+  Endpoint:   out
+  Path Group: clk
+       Arrival      Slew   Node
+        0.0000    0.3500   in2
+        0.0000    0.3500   u1/B
+        0.1690    0.2428   u1/Y
+        0.2237    0.2632   u2/A
+        0.2579    0.0301   u2/Y
+        0.2579    0.0301   out
+    slack 1.7421 (MET)
+
+--- stderr ---
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 2 instance(s) of 2 master(s); 2 timed, 0 physical-only","objects":["clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 2 cell(s) loaded, 2 used by the design","objects":["clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-SPEF","raw_msg":"SPEF covers 1 of 4 design net(s) (25.0%); 1 net(s) in the file, all named","objects":["clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.7421 ns, TNS 0.0000 ns, WHS inf ns — 0 violation(s)"}

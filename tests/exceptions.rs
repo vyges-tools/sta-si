@@ -66,6 +66,7 @@ fn job(exceptions: Vec<Exception>) -> StaJob {
         period_ns: 0.25, // tight: the reg→reg path violates at 1 cycle
         clocks: vec![],
         input_slew: 0.02,
+        input_slews: Vec::new(),
         output_load: 0.005,
         late_derate: 1.0,
         early_derate: 1.0,

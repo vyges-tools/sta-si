@@ -53,6 +53,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         period_ns: 1.0,
         clocks: vec![],
         input_slew: 0.02,
+        input_slews: Vec::new(),
         output_load: 0.005,
         input_delay: 0.0,
         input_delay_declared: true,

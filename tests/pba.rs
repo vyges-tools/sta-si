@@ -1,9 +1,10 @@
-// Path-based analysis catches a non-greedy worst path. Gate G's output O is fed by
-// two arcs: I2->O arrives later (0.20) with a FAST output slew (0.05), I1->O
-// arrives earlier (0.10) with a SLOW output slew (0.50). GBA keeps the later
-// arrival (I2) and its fast slew, so the slew-sensitive next stage H looks cheap.
-// But the I1 route, with its slow slew, blows up H's delay — the true worst path.
-// GBA misses it (optimistic); PBA re-times the I1 alternative and finds it.
+// Path-based analysis removes graph-based pessimism. Gate G's output O is fed by two
+// arcs: I2->O arrives later (0.20) with a FAST output slew (0.05), I1->O arrives
+// earlier (0.10) with a SLOW output slew (0.50). GBA, as the reference times it, merges
+// O's arrival AND its slew to the worst over the arcs, each on its own
+// (`annotateDelaySlew`): arrival 0.20 with slew 0.50, so H takes 2.0 — a path no input
+// actually has (arrival 2.20, WNS 0.80). PBA re-times each path with its own slews: the
+// real worst is I1 (0.10 + 2.0 = 2.10, WNS 0.90).
 use vyges_sta_si::engine::analyze_inputs;
 use vyges_sta_si::job::StaJob;
 
@@ -66,6 +67,7 @@ fn job(pba: bool) -> StaJob {
         period_ns: 3.0,
         clocks: vec![],
         input_slew: 0.02,
+        input_slews: Vec::new(),
         output_load: 0.005,
         late_derate: 1.0,
         early_derate: 1.0,
@@ -96,25 +98,12 @@ fn job(pba: bool) -> StaJob {
 }
 
 #[test]
-fn pba_catches_non_greedy_worst_path() {
+fn pba_removes_the_merged_slew_pessimism() {
     let rep = analyze_inputs(NL, LIB, &job(true)).unwrap();
-    // GBA picks I2 at O (later arrival, fast slew) -> H looks cheap -> arrival ~0.30
-    // -> WNS ~2.70. The real worst (via I1, slow slew -> H=2.0) is arrival ~2.10.
-    assert!(
-        rep.wns > 2.5,
-        "GBA (optimistic) WNS should be ~2.70, got {}",
-        rep.wns
-    );
+    assert!((rep.wns - 0.80).abs() < 1e-6, "GBA: latest arrival with the worst slew, got {}", rep.wns);
     let pba = rep.pba_wns.expect("PBA enabled");
-    assert!(
-        (pba - 0.90).abs() < 0.05,
-        "PBA WNS should be ~0.90 (arrival 2.10), got {pba}"
-    );
-    assert!(
-        pba < rep.wns - 1.5,
-        "PBA must catch the optimism: pba {pba} vs gba {}",
-        rep.wns
-    );
+    assert!((pba - 0.90).abs() < 0.05, "PBA WNS should be ~0.90 (arrival 2.10), got {pba}");
+    assert!(pba >= rep.wns, "PBA is never more pessimistic than GBA: pba {pba} vs gba {}", rep.wns);
 }
 
 #[test]
