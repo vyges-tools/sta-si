@@ -1309,7 +1309,8 @@ fn build_report(
         .iter()
         .filter_map(|i| lib.cell(&i.cell))
         // pulse width and period are `report_check_types` checks, not path ends — not these
-        .flat_map(|c| c.pins.values().flat_map(move |p| p.unmodelled_checks.iter().filter(|k| k.starts_with("non_seq") || k.starts_with("skew")).map(move |k| format!("{}/{} {k}", c.name, p.name))))
+        // and `retaining_*`: the reference times its min analysis with them, this timer with the arc
+        .flat_map(|c| c.pins.values().flat_map(move |p| p.unmodelled_checks.iter().filter(|k| k.starts_with("non_seq") || k.starts_with("skew") || k.starts_with("retaining")).map(move |k| format!("{}/{} {k}", c.name, p.name))))
         .collect();
     unmodelled.sort_unstable();
     unmodelled.dedup();
@@ -1320,7 +1321,7 @@ fn build_report(
                 "vyges-sta-si",
                 vyges_events::Severity::Warn,
                 format!(
-                    "{} library check(s) on cells in the design are not modelled and not reported ({}{})",
+                    "{} library check(s) or min-analysis table(s) on cells in the design are not modelled ({}{})",
                     unmodelled.len(),
                     head.join(", "),
                     if unmodelled.len() > head.len() { ", …" } else { "" }
