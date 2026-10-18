@@ -94,8 +94,8 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "vyges-events"
-version = "0.1.40"
-source = "git+https://github.com/vyges-tools/events?branch=main#bafa275a09ed85f8935f37d63923e83f18592cc1"
+version = "0.1.41"
+source = "git+https://github.com/vyges-tools/events?branch=main#dc62f630beaa55f7b3bc25f4cf93192c63c5786d"
 dependencies = [
  "serde",
  "serde_json",
@@ -103,12 +103,12 @@ dependencies = [
 
 [[package]]
 name = "vyges-loom"
-version = "0.1.41"
-source = "git+https://github.com/vyges-tools/loom?branch=main#94ea28ab1b57957c70c318d4224a702aad1a7750"
+version = "0.1.42"
+source = "git+https://github.com/vyges-tools/loom?branch=main#3be9660130387b240401adec7bf08ac22dd824c3"
 
 [[package]]
 name = "vyges-sta-si"
-version = "0.1.41"
+version = "0.1.42"
 dependencies = [
  "vyges-events",
  "vyges-loom",
