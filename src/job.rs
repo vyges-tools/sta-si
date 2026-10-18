@@ -427,10 +427,16 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
     job.ideal_clocks = ideal_clocks(sdc);
     // clocks: SDC is authoritative when present.
     if !sdc.clocks.is_empty() {
+        // `create_clock -period P {a b c}` is ONE clock on three ports, each a clock source:
+        // one entry per source, all under the clock's name (a virtual clock keeps its one
+        // sourceless entry). Keeping only the first left the others' registers unclocked.
         job.clocks = sdc
             .clocks
             .iter()
-            .map(|c| (c.name.clone(), c.source.clone(), c.period))
+            .flat_map(|c| {
+                let srcs = if c.sources.is_empty() { vec![c.source.clone()] } else { c.sources.clone() };
+                srcs.into_iter().map(move |s| (c.name.clone(), s, c.period))
+            })
             .collect();
         // A VIRTUAL CLOCK HAS NO SOURCE, and that is a legal SDC construct rather than an
         // omission: `create_clock -name clk -period 1.0` with no object list defines a reference

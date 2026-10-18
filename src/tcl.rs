@@ -234,7 +234,10 @@ fn base_job(
 ) -> StaJob {
     StaJob {
         rc_model: "elmore".into(),
-        input_delay_declared: true,
+        // The script's SDC is the whole constraint set, as in the reference: an input with no
+        // `set_input_delay` is UNCONSTRAINED and starts no path (the merge declares a default
+        // when one is given). `true` here timed every such input as arriving at 0.
+        input_delay_declared: false,
         design,
         netlist,
         libs,
@@ -537,6 +540,36 @@ mod tests {
         assert_eq!(tokenize(&c[0]), ["read_verilog", "top.v"]); // continuation joined
         assert_eq!(c[1], "link_design top");
         assert_eq!(c[2], "report_wns");
+    }
+
+    fn adapt_text(name: &str, body: &str) -> Adapted {
+        let p = std::env::temp_dir().join(format!("vyg-tcl-{}-{name}.tcl", std::process::id()));
+        std::fs::write(&p, body).unwrap();
+        let a = adapt(p.to_str().unwrap()).unwrap();
+        let _ = std::fs::remove_file(&p);
+        a
+    }
+
+    const HEAD: &str = "read_liberty c.lib\nread_verilog t.v\nlink_design top\n";
+
+    // Rule: `create_clock -name clk -period P {clk1 clk2 clk3}` is ONE clock whose every port is
+    // a source (the reference's own reg1_asap7 test). Taking only the first left r2/r3 unclocked.
+    #[test]
+    fn one_clock_on_several_ports_clocks_each() {
+        let a = adapt_text("multi", &format!("{HEAD}create_clock -name clk -period 500 {{clk1 clk2 clk3}}\n"));
+        let srcs: Vec<&str> = a.job.clocks.iter().map(|(n, s, _)| { assert_eq!(n, "clk"); s.as_str() }).collect();
+        assert_eq!(srcs, ["clk1", "clk2", "clk3"]);
+    }
+
+    // Rule: the script's SDC is the whole constraint set — an input with no set_input_delay is
+    // unconstrained and starts no path; a default (`[all_inputs]`) or per-port delay declares it.
+    #[test]
+    fn an_input_without_input_delay_is_unconstrained() {
+        let a = adapt_text("unc", &format!("{HEAD}create_clock -name clk -period 5 [get_ports clk]\n"));
+        assert_eq!(a.job.input_delay_for("in1"), None);
+        let b = adapt_text("dec", &format!("{HEAD}create_clock -name clk -period 5 [get_ports clk]\nset_input_delay -clock clk 0 {{in1 in2}}\n"));
+        assert_eq!(b.job.input_delay_for("in1"), Some(0.0));
+        assert_eq!(b.job.input_delay_for("in3"), None);
     }
 
     #[test]

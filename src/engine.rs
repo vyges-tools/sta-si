@@ -272,7 +272,14 @@ pub fn lint_job(job: &StaJob) -> Result<crate::sdclint::LintReport, StaError> {
             // no SDC file — lint the inline `.sta` clocks (still catches a bad period,
             // a duplicate, a registered design with no clock at all).
             let mut s = crate::sdc::Sdc::default();
+            // entries sharing a name are one clock on several sources
             for (name, source, period) in &job.clocks {
+                if let Some(c) = s.clocks.iter_mut().find(|c| &c.name == name) {
+                    if !source.is_empty() {
+                        c.sources.push(source.clone());
+                    }
+                    continue;
+                }
                 s.clocks.push(crate::sdc::SdcClock {
                     name: name.clone(),
                     source: source.clone(),
@@ -453,12 +460,14 @@ pub fn render_report(job: &StaJob, rep: &TimingReport) -> String {
     // every time below is in the first library's unit
     let tu = rep.units.time_label();
     s.push_str(&format!("STA report — design {}\n", job.design));
-    if job.clocks.len() > 1 {
-        let cl: Vec<String> = job
-            .clocks
-            .iter()
-            .map(|(n, _, p)| format!("{n}@{p:.2}{tu}"))
-            .collect();
+    let mut cl: Vec<String> = Vec::new();
+    for (n, _, p) in &job.clocks {
+        let c = format!("{n}@{p:.2}{tu}");
+        if !cl.contains(&c) {
+            cl.push(c);
+        }
+    }
+    if cl.len() > 1 {
         s.push_str(&format!(
             "  clocks: {}   xtalk_miller {:.2}\n",
             cl.join(", "),
