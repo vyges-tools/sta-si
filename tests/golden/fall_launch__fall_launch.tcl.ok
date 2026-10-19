@@ -1,0 +1,43 @@
+$ vyges-sta-si tcl examples/fall_launch/fall_launch.tcl
+exit: 0
+--- stdout ---
+# vyges-sta-si <VERSION> — OpenSTA-compatible adapter (Vyges engine)
+# design fall_launch   clock clk @ 2.0000 ns
+
+Path Type: max (Setup)
+  Startpoint: clk
+  Endpoint:   r5/D
+  Path Group: clk
+       Arrival      Slew   Node
+        0.0000    0.0000   clk
+        0.0000    0.0000   n1/CLK
+        0.1000    0.0300   n1/Q
+        0.1000    0.0300   b1/A
+        0.1500    0.0200   b1/X
+        0.1500    0.0200   a5/A
+        0.2100    0.0200   a5/X
+        0.2100    0.0200   r5/D
+    slack 0.7400 (MET)
+
+Path Type: min (Hold)
+  Startpoint: clk
+  Endpoint:   r5/D
+  Path Group: clk
+       Arrival      Slew   Node
+        0.0000    0.0000   clk
+        0.0000    0.0000   r3/CLK
+        0.1000    0.0300   r3/Q
+        0.1000    0.0300   b3a/A
+        0.1500    0.0200   b3a/X
+        0.1500    0.0200   b3b/A
+        0.2000    0.0200   b3b/X
+        0.2000    0.0200   a5/B
+        0.2600    0.0200   a5/X
+        0.2600    0.0200   r5/D
+    slack 0.2400 (MET)
+
+--- stderr ---
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 9 instance(s) of 4 master(s); 9 timed, 0 physical-only","objects":["clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 4 cell(s) loaded, 4 used by the design","objects":["clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-UNCONSTRAINED-INPUT","raw_msg":"2 input port(s) have no declared arrival and start no timed path (d1, d3). Add set_input_delay to time them.","objects":["port:d1","port:d3"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 0.7400 ns, TNS 0.0000 ns, WHS 0.2400 ns — 0 violation(s)"}

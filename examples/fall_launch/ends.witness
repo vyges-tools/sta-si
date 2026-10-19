@@ -1,0 +1,13 @@
+# The reference's per-endpoint witness for fall_launch.tcl, NOT a golden case (`-to` is outside
+# the adapter's subset): `instruments/sta-si/tcl-witness.sh <dir> ends.witness lib`.
+# each register's setup and hold check on its own.
+read_liberty fall_launch.lib
+read_verilog fall_launch.v
+link_design fall_launch
+create_clock -name clk -period 2.0 [get_ports clk]
+report_checks -path_delay max -to r2/D -digits 4
+report_checks -path_delay max -to n4/D -digits 4
+report_checks -path_delay min -to r2/D -digits 4
+report_checks -path_delay min -to n4/D -digits 4
+report_checks -path_delay max -to r5/D -digits 4
+report_checks -path_delay min -to r5/D -digits 4
