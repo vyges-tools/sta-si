@@ -3007,13 +3007,34 @@ fn build_report(
     let crpr_on = job.crpr;
     // CRPR credit for a (launch CK, capture CK) pair: the OCV spread at their
     // common clock node, i.e. late − early arrival there (>= 0).
-    let crpr_credit = |lck: usize, cck: usize| -> f64 {
+    // The edge a clock path carries at node `p`: from its clock pin `ck`, arriving on `lane`, back
+    // along that analysis's per-edge predecessors.
+    let lane_at = |from: &[[Pred; 2]], ck: usize, lane: usize, p: usize| -> Option<usize> {
+        let (mut v, mut l) = (ck, lane);
+        loop {
+            if v == p {
+                return Some(l);
+            }
+            (v, l) = from[v][l]?;
+        }
+    };
+    // CRPR as the reference finds it (`CheckCrpr::findCrpr` / `findCrpr1`, `same_pin` mode): at the
+    // pin the launch and capture clock paths share, each path's own spread — its arrival against
+    // the OPPOSITE analysis's arrival of the SAME edge there — and the smaller of the two. `setup`:
+    // the launch clock path is the late one and the capture the early, else the reverse. One
+    // corner, no derate: the two analyses agree edge for edge, and the credit is 0. Taken from the
+    // nodes' collapsed arrivals instead (the latest edge late, the earliest early) it was the
+    // rise/fall spread of the clock tree, a credit the reference never gives.
+    let crpr_credit = |lck: usize, cck: usize, cl: usize, setup: bool| -> f64 {
         if !crpr_on {
             return 0.0;
         }
-        common_point(lck, cck)
-            .map(|p| (arrival[p] - arr_min[p]).max(0.0))
-            .unwrap_or(0.0)
+        let Some(p) = common_point(lck, cck) else { return 0.0 };
+        let (lf, cf) = if setup { (&late_from, &early_from) } else { (&early_from, &late_from) };
+        let ll = ck_lane[lck].unwrap_or(0);
+        let (Some(ls), Some(cs)) = (lane_at(lf, lck, ll, p), lane_at(cf, cck, cl, p)) else { return 0.0 };
+        let spread = |l: usize| ((late_arr[p][l] as f32) - (early_arr[p][l] as f32)).abs() as f64;
+        spread(ls).min(spread(cs))
     };
 
     // ---- multi-clock: which clock reaches each flop, and the launch→capture
@@ -3182,10 +3203,6 @@ fn build_report(
         let mut checked = false;
         for (r, run) in runs.iter().enumerate() {
             let lck = launch_ck(*idx, run.from);
-            let crpr = match (lck, cap) {
-                (Some(l), Some(c)) => crpr_credit(l, c),
-                _ => 0.0,
-            };
             let pl = lck.map(&clock_period_of).unwrap_or(pc);
             let ln = lck.map(&inst_of).unwrap_or_default();
             // A `-hold` multicycle does not move the SETUP check, and `-start` counts the launch
@@ -3208,6 +3225,10 @@ fn build_report(
                 let cl = usize::from(c.clk_edge == ClkEdge::Fall);
                 let cap_early = cap.map(|i| early_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
                 let ck_slew = cap.map(|i| late_slew[i][cl]).unwrap_or(input_slew);
+                let crpr = match (lck, cap) {
+                    (Some(l), Some(c)) => crpr_credit(l, c, cl, true),
+                    _ => 0.0,
+                };
                 (cap_early + edge_relation(pl, run.edge, pc, cl).0 + shift + crpr - job.setup_uncertainty, ck_slew)
             };
             // ⛔ PER DATA EDGE, for the same reason as hold: a check exists for one edge, so
@@ -3509,14 +3530,14 @@ fn build_report(
             if is_async(lck, cap) {
                 continue; // async clock groups: no hold check
             }
-            let crpr = match (lck, cap) {
-                (Some(l), Some(c)) => crpr_credit(l, c),
-                _ => 0.0,
-            };
             // Each check at ITS capture edge: that edge's late clock arrival and early slew, and
             // the hold relation from this run's launch edge to it.
             let base_of = |c: &Constraint| -> (f64, f64) {
                 let cl = usize::from(c.clk_edge == ClkEdge::Fall);
+                let crpr = match (lck, cap) {
+                    (Some(l), Some(c)) => crpr_credit(l, c, cl, false),
+                    _ => 0.0,
+                };
                 let cap_late = cap.map(|i| late_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
                 let ck_slew = cap.map(|i| early_slew[i][cl]).unwrap_or(input_slew);
                 let hold_rel = edge_relation(pl, run.edge, pc, cl).1 + shift;
@@ -3777,10 +3798,6 @@ fn build_report(
             let cap = ck_node(ck);
             let pc = cap.map(&clock_period_of).unwrap_or(period);
             let pl = pl_or(pc);
-            let crpr = match (lck, cap) {
-                (Some(a), Some(c)) => crpr_credit(a, c),
-                _ => 0.0,
-            };
             let shift = if max {
                 let setup_exc = |e: &&Exception| !(matches!(e.kind, ExcKind::Multicycle(_)) && e.hold);
                 match job.exceptions.iter().filter(setup_exc).find(|e| e.covers(&ln, &inst_of(v))) {
@@ -3800,21 +3817,25 @@ fn build_report(
             // the tightest one set the slack
             let terms = cons.iter().filter(|c| checks_edge(c, l == 0)).map(|c| {
                 let cl = usize::from(c.clk_edge == ClkEdge::Fall);
+                let crpr = match (lck, cap) {
+                    (Some(a), Some(c)) => crpr_credit(a, c, cl, max),
+                    _ => 0.0,
+                };
                 if max {
                     let cap_early = cap.map(|i| early_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
                     let ck_slew = cap.map(|i| late_slew[i][cl]).unwrap_or(input_slew);
                     let rel = edge_relation(pl, run.edge, pc, cl).0 + shift;
                     let req = cap_early + rel + crpr - job.setup_uncertainty - c.eval_edge(l == 0, ck_slew, late_slew[v][l]);
-                    (req, cl, cap_early, rel)
+                    (req, cl, cap_early, rel, crpr)
                 } else {
                     let cap_late = cap.map(|i| late_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
                     let ck_slew = cap.map(|i| early_slew[i][cl]).unwrap_or(input_slew);
                     let rel = edge_relation(pl, run.edge, pc, cl).1 + shift;
                     let req = cap_late + rel + job.hold_uncertainty - crpr + c.eval_edge(l == 0, ck_slew, early_slew[v][l]);
-                    (req, cl, cap_late, rel)
+                    (req, cl, cap_late, rel, crpr)
                 }
             });
-            let (req, cl, cap_arr, rel) = if max {
+            let (req, cl, cap_arr, rel, crpr) = if max {
                 terms.min_by(|a, b| a.0.total_cmp(&b.0))?
             } else {
                 terms.max_by(|a, b| a.0.total_cmp(&b.0))?

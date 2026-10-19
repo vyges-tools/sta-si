@@ -132,9 +132,10 @@ fn crpr_removes_shared_clock_pessimism() {
         shared_off.wns,
         flat.wns
     );
-    // CRPR adds it back -> the fully-shared clock cancels and slack matches flat.
+    // CRPR adds it back -> the fully-shared clock cancels and slack matches flat (to float: the
+    // reference takes each path's spread in float, `CheckCrpr::crprArrivalDiff`).
     assert!(
-        (shared_on.wns - flat.wns).abs() < 1e-9,
+        (shared_on.wns - flat.wns).abs() < 1e-6,
         "CRPR did not fully cancel shared clock: on {} vs flat {}",
         shared_on.wns,
         flat.wns
@@ -161,4 +162,49 @@ fn crpr_also_relaxes_hold() {
         shared_on.whs,
         shared_off.whs
     );
+}
+
+// The credit is each path's spread on its OWN edge at the common pin (`CheckCrpr::findCrpr1`,
+// `same_pin` mode): its arrival against the other analysis's arrival of that edge, the smaller of
+// the launch's and the capture's. With no derate the two analyses agree edge for edge, so a clock
+// buffer far slower rising (0.30) than falling (0.10) leaves NOTHING to credit. Taken from the
+// node's collapsed arrivals (latest edge late, earliest early) it credited the 0.20 rise/fall
+// spread: post-CTS sky130 reports read 0.0642 of pessimism removal where the reference reads 0.
+const LIB_ASYM: &str = r#"
+library (crpr_asym) {
+  cell (CLKBUF) {
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (X) {
+      direction : output;
+      timing () {
+        related_pin : "A"; timing_sense : positive_unate;
+        cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.30, 0.30", "0.30, 0.30" ); }
+        cell_fall (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.10, 0.10", "0.10, 0.10" ); }
+        rise_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.03", "0.03, 0.03" ); }
+        fall_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.03", "0.03, 0.03" ); }
+      }
+    }
+  }
+}
+"#;
+
+const NL_ASYM: &str =
+    "module c ( clk, din, dout ); input clk, din; output dout; wire q1, q2, n1, ckg;\n\
+                       INV ob ( .A(din), .Y(dout) );\n\
+                       CLKBUF cb ( .A(clk), .X(ckg) );\n\
+                       DFF r1 ( .CK(ckg), .D(q2), .Q(q1) );\n\
+                       INV g1 ( .A(q1),   .Y(n1) );\n\
+                       DFF r2 ( .CK(ckg), .D(n1), .Q(q2) );\n\
+                       endmodule";
+
+#[test]
+fn a_rise_fall_spread_on_the_common_clock_is_not_credited() {
+    let lib = format!("{}{}", &LIB[..LIB.rfind('}').unwrap()], &LIB_ASYM[LIB_ASYM.find("cell (CLKBUF)").unwrap()..]);
+    let mut on = job();
+    on.late_derate = 1.0;
+    on.early_derate = 1.0;
+    let mut off = on.clone();
+    off.crpr = false;
+    let (a, b) = (analyze_inputs(NL_ASYM, &lib, &on).unwrap(), analyze_inputs(NL_ASYM, &lib, &off).unwrap());
+    assert!((a.wns - b.wns).abs() < 1e-9, "setup: crpr on {} off {}", a.wns, b.wns);
 }
