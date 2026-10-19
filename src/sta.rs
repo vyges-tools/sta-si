@@ -2046,6 +2046,22 @@ fn build_report(
                                 Some(isl) => (0.0, isl[l].max(f64::MIN_POSITIVE)),
                                 None => (nd[*i][l], ns[*i][l]),
                             };
+                            // No RC model gave this load a slew (0 = the driver's): the reference
+                            // still re-expresses the driver's slew, and shifts the wire delay, at
+                            // the LOAD's library thresholds (`LumpedCapDelayCalc::makeResult` →
+                            // `thresholdAdjust`), float-stored. Never taken for one library.
+                            let (d, sink_slew) = match (sink_slew == 0.0 && ideal_slew[v].is_none(), port_drive.get(&u)) {
+                                (true, drive) => {
+                                    let (th_d, th_l) = (drive.map_or_else(|| th_of(u), |pd| pd.th), th_of(v));
+                                    if th_d != th_l {
+                                        let (dd, ss) = threshold_adjust(&th_d, &th_l, l == 0, d, slew[u][l]);
+                                        (dd as f32 as f64, ss as f32 as f64)
+                                    } else {
+                                        (d, sink_slew)
+                                    }
+                                }
+                                (false, _) => (d, sink_slew),
+                            };
                             let a = arr[u][l];
                             if !a.is_finite() {
                                 continue;
