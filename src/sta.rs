@@ -3694,9 +3694,15 @@ fn build_report(
             if k.is_none() && !in_port.contains(&s0) {
                 return None; // a clock used as data: not reported here
             }
-            let lck = k.map(|k| chain[k].0);
+            // the launching clock pin as the check was scored with it (`launch_ck` over the merged
+            // predecessors), which on a design with several clocks need not be the one this
+            // edge's path reaches
+            let lck = launch_ck(v, if max { run.from } else { run.from_min });
             let src_name = lck.and_then(clock_name_of).unwrap_or(primary_clock);
-            let pl = lck.map(&clock_period_of).unwrap_or(period);
+            // the launch clock's period; with no launching clock pin (an input), the period the
+            // check defaults to: the capture clock's for a register, the job's for an output
+            let pl_or = |default: f64| lck.map(&clock_period_of).unwrap_or(default);
+            let pl = pl_or(period);
             let launch_edge = if k.is_some() { s0l } else { 0 };
             let launch = if launch_edge == 1 { pl / 2.0 } else { 0.0 };
             let src_clock = clock_line(src_name, launch_edge == 0, launch);
@@ -3770,6 +3776,7 @@ fn build_report(
             };
             let cap = ck_node(ck);
             let pc = cap.map(&clock_period_of).unwrap_or(period);
+            let pl = pl_or(pc);
             let crpr = match (lck, cap) {
                 (Some(a), Some(c)) => crpr_credit(a, c),
                 _ => 0.0,
