@@ -1,40 +1,64 @@
 $ vyges-sta-si tcl examples/fall_launch/fall_launch.tcl
 exit: 0
 --- stdout ---
-# vyges-sta-si <VERSION> — OpenSTA-compatible adapter (Vyges engine)
-# design fall_launch   clock clk @ 2.0000 ns
+Startpoint: n1 (falling edge-triggered flip-flop clocked by clk)
+Endpoint: r5 (rising edge-triggered flip-flop clocked by clk)
+Path Group: clk
+Path Type: max
 
-Path Type: max (Setup)
-  Startpoint: clk
-  Endpoint:   r5/D
-  Path Group: clk
-       Arrival      Slew   Node
-        0.0000    0.0000   clk
-        0.0000    0.0000   n1/CLK
-        0.1000    0.0300   n1/Q
-        0.1000    0.0300   b1/A
-        0.1500    0.0200   b1/X
-        0.1500    0.0200   a5/A
-        0.2100    0.0200   a5/X
-        0.2100    0.0200   r5/D
-    slack 0.7400 (MET)
+    Delay      Time   Description
+-------------------------------------------------------------
+   1.0000    1.0000   clock clk (fall edge)
+   0.0000    1.0000   clock network delay (ideal)
+   0.0000    1.0000 v n1/CLK (DFFN)
+   0.1000    1.1000 ^ n1/Q (DFFN)
+   0.0500    1.1500 ^ b1/X (BUF)
+   0.0600    1.2100 ^ a5/X (AND2)
+   0.0000    1.2100 ^ r5/D (DFF)
+             1.2100   data arrival time
 
-Path Type: min (Hold)
-  Startpoint: clk
-  Endpoint:   r5/D
-  Path Group: clk
-       Arrival      Slew   Node
-        0.0000    0.0000   clk
-        0.0000    0.0000   r3/CLK
-        0.1000    0.0300   r3/Q
-        0.1000    0.0300   b3a/A
-        0.1500    0.0200   b3a/X
-        0.1500    0.0200   b3b/A
-        0.2000    0.0200   b3b/X
-        0.2000    0.0200   a5/B
-        0.2600    0.0200   a5/X
-        0.2600    0.0200   r5/D
-    slack 0.2400 (MET)
+   2.0000    2.0000   clock clk (rise edge)
+   0.0000    2.0000   clock network delay (ideal)
+   0.0000    2.0000   clock reconvergence pessimism
+             2.0000 ^ r5/CLK (DFF)
+  -0.0500    1.9500   library setup time
+             1.9500   data required time
+-------------------------------------------------------------
+             1.9500   data required time
+            -1.2100   data arrival time
+-------------------------------------------------------------
+             0.7400   slack (MET)
+
+
+Startpoint: r3 (rising edge-triggered flip-flop clocked by clk)
+Endpoint: r5 (rising edge-triggered flip-flop clocked by clk)
+Path Group: clk
+Path Type: min
+
+    Delay      Time   Description
+-------------------------------------------------------------
+   0.0000    0.0000   clock clk (rise edge)
+   0.0000    0.0000   clock network delay (ideal)
+   0.0000    0.0000 ^ r3/CLK (DFF)
+   0.1000    0.1000 ^ r3/Q (DFF)
+   0.0500    0.1500 ^ b3a/X (BUF)
+   0.0500    0.2000 ^ b3b/X (BUF)
+   0.0600    0.2600 ^ a5/X (AND2)
+   0.0000    0.2600 ^ r5/D (DFF)
+             0.2600   data arrival time
+
+   0.0000    0.0000   clock clk (rise edge)
+   0.0000    0.0000   clock network delay (ideal)
+   0.0000    0.0000   clock reconvergence pessimism
+             0.0000 ^ r5/CLK (DFF)
+   0.0200    0.0200   library hold time
+             0.0200   data required time
+-------------------------------------------------------------
+             0.0200   data required time
+            -0.2600   data arrival time
+-------------------------------------------------------------
+             0.2400   slack (MET)
+
 
 --- stderr ---
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 9 instance(s) of 4 master(s); 9 timed, 0 physical-only","objects":["clock:clk"]}

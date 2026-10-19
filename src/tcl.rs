@@ -37,9 +37,34 @@ impl std::fmt::Display for TclError {
 }
 impl std::error::Error for TclError {}
 
+/// One `report_*` command as the script gave it, in the script's order: what it asks for and
+/// how its numbers are printed (`-digits`, default 2 as the reference's; `-fields`).
+#[derive(Clone, Debug, PartialEq)]
+pub enum ReportCmd {
+    /// `report_checks` (full format): the worst path end of each path group
+    Checks { min: bool, max: bool, fields: Fields, digits: usize },
+    /// `report_wns`: the worst slack, or 0 when it is positive
+    Wns { min: bool, digits: usize },
+    /// `report_tns`: the sum of the negative slacks
+    Tns { min: bool, digits: usize },
+    /// `report_worst_slack`: the worst slack, signed
+    WorstSlack { min: bool, digits: usize },
+}
+
+/// `report_checks -fields`: the optional columns (Delay, Time, edge and Description are always
+/// there), and `input_pins`, which prints each load pin as well as each driver.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Fields {
+    pub cap: bool,
+    pub slew: bool,
+    pub input_pins: bool,
+}
+
 /// Which `report_*` commands the script asked for (and their min/max sense).
 #[derive(Default, Clone)]
 pub struct Reports {
+    /// every report command, in the script's order — what [`render`] prints
+    pub cmds: Vec<ReportCmd>,
     pub checks: bool,
     pub checks_min: bool,
     pub checks_max: bool,
@@ -54,6 +79,13 @@ pub struct Reports {
 impl Reports {
     /// Nothing explicitly requested → behave like a default `report_checks` + WNS/TNS.
     fn defaulted(mut self) -> Reports {
+        if self.cmds.is_empty() {
+            self.cmds = vec![
+                ReportCmd::Checks { min: false, max: true, fields: Fields::default(), digits: 2 },
+                ReportCmd::Wns { min: false, digits: 2 },
+                ReportCmd::Tns { min: false, digits: 2 },
+            ];
+        }
         if !(self.checks || self.wns || self.tns || self.worst_slack) {
             self.checks = true;
             self.checks_max = true;
@@ -167,18 +199,40 @@ pub fn adapt(script_path: &str) -> Result<Adapted, TclError> {
                 let (mn, mx) = path_delay(&toks);
                 reports.checks_min |= mn;
                 reports.checks_max |= mx;
+                let (fields, unknown) = report_fields(&toks);
+                for u in unknown {
+                    ignored.push(format!("report_checks -fields {u} (column not printed)"));
+                }
+                // options that choose OTHER paths than each group's worst are not modelled: say so
+                for o in ["-from", "-to", "-through", "-rise_from", "-fall_from", "-rise_to", "-fall_to", "-unconstrained"] {
+                    if has_flag(&toks, o) {
+                        ignored.push(format!("report_checks {o} (the worst path of each group is reported)"));
+                    }
+                }
+                for o in ["-group_path_count", "-group_count", "-endpoint_path_count", "-endpoint_count"] {
+                    if opt_value(&toks, o).is_some_and(|v| v != "1") {
+                        ignored.push(format!("report_checks {o} (one path per group is reported)"));
+                    }
+                }
+                if opt_value(&toks, "-format").is_some_and(|f| f != "full") {
+                    ignored.push("report_checks -format (the full format is printed)".to_string());
+                }
+                reports.cmds.push(ReportCmd::Checks { min: mn, max: mx, fields, digits: digits(&toks) });
             }
             "report_wns" => {
                 reports.wns = true;
                 reports.wns_min |= has_flag(&toks, "-min");
+                reports.cmds.push(ReportCmd::Wns { min: has_flag(&toks, "-min"), digits: digits(&toks) });
             }
             "report_tns" => {
                 reports.tns = true;
                 reports.tns_min |= has_flag(&toks, "-min");
+                reports.cmds.push(ReportCmd::Tns { min: has_flag(&toks, "-min"), digits: digits(&toks) });
             }
             "report_worst_slack" => {
                 reports.worst_slack = true;
                 reports.worst_slack_min |= has_flag(&toks, "-min");
+                reports.cmds.push(ReportCmd::WorstSlack { min: has_flag(&toks, "-min"), digits: digits(&toks) });
             }
             v if SDC_VERBS.contains(&v) => {
                 combined_sdc.push_str(&raw);
@@ -297,102 +351,228 @@ fn base_job(
 
 // ---- OpenSTA-flavoured report rendering ---------------------------------
 
-/// Render the analysis as an OpenSTA-style text report honouring the requested
-/// `report_*` commands.
-pub fn render(job: &StaJob, rep: &crate::sta::TimingReport, reports: &Reports) -> String {
+/// Render the analysis as the reference's text reports, one block per `report_*` command in
+/// the script's order: `report_checks` in its full format (the worst path end of each path
+/// group, `ReportPath::reportFull`), `report_wns` / `report_tns` / `report_worst_slack` as one
+/// line each.
+pub fn render(_job: &StaJob, rep: &crate::sta::TimingReport, reports: &Reports) -> String {
     let mut s = String::new();
-    s.push_str(&format!(
-        "# vyges-sta-si {} — OpenSTA-compatible adapter (Vyges engine)\n",
-        crate::VERSION
-    ));
-    s.push_str(&format!(
-        "# design {}   clock {} @ {:.4} {}\n\n",
-        job.design, job.clock_port, job.period_ns, rep.units.time_label()
-    ));
-
-    let want_max = reports.checks_max || reports.wns || reports.tns || reports.worst_slack;
-    if reports.checks && want_max {
-        s.push_str(&path_block(
-            job,
-            "max",
-            rep.endpoints,
-            &rep.worst_endpoint,
-            rep.wns,
-            &rep.worst_path,
-        ));
-    }
-    if reports.checks && reports.checks_min {
-        s.push_str(&path_block(
-            job,
-            "min",
-            rep.hold_endpoints,
-            &rep.worst_hold_endpoint,
-            rep.whs,
-            &rep.worst_hold_path,
-        ));
-    }
-    // Scalars (OpenSTA `report_wns`/`report_tns`/`report_worst_slack` print the value).
-    if reports.wns || reports.worst_slack {
-        if reports.wns_min || reports.worst_slack_min {
-            s.push_str(&format!("wns(min/hold) {}\n", fmt(rep.whs)));
-        } else {
-            s.push_str(&format!("wns {}\n", fmt(rep.wns)));
-        }
-    }
-    if reports.tns {
-        if reports.tns_min {
-            s.push_str(&format!("tns(min/hold) {}\n", fmt(rep.ths)));
-        } else {
-            s.push_str(&format!("tns {}\n", fmt(rep.tns)));
+    for cmd in &reports.cmds {
+        match *cmd {
+            ReportCmd::Checks { min, max, fields, digits } => {
+                // the reference walks min then max (`MinMax::range`)
+                let ends: Vec<&crate::sta::CheckPath> =
+                    rep.check_paths.iter().filter(|p| (p.max && max) || (!p.max && min)).collect();
+                let ends: Vec<&crate::sta::CheckPath> =
+                    ends.iter().filter(|p| !p.max).chain(ends.iter().filter(|p| p.max)).copied().collect();
+                if ends.is_empty() {
+                    s.push_str("No paths found.\n");
+                }
+                for p in ends {
+                    path_end(&mut s, p, fields, digits);
+                }
+            }
+            ReportCmd::Wns { min, digits } => {
+                let w = if min { rep.whs } else { rep.wns };
+                // "If the worst slack is positive, zero is reported."
+                let w = if w > 0.0 || !w.is_finite() { 0.0 } else { w };
+                s.push_str(&format!("wns {} {}\n", mm(min), time(w, digits)));
+            }
+            ReportCmd::Tns { min, digits } => {
+                s.push_str(&format!("tns {} {}\n", mm(min), time(if min { rep.ths } else { rep.tns }, digits)));
+            }
+            ReportCmd::WorstSlack { min, digits } => {
+                let w = if min { rep.whs } else { rep.wns };
+                s.push_str(&format!("worst slack {} {}\n", mm(min), time(w, digits)));
+            }
         }
     }
     s
 }
 
-fn path_block(
-    job: &StaJob,
-    kind: &str,
-    endpoints: usize,
-    endpoint: &str,
-    slack: f64,
-    path: &[crate::sta::PathNode],
-) -> String {
-    let label = if kind == "max" {
-        "max (Setup)"
+fn mm(min: bool) -> &'static str {
+    if min {
+        "min"
     } else {
-        "min (Hold)"
+        "max"
+    }
+}
+
+/// A time at `digits` decimals, `-0.00` printed as `0.00` (the reference filters it).
+fn time(v: f64, digits: usize) -> String {
+    let t = format!("{v:.digits$}");
+    if t.strip_prefix('-').is_some_and(|r| r.chars().all(|c| c == '0' || c == '.')) {
+        t[1..].to_string()
+    } else {
+        t
+    }
+}
+
+/// The columns of a path report and how each is printed (`ReportPath::reportLine`): every
+/// numeric column right-justified to `digits + 5`, the edge one character, the description
+/// last; fields separated by one space, trailing spaces trimmed.
+struct Cols {
+    fields: Fields,
+    digits: usize,
+}
+
+impl Cols {
+    fn width(&self) -> usize {
+        self.digits + 5
+    }
+
+    fn num(&self, line: &mut String, v: Option<String>) {
+        let w = self.width();
+        match v {
+            Some(t) => line.push_str(&format!("{t:>w$}")),
+            None => line.push_str(&" ".repeat(w)),
+        }
+    }
+
+    /// One line: `cap`, `slew` (when those columns are on), the increment, the total (`minus`:
+    /// always signed, as `data arrival time` is), the edge and the description.
+    #[allow(clippy::too_many_arguments)]
+    fn line(&self, what: &str, cap: Option<f64>, slew: Option<f64>, incr: Option<f64>, total: Option<f64>, minus: bool, rise: Option<bool>) -> String {
+        let d = self.digits;
+        let mut line = String::new();
+        if self.fields.cap {
+            self.num(&mut line, cap.map(|c| format!("{c:.d$}")));
+            line.push(' ');
+        }
+        if self.fields.slew {
+            self.num(&mut line, slew.map(|v| time(v, d)));
+            line.push(' ');
+        }
+        self.num(&mut line, incr.map(|v| time(v, d)));
+        line.push(' ');
+        let total = total.map(|v| {
+            if minus {
+                // the negated value, a leading minus forced on zero
+                let t = time(-v, d);
+                if t.starts_with('-') {
+                    t
+                } else if t.chars().all(|c| c == '0' || c == '.') {
+                    format!("-{t}")
+                } else {
+                    t
+                }
+            } else {
+                time(v, d)
+            }
+        });
+        self.num(&mut line, total);
+        line.push(' ');
+        line.push(match rise {
+            Some(true) => '^',
+            Some(false) => 'v',
+            None => ' ',
+        });
+        line.push(' ');
+        line.push_str(what);
+        line.trim_end().to_string()
+    }
+
+    fn header(&self) -> String {
+        let w = self.width();
+        let mut line = String::new();
+        if self.fields.cap {
+            line.push_str(&format!("{:>w$} ", "Cap"));
+        }
+        if self.fields.slew {
+            line.push_str(&format!("{:>w$} ", "Slew"));
+        }
+        line.push_str(&format!("{:>w$} {:>w$}   Description", "Delay", "Time"));
+        line
+    }
+
+    fn dashes(&self) -> String {
+        let n = self.width() * (2 + usize::from(self.fields.cap) + usize::from(self.fields.slew)) + 1 + 36 + 6;
+        "-".repeat(n)
+    }
+}
+
+/// `Startpoint: pt (reason)`, split over two lines past 80 columns as the reference splits it.
+fn start_end(s: &mut String, key: &str, pt: &str, reason: &str) {
+    if key.len() + 2 + pt.len() + 2 + reason.len() + 1 > 80 {
+        s.push_str(&format!("{key}: {pt}\n{}  ({reason})\n", " ".repeat(key.len())));
+    } else {
+        s.push_str(&format!("{key}: {pt} ({reason})\n"));
+    }
+}
+
+/// One path end in the reference's full format (`ReportPath::reportFull` for a check or an
+/// output delay): header, the source clock and data path, the target clock and required time,
+/// the slack; two blank lines after.
+fn path_end(s: &mut String, p: &crate::sta::CheckPath, fields: Fields, digits: usize) {
+    let c = Cols { fields, digits };
+    let mut out = |l: String| {
+        s.push_str(&l);
+        s.push('\n');
     };
-    let mut s = String::new();
-    s.push_str(&format!("Path Type: {label}\n"));
-    if endpoints == 0 || path.is_empty() {
-        s.push_str("  (no constrained paths)\n\n");
-        return s;
+    let mut head = String::new();
+    start_end(&mut head, "Startpoint", &p.startpoint, &p.start_reason);
+    start_end(&mut head, "Endpoint", &p.endpoint, &p.end_reason);
+    head.push_str(&format!("Path Group: {}\nPath Type: {}\n", p.group, mm(!p.max)));
+    out(head.trim_end_matches('\n').to_string());
+    out(String::new());
+    out(c.header());
+    out(c.dashes());
+    // the launch clock, then its network delay (or the input's external delay)
+    let clk_slew = |k: &crate::sta::ClockLine| (!k.propagated).then_some(k.slew);
+    let ideal_prop = |k: &crate::sta::ClockLine| {
+        if k.propagated {
+            "clock network delay (propagated)"
+        } else {
+            "clock network delay (ideal)"
+        }
+    };
+    let edge = |rise: bool| if rise { "rise" } else { "fall" };
+    let src = &p.src_clock;
+    out(c.line(&format!("clock {} ({} edge)", src.name, edge(src.rise)), None, clk_slew(src), Some(src.time), Some(src.time), false, None));
+    out(c.line(ideal_prop(src), None, None, Some(p.src_network_delay), Some(src.time + p.src_network_delay), false, None));
+    if let Some((d, rise)) = p.input_delay {
+        out(c.line("input external delay", None, None, Some(d), p.lines.first().map(|l| l.time), false, Some(rise)));
     }
-    let startpoint = path.first().map(|p| p.label.as_str()).unwrap_or("?");
-    s.push_str(&format!("  Startpoint: {startpoint}\n"));
-    s.push_str(&format!("  Endpoint:   {endpoint}\n"));
-    s.push_str(&format!("  Path Group: {}\n", job.clock_port));
-    s.push_str(&format!(
-        "    {:>10}  {:>8}   {}\n",
-        "Arrival", "Slew", "Node"
-    ));
-    for p in path {
-        s.push_str(&format!(
-            "    {:10.4}  {:8.4}   {}\n",
-            p.arrival, p.slew, p.label
-        ));
+    // the data path: every driver, the first and last pin, the launching clock pin (and every
+    // load pin with `-fields input_pins`); each increment from the last line printed
+    let last = p.lines.len().saturating_sub(1);
+    let mut prev = 0.0;
+    for (i, l) in p.lines.iter().enumerate() {
+        let driver = l.cap.is_some();
+        if !(driver || i == 0 || i == last || l.clk_start || fields.input_pins) {
+            continue;
+        }
+        let incr = if i == 0 { 0.0 } else { l.time - prev };
+        let cap = if driver { l.cap } else { None };
+        out(c.line(&l.desc, cap, Some(l.slew), Some(incr), Some(l.time), false, Some(l.rise)));
+        prev = l.time;
     }
-    let met = if slack >= 0.0 { "MET" } else { "VIOLATED" };
-    s.push_str(&format!("    slack {} ({})\n\n", fmt(slack), met));
-    s
-}
-
-fn fmt(v: f64) -> String {
-    if v.is_finite() {
-        format!("{v:.4}")
-    } else {
-        "INF".to_string()
+    out(c.line("data arrival time", None, None, None, Some(p.arrival), false, None));
+    out(String::new());
+    // the target clock and the required time
+    let tgt = &p.tgt_clock;
+    out(c.line(&format!("clock {} ({} edge)", tgt.name, edge(tgt.rise)), None, clk_slew(tgt), Some(tgt.time), Some(tgt.time), false, None));
+    let mut t = tgt.time + p.tgt_network_delay;
+    out(c.line(ideal_prop(tgt), None, None, Some(p.tgt_network_delay), Some(t), false, None));
+    if p.uncertainty != 0.0 {
+        t += p.uncertainty;
+        out(c.line("clock uncertainty", None, None, Some(p.uncertainty), Some(t), false, None));
     }
+    t += p.crpr;
+    out(c.line("clock reconvergence pessimism", None, None, Some(p.crpr), Some(t), false, None));
+    if let Some((pin, rise)) = &p.tgt_pin {
+        out(c.line(pin, None, None, None, Some(tgt.time + p.tgt_network_delay), false, Some(*rise)));
+    }
+    out(c.line(&p.margin_what, None, None, Some(p.required - t), Some(p.required), false, None));
+    out(c.line("data required time", None, None, None, Some(p.required), false, None));
+    out(c.dashes());
+    out(c.line("data required time", None, None, None, Some(p.required), false, None));
+    out(c.line("data arrival time", None, None, None, Some(p.arrival), true, None));
+    out(c.dashes());
+    let met = if p.slack >= 0.0 { "slack (MET)" } else { "slack (VIOLATED)" };
+    out(c.line(met, None, None, None, Some(p.slack), false, None));
+    out(String::new());
+    out(String::new());
 }
 
 // ---- tiny TCL-subset lexer (NOT a TCL interpreter) ----------------------
@@ -521,6 +701,34 @@ fn path_delay(toks: &[String]) -> (bool, bool) {
         }
     }
     (false, true) // OpenSTA default
+}
+
+/// The value after option `opt`, unwrapped of its braces.
+fn opt_value(toks: &[String], opt: &str) -> Option<String> {
+    toks.iter().position(|t| t == opt).and_then(|i| toks.get(i + 1)).map(|v| unwrap(v))
+}
+
+/// `-digits N` (the reference's default report digits are 2).
+fn digits(toks: &[String]) -> usize {
+    opt_value(toks, "-digits").and_then(|v| v.parse().ok()).unwrap_or(2)
+}
+
+/// `-fields {…}`: the columns asked for, and any not printed here. Names as the reference
+/// matches them: `cap`/`capacitance`, `slew`, `input_pin`/`input_pins`/`input`.
+fn report_fields(toks: &[String]) -> (Fields, Vec<String>) {
+    let mut f = Fields::default();
+    let mut unknown = Vec::new();
+    if let Some(list) = opt_value(toks, "-fields") {
+        for name in list.split_whitespace() {
+            match name {
+                "cap" | "capacitance" => f.cap = true,
+                "slew" => f.slew = true,
+                "input" | "input_pin" | "input_pins" => f.input_pins = true,
+                other => unknown.push(other.to_string()),
+            }
+        }
+    }
+    (f, unknown)
 }
 
 fn resolve(base_dir: &str, rel: &str) -> String {

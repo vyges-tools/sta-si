@@ -1,34 +1,64 @@
 $ vyges-sta-si tcl examples/thresholds/drive.tcl
 exit: 0
 --- stdout ---
-# vyges-sta-si <VERSION> — OpenSTA-compatible adapter (Vyges engine)
-# design seq   clock clk @ 1.0000 ns
+Startpoint: r1 (rising edge-triggered flip-flop clocked by clk)
+Endpoint: r2 (rising edge-triggered flip-flop clocked by clk)
+Path Group: clk
+Path Type: max
 
-Path Type: max (Setup)
-  Startpoint: clk
-  Endpoint:   r2/D
-  Path Group: clk
-       Arrival      Slew   Node
-        0.0000    0.0351   clk
-        0.0254    0.0351   r1/CK
-        0.2034    0.0869   r1/Q
-        0.2208    0.1160   g1/A
-        0.4059    0.0976   g1/Y
-        0.4196    0.0733   r2/D
-    slack 0.5558 (MET)
+     Slew     Delay      Time   Description
+----------------------------------------------------------------------
+             0.0000    0.0000   clock clk (rise edge)
+             0.0254    0.0254   clock network delay (propagated)
+   0.0351    0.0000    0.0254 ^ r1/CK (DFF)
+   0.0869    0.1780    0.2034 v r1/Q (DFF)
+   0.0976    0.2024    0.4059 v g1/Y (INV_B)
+   0.0733    0.0137    0.4196 v r2/D (DFF)
+                       0.4196   data arrival time
 
-Path Type: min (Hold)
-  Startpoint: clk
-  Endpoint:   r1/D
-  Path Group: clk
-       Arrival      Slew   Node
-        0.0000    0.0351   clk
-        0.0254    0.0351   r2/CK
-        0.2685    0.1645   r2/Q
-        0.2747    0.1649   r1/D
-    slack 0.2293 (MET)
+             1.0000    1.0000   clock clk (rise edge)
+             0.0254    1.0254   clock network delay (propagated)
+             0.0000    1.0254   clock reconvergence pessimism
+                       1.0254 ^ r2/CK (DFF)
+            -0.0500    0.9754   library setup time
+                       0.9754   data required time
+----------------------------------------------------------------------
+                       0.9754   data required time
+                      -0.4196   data arrival time
+----------------------------------------------------------------------
+                       0.5558   slack (MET)
+
+
+Startpoint: r2 (rising edge-triggered flip-flop clocked by clk)
+Endpoint: r1 (rising edge-triggered flip-flop clocked by clk)
+Path Group: clk
+Path Type: min
+
+     Slew     Delay      Time   Description
+----------------------------------------------------------------------
+             0.0000    0.0000   clock clk (rise edge)
+             0.0254    0.0254   clock network delay (propagated)
+   0.0351    0.0000    0.0254 ^ r2/CK (DFF)
+   0.1645    0.2431    0.2685 ^ r2/Q (DFF)
+   0.1649    0.0062    0.2747 ^ r1/D (DFF)
+                       0.2747   data arrival time
+
+             0.0000    0.0000   clock clk (rise edge)
+             0.0254    0.0254   clock network delay (propagated)
+             0.0000    0.0254   clock reconvergence pessimism
+                       0.0254 ^ r1/CK (DFF)
+             0.0200    0.0454   library hold time
+                       0.0454   data required time
+----------------------------------------------------------------------
+                       0.0454   data required time
+                      -0.2747   data arrival time
+----------------------------------------------------------------------
+                       0.2293   slack (MET)
+
 
 --- stderr ---
+note: 1 OpenSTA command(s) outside the supported subset, ignored: report_checks -format (the full format is printed)
+      (experimental adapter — see docs/opensta-integration.md)
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIB-THRESHOLDS","raw_msg":"th_b.lib: its slew and delay thresholds differ from the first library's; its cells are timed at their own, and ports at the first library's"}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 3 instance(s) of 2 master(s); 3 timed, 0 physical-only","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 6 cell(s) loaded, 2 used by the design","objects":["clock:clk"]}

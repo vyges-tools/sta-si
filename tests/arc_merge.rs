@@ -6,6 +6,8 @@
 //    gives 0.1685);
 //  * every wire from the driver merges the same way over the arcs' waveforms (u1/Y -> u2/A
 //    0.054700, slew 0.263237).
+// (u2/A, a load pin, is printed only with `-fields input_pins`; its numbers are pinned by the
+// golden and by the report being the reference's line for line.)
 // Reference, setup: u1/Y 0.168994 (slew 0.242773), u2/A 0.223694 (0.263237), u2/Y 0.257854
 // (0.030055), slack 1.742146.
 //  * an output port with `set_output_delay` is hold-checked too: required = edge − output delay.
@@ -20,27 +22,21 @@ fn two_arcs_merge_slew_and_wire_as_the_reference() {
         .output()
         .unwrap();
     let text = String::from_utf8_lossy(&out.stdout).to_string();
-    let setup = &text[text.find("max (Setup)").expect("setup path")..];
-    // `arrival slew node` rows of the setup path
-    let at = |pin: &str| -> (String, String) {
-        let row = setup.lines().find(|l| l.split_whitespace().nth(2) == Some(pin)).unwrap_or_else(|| panic!("{pin} in\n{setup}"));
+    // the reference's report: `Slew Delay Time edge pin (cell)` rows, max path then min path
+    let setup = &text[text.find("Path Type: max").expect("setup path")..];
+    let hold = &text[text.find("Path Type: min").expect("an output port is hold-checked")..];
+    // (time, slew) of a pin's row, as printed (6 digits)
+    let at = |block: &str, pin: &str| -> (String, String) {
+        let row = block.lines().find(|l| l.split_whitespace().nth(4) == Some(pin)).unwrap_or_else(|| panic!("{pin} in\n{block}"));
         let f: Vec<&str> = row.split_whitespace().collect();
-        (f[0].to_string(), f[1].to_string())
+        (f[2].to_string(), f[0].to_string())
     };
-    assert_eq!(at("in2"), ("0.0000".into(), "0.3500".into()));
-    assert_eq!(at("u1/Y"), ("0.1690".into(), "0.2428".into()));
-    assert_eq!(at("u2/A"), ("0.2237".into(), "0.2632".into()));
-    assert_eq!(at("u2/Y"), ("0.2579".into(), "0.0301".into()));
-    assert!(setup.contains("slack 1.7421"), "{setup}");
+    assert_eq!(at(setup, "in2"), ("0.000000".into(), "0.350000".into()));
+    assert_eq!(at(setup, "u1/Y"), ("0.168994".into(), "0.242773".into()));
+    assert_eq!(at(setup, "u2/Y"), ("0.257854".into(), "0.030055".into()));
+    assert!(setup.contains("1.742146   slack (MET)"), "{setup}");
 
-    let hold = &text[text.find("min (Hold)").expect("an output port is hold-checked")..];
-    let at = |pin: &str| -> (String, String) {
-        let row = hold.lines().find(|l| l.split_whitespace().nth(2) == Some(pin)).unwrap_or_else(|| panic!("{pin} in\n{hold}"));
-        let f: Vec<&str> = row.split_whitespace().collect();
-        (f[0].to_string(), f[1].to_string())
-    };
-    assert_eq!(at("u1/Y"), ("0.1403".into(), "0.1596".into()));
-    assert_eq!(at("u2/A"), ("0.1934".into(), "0.1883".into()));
-    assert_eq!(at("u2/Y"), ("0.2196".into(), "0.0199".into()));
-    assert!(hold.contains("slack 0.2196"), "{hold}");
+    assert_eq!(at(hold, "u1/Y"), ("0.140331".into(), "0.159597".into()));
+    assert_eq!(at(hold, "u2/Y"), ("0.219601".into(), "0.019890".into()));
+    assert!(hold.contains("0.219601   slack (MET)"), "{hold}");
 }

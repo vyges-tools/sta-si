@@ -20,6 +20,7 @@ fn rep(wns: f64, whs: f64) -> TimingReport {
         worst_hold_path: vec![],
         pba_wns: None,
         units: Default::default(),
+        check_paths: Vec::new(),
     }
 }
 

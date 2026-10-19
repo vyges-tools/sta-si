@@ -98,6 +98,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         hold_slacks: Vec::new(),
         pba_wns: None,
         units: Default::default(),
+        check_paths: Vec::new(),
     });
     (job, rep)
 }

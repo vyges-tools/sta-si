@@ -430,6 +430,71 @@ pub struct TimingReport {
     /// The units every time and capacitance above is in: the first library's, as the
     /// reference reports (the "ns" in the field comments is that unit for a ns library).
     pub units: crate::liberty::LibUnits,
+    /// The worst path of every path group, setup side then hold side, in the reference's
+    /// report order (see [`CheckPath`]). Filled by a full analysis; empty after an incremental
+    /// update.
+    pub check_paths: Vec<CheckPath>,
+}
+
+/// A clock edge as a report line names it: `clock clk (rise edge)`, at `time`, with the
+/// ideal clock's transition (`set_clock_transition`) where it is not propagated.
+#[derive(Debug, Clone)]
+pub struct ClockLine {
+    pub name: String,
+    pub rise: bool,
+    pub time: f64,
+    pub slew: f64,
+    pub propagated: bool,
+}
+
+/// One node of a reported data path: the pin as `pin (cell)` / `port (in)`, its edge, its
+/// absolute time and slew, and the load it drives (`None` for a load pin).
+#[derive(Debug, Clone)]
+pub struct PathLine {
+    pub desc: String,
+    pub rise: bool,
+    pub time: f64,
+    pub slew: f64,
+    pub cap: Option<f64>,
+    /// the launching register's clock pin (always printed, increment 0)
+    pub clk_start: bool,
+}
+
+/// One path end in the reference's `report_checks` terms: the worst of its path group, with
+/// everything the full report prints — start and end with their reasons, the launch clock and
+/// its network delay (or an input's external delay), every node of the data path, the capture
+/// clock, uncertainty, reconvergence pessimism, the check pin, the margin and the slack. Times
+/// are absolute: the launch edge's own time added back to arrivals measured from it.
+#[derive(Debug, Clone)]
+pub struct CheckPath {
+    /// `max` (setup / recovery / output) or `min` (hold / removal / output)
+    pub max: bool,
+    /// the capture clock's name, or `asynchronous` for recovery and removal checks
+    pub group: String,
+    pub startpoint: String,
+    pub start_reason: String,
+    pub endpoint: String,
+    pub end_reason: String,
+    pub src_clock: ClockLine,
+    /// the launch clock's network delay to the register clock pin (0 from an input)
+    pub src_network_delay: f64,
+    /// `set_input_delay` of a path from an input port: (value, rising)
+    pub input_delay: Option<(f64, bool)>,
+    pub lines: Vec<PathLine>,
+    pub arrival: f64,
+    pub tgt_clock: ClockLine,
+    pub tgt_network_delay: f64,
+    /// the clock uncertainty as the line adds it (negative on the setup side)
+    pub uncertainty: f64,
+    /// the reconvergence pessimism as the line adds it
+    pub crpr: f64,
+    /// the check's clock pin, `pin (cell)`, and its edge (none for an output port)
+    pub tgt_pin: Option<(String, bool)>,
+    /// `library setup time`, `library hold time`, `library recovery time`,
+    /// `library removal time` or `output external delay`
+    pub margin_what: String,
+    pub required: f64,
+    pub slack: f64,
 }
 
 enum EdgeKind {
@@ -1242,6 +1307,9 @@ fn build_report(
     // interpolated at the operating slews later; the CK key resolves to a node whose
     // arrival is the clock insertion delay to this flop (skew).
     let mut flop_d: Vec<(usize, Vec<Constraint>, Option<String>)> = Vec::new();
+    // the recovery / removal pins among them: the reference reports their checks in their own
+    // path group, `asynchronous`
+    let mut async_end: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut flop_hold: Vec<(usize, Vec<Constraint>, Option<String>)> = Vec::new();
     // Nodes that drive a fixed logic level (tie cells: `function : "1"` / `"0"`). A net
     // driven by one can never switch, so it carries no timing — see the edge build below.
@@ -1356,9 +1424,11 @@ fn build_report(
                         if !cell.pins[pin].recovery.is_empty() {
                             is_endpoint[idx] = true;
                             flop_d.push((idx, cell.pins[pin].recovery.clone(), ck_key.clone()));
+                            async_end.insert(idx);
                         }
                         if !cell.pins[pin].removal.is_empty() {
                             flop_hold.push((idx, cell.pins[pin].removal.clone(), ck_key.clone()));
+                            async_end.insert(idx);
                         }
                     }
                 }
@@ -3041,6 +3111,17 @@ fn build_report(
             _ => false,
         }
     };
+    // The clock every I/O delay is relative to here (the job keeps no per-delay clock), and the
+    // path group an endpoint is reported in: `asynchronous` for recovery and removal, else the
+    // capture clock's name (`PathGroups::pathGroup`).
+    let primary_clock = job.clocks.first().map_or(job.clock_port.as_str(), |c| c.0.as_str());
+    let path_group = |v: usize, cap: Option<usize>| -> String {
+        if async_end.contains(&v) {
+            "asynchronous".to_string()
+        } else {
+            cap.and_then(clock_name_of).unwrap_or(primary_clock).to_string()
+        }
+    };
     // (setup, hold) launch→capture relation between a launch edge (`ll`: lane 0 rise at t=0,
     // 1 fall at half the period) of a clock of period `pl` and a capture edge (`cl`) of period
     // `pc`, as the reference's cycle accounting finds it (`cycle_accting`): setup is the time
@@ -3172,6 +3253,9 @@ fn build_report(
     // the launching edge's run and the data edge whose check set the worst slack
     let mut worst_at: Option<(usize, usize)> = None;
     let mut endpoints = 0;
+    // each path group's worst setup end, for the report: (slack, endpoint, run, data edge)
+    let setup_end: HashMap<usize, usize> = flop_d.iter().enumerate().map(|(e, (idx, _, _))| (*idx, e)).collect();
+    let mut setup_group_worst: BTreeMap<String, (f64, usize, usize, usize)> = BTreeMap::new();
     for v in 0..n {
         if !is_endpoint[v] || excluded_setup[v] {
             continue; // not an endpoint, or false-path-excluded
@@ -3211,6 +3295,12 @@ fn build_report(
         // query API's `required − arrival` is then this endpoint's checked slack.
         if runs.len() > 1 {
             endpoint_req[v] = arr_v + slack;
+        }
+        if let Some((r, l)) = slack_at {
+            let g = path_group(v, setup_end.get(&v).and_then(|&e| ck_node(&flop_d[e].2)));
+            if setup_group_worst.get(&g).is_none_or(|w| slack < w.0) {
+                setup_group_worst.insert(g, (slack, v, r, l));
+            }
         }
         if slack < 0.0 {
             tns += slack;
@@ -3375,6 +3465,9 @@ fn build_report(
     let mut worst_hold = None;
     let mut hold_endpoints = 0;
     let mut hold_slacks: Vec<(usize, f64)> = Vec::new();
+    // each path group's worst hold end, for the report: (slack, endpoint, run, data edge)
+    let hold_end: HashMap<usize, usize> = flop_hold.iter().enumerate().map(|(e, (idx, _, _))| (*idx, e)).collect();
+    let mut hold_group_worst: BTreeMap<String, (f64, usize, usize, usize)> = BTreeMap::new();
     for (idx, hold, ck) in &flop_hold {
         let idx = *idx;
         if arr_min[idx] == f64::INFINITY {
@@ -3469,6 +3562,10 @@ fn build_report(
             whs = slack;
             worst_hold = Some((idx, slack_at));
         }
+        let g = path_group(idx, hold_end.get(&idx).and_then(|&e| ck_node(&flop_hold[e].2)));
+        if hold_group_worst.get(&g).is_none_or(|w| slack < w.0) {
+            hold_group_worst.insert(g, (slack, idx, slack_at.0, slack_at.1));
+        }
     }
     // An output port's HOLD check. `set_output_delay` constrains both analyses (the reference's
     // `PathEndOutputDelay`): the data must not arrive before the capture edge less the
@@ -3520,12 +3617,251 @@ fn build_report(
             whs = slack;
             worst_hold = Some((idx, slack_at));
         }
+        let g = path_group(idx, hold_end.get(&idx).and_then(|&e| ck_node(&flop_hold[e].2)));
+        if hold_group_worst.get(&g).is_none_or(|w| slack < w.0) {
+            hold_group_worst.insert(g, (slack, idx, slack_at.0, slack_at.1));
+        }
     }
     // The path of the edge whose check set the slack — not the earliest lane at each node,
     // which can be the other edge's path printed beside this one's slack.
     let (worst_hold_endpoint, worst_hold_path) = match worst_hold {
         Some((v, (r, l))) => (labels[v].clone(), crate::inc::lane_path(&labels, runs[r].early_arr, &early_slew, runs[r].early_from, v, l)),
         None => (String::new(), Vec::new()),
+    };
+
+    // ---- reported paths ----------------------------------------------------
+    // Each path group's worst end as the reference's full `report_checks` prints it. Every term
+    // is the one its check was scored with (the expressions above); the slack is asserted equal.
+    let check_paths: Vec<CheckPath> = {
+        let inst_cell: HashMap<&str, &str> = nl.insts.iter().map(|i| (i.name.as_str(), i.cell.as_str())).collect();
+        let in_port: std::collections::HashSet<usize> = input_ports.iter().map(|(i, _)| *i).collect();
+        let out_port: std::collections::HashSet<usize> = output_ports.iter().map(|(i, _)| *i).collect();
+        let driver: std::collections::HashSet<usize> = nets.values().filter_map(|n| n.driver).collect();
+        // `pin (cell)`, or a port's `name (in)` / `name (out)`
+        let desc = |u: usize| -> String {
+            if in_port.contains(&u) {
+                format!("{} (in)", labels[u])
+            } else if out_port.contains(&u) {
+                format!("{} (out)", labels[u])
+            } else {
+                let inst = instance_of(&labels[u]);
+                format!("{} ({})", labels[u], inst_cell.get(inst).copied().unwrap_or("?"))
+            }
+        };
+        let clock_line = |name: &str, rise: bool, time: f64| -> ClockLine {
+            let src = job.clocks.iter().find(|c| c.0 == name).map_or(job.clock_port.as_str(), |c| c.1.as_str());
+            let ideal = job.ideal_clocks.get(src);
+            // a virtual clock (no source) is ideal
+            let propagated = !src.is_empty() && ideal.is_none();
+            ClockLine { name: name.to_string(), rise, time, slew: ideal.map_or(0.0, |s| s[usize::from(!rise)]), propagated }
+        };
+        // a register's description from the clock-to-output arcs of its clock pin: the one on
+        // `edge` if it has one (`ReportPath::clkRegLatchDesc`)
+        let reg_desc = |ck: usize, edge: Option<usize>| -> &'static str {
+            let label = &labels[ck];
+            let (inst, pin) = label.rsplit_once('/').unwrap_or((label.as_str(), ""));
+            let edges: Vec<usize> = inst_cell
+                .get(inst)
+                .and_then(|c| lib.cell(c))
+                .map(|c| {
+                    c.pins
+                        .values()
+                        .flat_map(|p| p.arcs.iter())
+                        .filter(|a| a.related_pin == pin)
+                        .filter_map(|a| a.clk_edge.map(|e| usize::from(e == ClkEdge::Fall)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let e = edge.filter(|e| edges.contains(e)).or(edges.first().copied()).or(edge).unwrap_or(0);
+            if e == 1 { "falling edge-triggered flip-flop" } else { "rising edge-triggered flip-flop" }
+        };
+        let make = |max: bool, v: usize, r: usize, l: usize, group: &str| -> Option<CheckPath> {
+            let run = &runs[r];
+            let (arr, from, slews, mm) =
+                if max { (run.late_arr, run.late_from, &late_slew, 1) } else { (run.early_arr, run.early_from, &early_slew, 0) };
+            let mut chain = vec![(v, l)];
+            let (mut x, mut xl) = (v, l);
+            while let Some((u, ul)) = from[x][xl] {
+                chain.push((u, ul));
+                (x, xl) = (u, ul);
+            }
+            chain.reverse();
+            // the launching register's clock pin, else the input port the path starts at
+            let k = chain.iter().position(|&(u, _)| is_ck[u]);
+            let start = k.unwrap_or(0);
+            let (s0, s0l) = chain[start];
+            if k.is_none() && !in_port.contains(&s0) {
+                return None; // a clock used as data: not reported here
+            }
+            let lck = k.map(|k| chain[k].0);
+            let src_name = lck.and_then(clock_name_of).unwrap_or(primary_clock);
+            let pl = lck.map(&clock_period_of).unwrap_or(period);
+            let launch_edge = if k.is_some() { s0l } else { 0 };
+            let launch = if launch_edge == 1 { pl / 2.0 } else { 0.0 };
+            let src_clock = clock_line(src_name, launch_edge == 0, launch);
+            let (startpoint, start_reason) = match k {
+                Some(_) => (instance_of(&labels[s0]).to_string(), format!("{} clocked by {src_name}", reg_desc(s0, Some(s0l)))),
+                None => (labels[s0].clone(), format!("input port clocked by {src_name}")),
+            };
+            let src_network_delay = if k.is_some() { arr[s0][s0l] } else { 0.0 };
+            let input_delay = if k.is_none() { Some((arr[s0][s0l], s0l == 0)) } else { None };
+            let lines: Vec<PathLine> = chain[start..]
+                .iter()
+                .enumerate()
+                .map(|(i, &(u, ul))| {
+                    let clk_start = k.is_some() && i == 0;
+                    let slew = if clk_start && !src_clock.propagated { src_clock.slew } else { slews[u][ul] };
+                    PathLine {
+                        desc: desc(u),
+                        rise: ul == 0,
+                        time: launch + arr[u][ul],
+                        slew,
+                        cap: driver.contains(&u).then(|| node_load[u][mm][ul]),
+                        clk_start,
+                    }
+                })
+                .collect();
+            let arrival = launch + arr[v][l];
+            let ln = lck.map(&inst_of).unwrap_or_default();
+            if out_port.contains(&v) {
+                // an output port, captured on the rise of the clock its delay is relative to
+                let (setup_rel, hold_rel) = edge_relation(pl, run.edge, period, 0);
+                // as the output hold check shifts it
+                let mc = match match_exc(&ln, &labels[v]).map(|e| &e.kind) {
+                    Some(ExcKind::Multicycle(cyc)) => cyc.saturating_sub(1) as f64 * period,
+                    _ => 0.0,
+                };
+                let (tgt_time, required, uncertainty) = if max {
+                    (launch + setup_rel, launch + req_run[r][v][l], -job.setup_uncertainty)
+                } else {
+                    let rel = hold_rel + mc;
+                    (launch + rel, launch + rel + job.hold_uncertainty - job.output_delay_for(&labels[v]), job.hold_uncertainty)
+                };
+                return Some(CheckPath {
+                    max,
+                    group: group.to_string(),
+                    startpoint,
+                    start_reason,
+                    endpoint: labels[v].clone(),
+                    end_reason: format!("output port clocked by {primary_clock}"),
+                    src_clock,
+                    src_network_delay,
+                    input_delay,
+                    lines,
+                    arrival,
+                    tgt_clock: clock_line(primary_clock, true, tgt_time),
+                    tgt_network_delay: 0.0,
+                    uncertainty,
+                    crpr: 0.0,
+                    tgt_pin: None,
+                    margin_what: "output external delay".to_string(),
+                    required,
+                    slack: if max { required - arrival } else { arrival - required },
+                });
+            }
+            // a register's check, its terms as scored: the constraint that set the slack
+            let (cons, ck) = if max {
+                let e = setup_end.get(&v)?;
+                (&flop_d[*e].1, &flop_d[*e].2)
+            } else {
+                let e = hold_end.get(&v)?;
+                (&flop_hold[*e].1, &flop_hold[*e].2)
+            };
+            let cap = ck_node(ck);
+            let pc = cap.map(&clock_period_of).unwrap_or(period);
+            let crpr = match (lck, cap) {
+                (Some(a), Some(c)) => crpr_credit(a, c),
+                _ => 0.0,
+            };
+            let shift = if max {
+                let setup_exc = |e: &&Exception| !(matches!(e.kind, ExcKind::Multicycle(_)) && e.hold);
+                match job.exceptions.iter().filter(setup_exc).find(|e| e.covers(&ln, &inst_of(v))) {
+                    Some(e) => match &e.kind {
+                        ExcKind::Multicycle(cyc) => cyc.saturating_sub(1) as f64 * if e.start { pl } else { pc },
+                        ExcKind::FalsePath => 0.0,
+                    },
+                    None => 0.0,
+                }
+            } else {
+                match match_exc(&ln, &inst_of(v)).map(|e| &e.kind) {
+                    Some(ExcKind::Multicycle(cyc)) => cyc.saturating_sub(1) as f64 * pc,
+                    _ => 0.0,
+                }
+            };
+            // (required, capture edge, capture clock arrival, relation) of each constraint;
+            // the tightest one set the slack
+            let terms = cons.iter().map(|c| {
+                let cl = usize::from(c.clk_edge == ClkEdge::Fall);
+                if max {
+                    let cap_early = cap.map(|i| early_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
+                    let ck_slew = cap.map(|i| late_slew[i][cl]).unwrap_or(input_slew);
+                    let rel = edge_relation(pl, run.edge, pc, cl).0 + shift;
+                    let req = cap_early + rel + crpr - job.setup_uncertainty - c.eval_edge(l == 0, ck_slew, late_slew[v][l]);
+                    (req, cl, cap_early, rel)
+                } else {
+                    let cap_late = cap.map(|i| late_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
+                    let ck_slew = cap.map(|i| early_slew[i][cl]).unwrap_or(input_slew);
+                    let rel = edge_relation(pl, run.edge, pc, cl).1 + shift;
+                    let req = cap_late + rel + job.hold_uncertainty - crpr + c.eval_edge(l == 0, ck_slew, early_slew[v][l]);
+                    (req, cl, cap_late, rel)
+                }
+            });
+            let (req, cl, cap_arr, rel) = if max {
+                terms.min_by(|a, b| a.0.total_cmp(&b.0))?
+            } else {
+                terms.max_by(|a, b| a.0.total_cmp(&b.0))?
+            };
+            let tgt_name = cap.and_then(clock_name_of).unwrap_or(primary_clock);
+            let is_async = async_end.contains(&v);
+            let check = match (max, is_async) {
+                (true, false) => "setup",
+                (true, true) => "recovery",
+                (false, false) => "hold",
+                (false, true) => "removal",
+            };
+            let end_reason = if is_async {
+                format!("{check} check against {}-edge clock {tgt_name}", if cl == 1 { "falling" } else { "rising" })
+            } else {
+                format!("{} clocked by {tgt_name}", cap.map_or("rising edge-triggered flip-flop", |c| reg_desc(c, Some(cl))))
+            };
+            Some(CheckPath {
+                max,
+                group: group.to_string(),
+                startpoint,
+                start_reason,
+                endpoint: instance_of(&labels[v]).to_string(),
+                end_reason,
+                src_clock,
+                src_network_delay,
+                input_delay,
+                lines,
+                arrival,
+                tgt_clock: clock_line(tgt_name, cl == 0, launch + rel),
+                tgt_network_delay: cap_arr,
+                uncertainty: if max { -job.setup_uncertainty } else { job.hold_uncertainty },
+                crpr: if max { crpr } else { -crpr },
+                tgt_pin: cap.map(|c| (desc(c), cl == 0)),
+                margin_what: format!("library {check} time"),
+                required: launch + req,
+                slack: if max { launch + req - arrival } else { arrival - launch - req },
+            })
+        };
+        // the reference's group order, per analysis: `asynchronous`, then the clocks by name
+        let ordered = |m: &BTreeMap<String, (f64, usize, usize, usize)>| -> Vec<(String, (f64, usize, usize, usize))> {
+            let mut v: Vec<_> = m.iter().map(|(g, w)| (g.clone(), *w)).collect();
+            v.sort_by_key(|(g, _)| g != "asynchronous");
+            v
+        };
+        let mut out = Vec::new();
+        for (max, worst) in [(true, &setup_group_worst), (false, &hold_group_worst)] {
+            for (g, (slack, v, r, l)) in ordered(worst) {
+                if let Some(p) = make(max, v, r, l, &g) {
+                    debug_assert!((p.slack - slack).abs() < 1e-9, "{g}: reported {} scored {slack}", p.slack);
+                    out.push(p);
+                }
+            }
+        }
+        out
     };
 
     let report = TimingReport {
@@ -3546,6 +3882,7 @@ fn build_report(
         hold_slacks,
         pba_wns,
         units: lib.units,
+        check_paths,
     };
     // Retain a per-pin snapshot for the Timer's query API (Phase 1). Cloned, not moved:
     // closures above still hold immutable borrows of these arrays through the return.

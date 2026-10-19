@@ -646,6 +646,7 @@ impl IncGraph {
             hold_slacks,
             pba_wns: None, // pba disqualifies the fast path at build time
             units: lib.units,
+            check_paths: Vec::new(),
         };
         let timing = Timing::new(
             &self.topo.labels,

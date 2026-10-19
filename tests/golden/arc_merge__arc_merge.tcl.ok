@@ -1,34 +1,61 @@
 $ vyges-sta-si tcl examples/arc_merge/arc_merge.tcl
 exit: 0
 --- stdout ---
-# vyges-sta-si <VERSION> — OpenSTA-compatible adapter (Vyges engine)
-# design top   clock clk @ 2.0000 ns
+Startpoint: in2 (input port clocked by clk)
+Endpoint: out (output port clocked by clk)
+Path Group: clk
+Path Type: max
 
-Path Type: max (Setup)
-  Startpoint: in2
-  Endpoint:   out
-  Path Group: clk
-       Arrival      Slew   Node
-        0.0000    0.3500   in2
-        0.0000    0.3500   u1/B
-        0.1690    0.2428   u1/Y
-        0.2237    0.2632   u2/A
-        0.2579    0.0301   u2/Y
-        0.2579    0.0301   out
-    slack 1.7421 (MET)
+       Slew       Delay        Time   Description
+----------------------------------------------------------------------------
+   0.000000    0.000000    0.000000   clock clk (rise edge)
+               0.000000    0.000000   clock network delay (ideal)
+               0.000000    0.000000 ^ input external delay
+   0.350000    0.000000    0.000000 ^ in2 (in)
+   0.242773    0.168994    0.168994 ^ u1/Y (AND2)
+   0.030055    0.088860    0.257854 ^ u2/Y (BUF)
+   0.030055    0.000000    0.257854 ^ out (out)
+                           0.257854   data arrival time
 
-Path Type: min (Hold)
-  Startpoint: in1
-  Endpoint:   out
-  Path Group: clk
-       Arrival      Slew   Node
-        0.0000    0.0200   in1
-        0.0000    0.0200   u1/A
-        0.1403    0.1596   u1/Y
-        0.1934    0.1883   u2/A
-        0.2196    0.0199   u2/Y
-        0.2196    0.0199   out
-    slack 0.2196 (MET)
+   0.000000    2.000000    2.000000   clock clk (rise edge)
+               0.000000    2.000000   clock network delay (ideal)
+               0.000000    2.000000   clock reconvergence pessimism
+               0.000000    2.000000   output external delay
+                           2.000000   data required time
+----------------------------------------------------------------------------
+                           2.000000   data required time
+                          -0.257854   data arrival time
+----------------------------------------------------------------------------
+                           1.742146   slack (MET)
+
+
+Startpoint: in1 (input port clocked by clk)
+Endpoint: out (output port clocked by clk)
+Path Group: clk
+Path Type: min
+
+       Slew       Delay        Time   Description
+----------------------------------------------------------------------------
+   0.000000    0.000000    0.000000   clock clk (rise edge)
+               0.000000    0.000000   clock network delay (ideal)
+               0.000000    0.000000 v input external delay
+   0.020000    0.000000    0.000000 v in1 (in)
+   0.159597    0.140331    0.140331 v u1/Y (AND2)
+   0.019890    0.079270    0.219601 v u2/Y (BUF)
+   0.019890    0.000000    0.219601 v out (out)
+                           0.219601   data arrival time
+
+   0.000000    0.000000    0.000000   clock clk (rise edge)
+               0.000000    0.000000   clock network delay (ideal)
+               0.000000    0.000000   clock reconvergence pessimism
+               0.000000    0.000000   output external delay
+                           0.000000   data required time
+----------------------------------------------------------------------------
+                           0.000000   data required time
+                          -0.219601   data arrival time
+----------------------------------------------------------------------------
+                           0.219601   slack (MET)
+
 
 --- stderr ---
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 2 instance(s) of 2 master(s); 2 timed, 0 physical-only","objects":["clock:clk"]}
