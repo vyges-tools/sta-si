@@ -11,14 +11,19 @@
 //! reference timer carries one edge through the clock network, so a large early/late spread on
 //! a clock pin points at our per-lane collapse rather than at any delay number.
 //!
-//! Usage: `cargo run --release --example dump_pin_state -- JOB.sta > pins.csv`
+//! Usage: `cargo run --release --example dump_pin_state -- JOB.sta|SCRIPT.tcl > pins.csv`
+//! (a `.tcl` script is adapted as `vyges-sta-si tcl` adapts it, so the dump is that command's job)
 
 use vyges_sta_si::job::StaJob;
 use vyges_sta_si::sta::Timer;
 
 fn main() {
-    let job_path = std::env::args().nth(1).expect("usage: dump_pin_state JOB.sta");
-    let job = StaJob::load(&job_path).expect("load job");
+    let job_path = std::env::args().nth(1).expect("usage: dump_pin_state JOB.sta|SCRIPT.tcl");
+    let job = if job_path.ends_with(".tcl") {
+        vyges_sta_si::tcl::adapt(&job_path).expect("adapt script").job
+    } else {
+        StaJob::load(&job_path).expect("load job")
+    };
     // the timer's own reader, so a dump shows what the timer saw
     let (nl, lib, spef) =
         vyges_sta_si::engine::load_inputs(&job, Default::default()).expect("load inputs");
