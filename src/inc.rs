@@ -190,8 +190,18 @@ pub(crate) struct IncGraph {
 /// from a full analysis and nothing says so.
 fn eval_cons_edge(cons: &[Constraint], rising: bool, clk_slew: f64, data_slew: f64) -> f64 {
     cons.iter()
+        .filter(|c| checks_edge(c, rising))
         .map(|c| c.eval_edge(rising, clk_slew, data_slew))
         .fold(f64::NEG_INFINITY, f64::max)
+}
+
+/// Whether a check constrains this DATA edge: only an edge whose table the library gives
+/// (`rise_constraint` for rising data). The reference builds one check arc per edge that has a
+/// model and none for the other (`LibertyBuilder::makeFromTransitionArcs`): sky130's reset pins
+/// state `recovery_rising` with a `rise_constraint` alone — the release — so a falling reset
+/// carries no recovery check. Read as a zero constraint instead, it was one.
+pub(crate) fn checks_edge(c: &Constraint, rising: bool) -> bool {
+    !if rising { &c.rise } else { &c.fall }.values.is_empty()
 }
 
 /// identical to `build_report`'s `eval_cons`.

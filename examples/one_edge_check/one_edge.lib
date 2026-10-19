@@ -1,0 +1,53 @@
+/* A register whose active-low reset is checked as sky130's are: recovery and removal on the
+   rising (release) edge only — a rise_constraint and no fall_constraint. The buffer in front is
+   slower falling than rising, so a check invented on the falling edge would be the worse one. */
+library(one_edge) {
+  delay_model : table_lookup;
+  time_unit : "1ns";
+  capacitive_load_unit (1, pf);
+  slew_lower_threshold_pct_rise : 20.0;
+  slew_upper_threshold_pct_rise : 80.0;
+  slew_lower_threshold_pct_fall : 20.0;
+  slew_upper_threshold_pct_fall : 80.0;
+  input_threshold_pct_rise : 50.0;
+  input_threshold_pct_fall : 50.0;
+  output_threshold_pct_rise : 50.0;
+  output_threshold_pct_fall : 50.0;
+  lu_table_template (t) { variable_1 : input_net_transition; variable_2 : total_output_net_capacitance;
+    index_1 ("0.01, 0.1"); index_2 ("0.001, 0.01"); }
+  lu_table_template (s) { variable_1 : related_pin_transition; variable_2 : constrained_pin_transition;
+    index_1 ("0.01, 0.1"); index_2 ("0.01, 0.1"); }
+  cell (BUF) {
+    area : 2.0;
+    pin(A) { direction : input; capacitance : 0.001; }
+    pin(X) { direction : output; function : "A";
+      timing () { related_pin : "A"; timing_sense : positive_unate; timing_type : combinational;
+        cell_rise(t) { values("0.05, 0.05", "0.05, 0.05"); }
+        cell_fall(t) { values("0.30, 0.30", "0.30, 0.30"); }
+        rise_transition(t) { values("0.02, 0.02", "0.02, 0.02"); }
+        fall_transition(t) { values("0.02, 0.02", "0.02, 0.02"); } } }
+  }
+  cell (DFFR) {
+    area : 6.0;
+    ff (IQ, IQN) { clocked_on : "CLK"; next_state : "D"; clear : "!RESET_B"; }
+    pin(CLK) { direction : input; clock : true; capacitance : 0.001; }
+    pin(D) { direction : input; capacitance : 0.001;
+      timing () { related_pin : "CLK"; timing_type : setup_rising;
+        rise_constraint(s) { values("0.05, 0.05", "0.05, 0.05"); }
+        fall_constraint(s) { values("0.05, 0.05", "0.05, 0.05"); } }
+      timing () { related_pin : "CLK"; timing_type : hold_rising;
+        rise_constraint(s) { values("0.02, 0.02", "0.02, 0.02"); }
+        fall_constraint(s) { values("0.02, 0.02", "0.02, 0.02"); } } }
+    pin(RESET_B) { direction : input; capacitance : 0.001;
+      timing () { related_pin : "CLK"; timing_type : recovery_rising;
+        rise_constraint(s) { values("0.11, 0.11", "0.11, 0.11"); } }
+      timing () { related_pin : "CLK"; timing_type : removal_rising;
+        rise_constraint(s) { values("0.07, 0.07", "0.07, 0.07"); } } }
+    pin(Q) { direction : output; function : "IQ";
+      timing () { related_pin : "CLK"; timing_type : rising_edge;
+        cell_rise(t) { values("0.10, 0.10", "0.10, 0.10"); }
+        cell_fall(t) { values("0.10, 0.10", "0.10, 0.10"); }
+        rise_transition(t) { values("0.03, 0.03", "0.03, 0.03"); }
+        fall_transition(t) { values("0.03, 0.03", "0.03, 0.03"); } } }
+  }
+}

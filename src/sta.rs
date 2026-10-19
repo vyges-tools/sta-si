@@ -28,7 +28,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use crate::inc::{HoldRec, InEdge, IncGraph, IncState, IncTopo, Lanes, Pred, SetupRec};
+use crate::inc::{checks_edge, HoldRec, InEdge, IncGraph, IncState, IncTopo, Lanes, Pred, SetupRec};
 use crate::job::{ExcKind, Exception, StaJob};
 use crate::liberty::{Arc, ClkEdge, Constraint, Dir, Lib};
 use crate::names::{instance_of, split_inst_pin};
@@ -3216,6 +3216,7 @@ fn build_report(
             for (l, req) in req_run[r][*idx].iter_mut().enumerate() {
                 *req = setup
                     .iter()
+                    .filter(|c| checks_edge(c, l == 0))
                     .map(|c| {
                         let (base, ck_slew) = base_of(c);
                         base - c.eval_edge(l == 0, ck_slew, late_slew[*idx][l])
@@ -3527,7 +3528,7 @@ fn build_report(
                     continue;
                 }
                 reached = true;
-                for c in hold {
+                for c in hold.iter().filter(|c| checks_edge(c, l == 0)) {
                     let (base, ck_slew) = base_of(c);
                     let sl = a + base - c.eval_edge(l == 0, ck_slew, early_slew[idx][l]);
                     if sl < slack {
@@ -3790,7 +3791,7 @@ fn build_report(
             };
             // (required, capture edge, capture clock arrival, relation) of each constraint;
             // the tightest one set the slack
-            let terms = cons.iter().map(|c| {
+            let terms = cons.iter().filter(|c| checks_edge(c, l == 0)).map(|c| {
                 let cl = usize::from(c.clk_edge == ClkEdge::Fall);
                 if max {
                     let cap_early = cap.map(|i| early_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);

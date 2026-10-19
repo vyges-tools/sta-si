@@ -1,0 +1,64 @@
+$ vyges-sta-si tcl examples/one_edge_check/one_edge.tcl
+exit: 0
+--- stdout ---
+Startpoint: rst_n (input port clocked by clk)
+Endpoint: r0 (recovery check against rising-edge clock clk)
+Path Group: asynchronous
+Path Type: max
+
+    Delay      Time   Description
+-------------------------------------------------------------
+   0.0000    0.0000   clock clk (rise edge)
+   0.0000    0.0000   clock network delay (ideal)
+   0.5000    0.5000 ^ input external delay
+   0.0000    0.5000 ^ rst_n (in)
+   0.0500    0.5500 ^ b0/X (BUF)
+   0.0000    0.5500 ^ r0/RESET_B (DFFR)
+             0.5500   data arrival time
+
+   2.0000    2.0000   clock clk (rise edge)
+   0.0000    2.0000   clock network delay (ideal)
+   0.0000    2.0000   clock reconvergence pessimism
+             2.0000 ^ r0/CLK (DFFR)
+  -0.1100    1.8900   library recovery time
+             1.8900   data required time
+-------------------------------------------------------------
+             1.8900   data required time
+            -0.5500   data arrival time
+-------------------------------------------------------------
+             1.3400   slack (MET)
+
+
+Startpoint: rst_n (input port clocked by clk)
+Endpoint: r0 (removal check against rising-edge clock clk)
+Path Group: asynchronous
+Path Type: min
+
+    Delay      Time   Description
+-------------------------------------------------------------
+   0.0000    0.0000   clock clk (rise edge)
+   0.0000    0.0000   clock network delay (ideal)
+   0.5000    0.5000 ^ input external delay
+   0.0000    0.5000 ^ rst_n (in)
+   0.0500    0.5500 ^ b0/X (BUF)
+   0.0000    0.5500 ^ r0/RESET_B (DFFR)
+             0.5500   data arrival time
+
+   0.0000    0.0000   clock clk (rise edge)
+   0.0000    0.0000   clock network delay (ideal)
+   0.0000    0.0000   clock reconvergence pessimism
+             0.0000 ^ r0/CLK (DFFR)
+   0.0700    0.0700   library removal time
+             0.0700   data required time
+-------------------------------------------------------------
+             0.0700   data required time
+            -0.5500   data arrival time
+-------------------------------------------------------------
+             0.4800   slack (MET)
+
+
+--- stderr ---
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 2 instance(s) of 2 master(s); 2 timed, 0 physical-only","objects":["clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 2 cell(s) loaded, 2 used by the design","objects":["clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-UNCONSTRAINED-INPUT","raw_msg":"1 input port(s) have no declared arrival and start no timed path (d). Add set_input_delay to time them.","objects":["port:d"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-DONE","raw_msg":"sta complete: WNS 1.3400 ns, TNS 0.0000 ns, WHS 0.4800 ns — 0 violation(s)"}
