@@ -73,3 +73,24 @@ fn a_flop_without_async_pins_gains_no_extra_checks() {
         "a plain DFF library should give exactly one hold check per flop"
     );
 }
+
+#[test]
+fn a_reset_arrival_does_not_reach_the_register_output_through_the_clear_arc() {
+    // Reference rule: register clear/preset arcs (`timing_type : clear` / `preset`, RESET_B->Q)
+    // are built as set/clear arcs that the timer does not search by default — no path leaves a
+    // register through its async pin, so the output is launched by the clock alone. A late reset
+    // (1.5 ns here, against a 0.30 ns clock-to-Q) must not show up at q_o.
+    let mut job = StaJob::load(&format!("{D}async_rst.sta")).unwrap();
+    job.input_delay = 1.5;
+    let nl = netlist::load(&job.resolve(&job.netlist)).unwrap();
+    let mut lib = Lib::default();
+    for l in &job.libs {
+        lib.cells.extend(Lib::load(&job.resolve(l)).unwrap().cells);
+    }
+    let t = Timer::build(&nl, &lib, &job, None).unwrap();
+    let rb = t.pin("r1/RESET_B").unwrap();
+    let q = t.pin("q_o").unwrap();
+    assert!(t.arrival(rb) >= 1.5, "the reset arrives late: {}", t.arrival(rb));
+    // through the clear arc q_o would arrive at 1.5 + 0.05 (buffer) + 0.25 (clear) = 1.80 ns
+    assert!(t.arrival(q) < 0.5, "q_o is launched by CLK->Q only, got {}", t.arrival(q));
+}
