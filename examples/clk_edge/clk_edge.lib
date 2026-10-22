@@ -3,6 +3,8 @@
    are 0.20 ns apart and a test can tell which one the engine used. Everything else is
    kept symmetric so nothing but the clock edge can move the numbers. */
 library(clk_edge) {
+  lu_table_template (s) { variable_1 : related_pin_transition; variable_2 : constrained_pin_transition; }
+  lu_table_template (t) { variable_1 : input_net_transition; variable_2 : total_output_net_capacitance; }
   time_unit : "1ns";
   capacitive_load_unit (1, pf);
   slew_lower_threshold_pct_rise : 20.0;

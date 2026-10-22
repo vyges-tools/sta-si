@@ -10,6 +10,8 @@ use vyges_sta_si::job::StaJob;
 // clock-slew change — separates the buffered and unbuffered cases.
 const LIB: &str = r#"
 library (crpr) {
+  lu_table_template (s) { variable_1 : related_pin_transition; variable_2 : constrained_pin_transition; }
+  lu_table_template (t) { variable_1 : input_net_transition; variable_2 : total_output_net_capacitance; }
   cell (INV) {
     pin (A) { direction : input; capacitance : 0.0015; }
     pin (Y) {
@@ -172,6 +174,8 @@ fn crpr_also_relaxes_hold() {
 // spread: post-CTS sky130 reports read 0.0642 of pessimism removal where the reference reads 0.
 const LIB_ASYM: &str = r#"
 library (crpr_asym) {
+  lu_table_template (s) { variable_1 : related_pin_transition; variable_2 : constrained_pin_transition; }
+  lu_table_template (t) { variable_1 : input_net_transition; variable_2 : total_output_net_capacitance; }
   cell (CLKBUF) {
     pin (A) { direction : input; capacitance : 0.001; }
     pin (X) {

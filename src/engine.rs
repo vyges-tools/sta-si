@@ -13,6 +13,7 @@ use crate::yosys_json;
 
 const DEMO_LIB: &str = r#"
 library (demo) {
+  lu_table_template (t) { variable_1 : input_net_transition; variable_2 : total_output_net_capacitance; }
   delay_model : table_lookup;
   cell (INV) {
     pin (A) { direction : input; capacitance : 0.0015; }

@@ -10,6 +10,7 @@ use vyges_sta_si::job::StaJob;
 
 const LIB: &str = r#"
 library (p) {
+  lu_table_template (t) { variable_1 : input_net_transition; variable_2 : total_output_net_capacitance; }
   cell (G) {
     pin (I1) { direction : input; capacitance : 0.001; }
     pin (I2) { direction : input; capacitance : 0.001; }

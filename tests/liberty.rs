@@ -2,6 +2,7 @@ use vyges_sta_si::liberty::{Dir, Lib};
 
 const LIB: &str = r#"
 library (test) {
+  lu_table_template (vyges_nldm) { variable_1 : input_net_transition; variable_2 : total_output_net_capacitance; }
   delay_model : table_lookup;
   cell (INV) {
     pin (A) {

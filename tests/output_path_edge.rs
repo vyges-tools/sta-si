@@ -11,6 +11,7 @@ use vyges_sta_si::job::StaJob;
 
 const LIB: &str = r#"
 library (e) {
+  lu_table_template (t) { variable_1 : input_net_transition; variable_2 : total_output_net_capacitance; }
   cell (DFF) {
     ff (IQ, IQN) { clocked_on : "CK"; next_state : "D"; }
     pin (CK) { direction : input; clock : true; capacitance : 0.001; }

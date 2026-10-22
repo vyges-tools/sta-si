@@ -10,6 +10,8 @@ use vyges_sta_si::sta::{analyze, Timer};
 
 const LIB: &str = r#"
 library (d) {
+  lu_table_template (s) { variable_1 : related_pin_transition; variable_2 : constrained_pin_transition; }
+  lu_table_template (t) { variable_1 : input_net_transition; variable_2 : total_output_net_capacitance; }
   cell (INV) {
     pin (A) { direction : input; capacitance : 0.0015; }
     pin (Y) {
@@ -219,6 +221,8 @@ fn timer_resize_updates_and_matches_rebuild() {
 
 const SEQ_LIB: &str = r#"
 library (seq) {
+  lu_table_template (s) { variable_1 : related_pin_transition; variable_2 : constrained_pin_transition; }
+  lu_table_template (t) { variable_1 : input_net_transition; variable_2 : total_output_net_capacitance; }
   cell (INV) {
     pin (A) { direction : input; capacitance : 0.0015; }
     pin (Y) {
