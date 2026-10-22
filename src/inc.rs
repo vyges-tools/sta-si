@@ -285,11 +285,7 @@ impl IncGraph {
                             (&arc.cell_fall, &arc.fall_transition)
                         };
                         for il in 0..2 {
-                            let feeds = match arc.sense.as_str() {
-                                "positive_unate" => il == ol,
-                                "negative_unate" => il != ol,
-                                _ => true,
-                            };
+                            let feeds = arc.feeds(il == 0, ol == 0); // the reference's edge pairs (latch D->Q, tri-state by kind)
                             if !feeds {
                                 continue;
                             }

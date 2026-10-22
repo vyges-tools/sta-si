@@ -1708,11 +1708,7 @@ fn build_report(
                 for arc in arcs.iter().filter(|a| a.out_edges.drives(ol == 0)) {
                     let (dt, st) = if ol == 0 { (&arc.cell_rise, &arc.rise_transition) } else { (&arc.cell_fall, &arc.fall_transition) };
                     for il in 0..2 {
-                        let feeds = match arc.sense.as_str() {
-                            "positive_unate" => il == ol,
-                            "negative_unate" => il != ol,
-                            _ => true,
-                        };
+                        let feeds = arc.feeds(il == 0, ol == 0); // the reference's edge pairs (latch D->Q, tri-state by kind)
                         if !feeds {
                             continue;
                         }
@@ -2203,11 +2199,7 @@ fn build_report(
                                     }
                                 }
                                 // does input edge `il` drive output edge `ol`?
-                                let feeds = match arc.sense.as_str() {
-                                    "positive_unate" => il == ol,
-                                    "negative_unate" => il != ol,
-                                    _ => true, // non_unate / unknown: worst of both
-                                };
+                                let feeds = arc.feeds(il == 0, ol == 0); // the reference's edge pairs (latch D->Q, tri-state by kind)
                                 if !feeds {
                                     continue;
                                 }
