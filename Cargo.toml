@@ -12,6 +12,11 @@ repository = "https://github.com/vyges-tools/sta-si"
 # Liberty and netlists (`.lib.gz`, `.v.gz`) read as the reference reads them. The shared
 # parsers + design model come from the vyges-loom foundation — sibling-checkout path dep in
 # dev; release pins a git/version dep. (sta-si is loom's seed: these readers originated here.)
+[features]
+# The command-line entry built into the library too (`cli_main`), for the suite binaries
+# that link every engine and run the one they are invoked as.
+suite = []
+
 [dependencies]
 vyges-loom = { git = "https://github.com/vyges-tools/loom", branch = "main", features = ["gzip"] }
 vyges-events = { git = "https://github.com/vyges-tools/events", branch = "main", default-features = false }

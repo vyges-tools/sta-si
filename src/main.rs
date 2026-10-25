@@ -479,7 +479,7 @@ fn emit_tcl(
     exit(0);
 }
 
-fn main() {
+pub fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "--describe") {
         // Machine-readable description of `run` for tooling that drives it.
