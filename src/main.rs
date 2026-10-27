@@ -58,7 +58,7 @@ usage:
 `sdc-lint` checks the SDC for completeness/consistency (unconstrained I/O, a clock with
 no period, duplicate clocks, a clock on a port the design lacks) — independent of timing.
 
-`tcl` runs an OpenSTA-style TCL *subset* (read_liberty/verilog/spef/sdc + inline SDC +
+`tcl` runs an STA-style Tcl *subset* (read_liberty/verilog/spef/sdc + inline SDC +
 report_checks/report_wns/report_tns) through the Vyges engine — EXPERIMENTAL; not a TCL
 interpreter and not a drop-in for LibreLane's corner.tcl. See docs/opensta-integration.md.
 
