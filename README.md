@@ -12,7 +12,7 @@ timing libraries, and a clock in — a slack report out.
 [cross-engine integration guide](https://docs.vyges.com/engines/integration.html) (how the four
 Vyges engines work together and where each plugs into an OpenROAD / LibreLane flow), and the
 job-file formats. In-repo depth: [`docs/engines-integration.md`](docs/engines-integration.md),
-[`docs/opensta-integration.md`](docs/opensta-integration.md),
+[`docs/tcl-adapter.md`](docs/tcl-adapter.md),
 [`integrations/librelane/`](integrations/librelane/). **Integrating at the binary level and need
 help?** → <https://vyges.com/contact>.
 
@@ -57,7 +57,7 @@ on: parse once, query many. So the netlist you time is the same object `vyges-po
 `vyges-extract` and `vyges-lvs` see, and a format the foundation learns is a format every engine
 gains — Yosys JSON support reached this timer as a few lines, not a port. It is also why adding
 a reader never drags a whole application in behind it (see
-[`docs/opensta-integration.md`](docs/opensta-integration.md)).
+[`docs/tcl-adapter.md`](docs/tcl-adapter.md)).
 
 ## The problem it solves
 
@@ -201,7 +201,7 @@ It reuses the SDC parser for all constraints (`read_sdc` + inline `create_clock`
 emits OpenSTA-flavoured reports. Commands outside the subset (`read_current_odb`,
 `estimate_parasitics`, `report_power`, `check_setup`, …) are **listed and skipped**, never
 silently dropped. **It is experimental, not a TCL interpreter, and not a drop-in for
-LibreLane's `corner.tcl`** — see [`docs/opensta-integration.md`](docs/opensta-integration.md)
+LibreLane's `corner.tcl`** — see [`docs/tcl-adapter.md`](docs/tcl-adapter.md)
 for the boundary and the production (LibreLane-step) path.
 
 **Why this exists** — *can you use the Rust Vyges engines inside an OpenROAD stack?* **Yes.**
@@ -281,7 +281,7 @@ Mapping estimate first, timing analysis second.
 The Tcl and Python paths are *conveniences*; the binary is the contract. **Integrating a Vyges
 engine directly into your tool and have questions or challenges?** We're happy to help and to
 shape the binary interface to your needs — reach us at **<https://vyges.com/contact>**. See
-[`docs/opensta-integration.md`](docs/opensta-integration.md) for all three paths in detail, and
+[`docs/tcl-adapter.md`](docs/tcl-adapter.md) for all three paths in detail, and
 [`docs/engines-integration.md`](docs/engines-integration.md) for **how all four Vyges engines
 (`char`/`extract`/`sta-si`/`em-ir`) work together** and where each plugs into a flow.
 

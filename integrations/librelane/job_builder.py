@@ -7,7 +7,7 @@ LibreLane runtime (see ``test_job_builder.py``). The LibreLane Step
 calls these.
 
 EXPERIMENTAL — Layer 2 of the OpenSTA integration (see
-``../../docs/opensta-integration.md``).
+``../../docs/tcl-adapter.md``).
 """
 
 from typing import List, Optional, Sequence

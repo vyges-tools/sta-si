@@ -57,8 +57,8 @@ Path Type: min
 
 
 --- stderr ---
-note: 1 OpenSTA command(s) outside the supported subset, ignored: report_checks -format (the full format is printed)
-      (experimental adapter — see docs/opensta-integration.md)
+note: 1 timing command(s) outside the supported subset, ignored: report_checks -format (the full format is printed)
+      (experimental adapter — see docs/tcl-adapter.md)
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIB-THRESHOLDS","raw_msg":"th_b.lib: its slew and delay thresholds differ from the first library's; its cells are timed at their own, and ports at the first library's"}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 3 instance(s) of 2 master(s); 3 timed, 0 physical-only","objects":["clock:clk"]}
 {"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 6 cell(s) loaded, 2 used by the design","objects":["clock:clk"]}

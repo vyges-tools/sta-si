@@ -60,7 +60,7 @@ no period, duplicate clocks, a clock on a port the design lacks) — independent
 
 `tcl` runs an STA-style Tcl *subset* (read_liberty/verilog/spef/sdc + inline SDC +
 report_checks/report_wns/report_tns) through the Vyges engine — EXPERIMENTAL; not a TCL
-interpreter and not a drop-in for LibreLane's corner.tcl. See docs/opensta-integration.md.
+interpreter and not a drop-in for LibreLane's corner.tcl. See docs/tcl-adapter.md.
 
 flags:
   -o FILE               write output to FILE (default: stdout)
@@ -732,10 +732,10 @@ pub fn main() {
                     exit(2);
                 }
             };
-            // Never silently drop: surface OpenSTA commands outside the subset.
+            // Never silently drop: surface commands outside the subset.
             if !adapted.ignored.is_empty() && !cli.quiet {
                 eprintln!(
-                    "note: {} OpenSTA command(s) outside the supported subset, ignored: {}\n      (experimental adapter — see docs/opensta-integration.md)",
+                    "note: {} timing command(s) outside the supported subset, ignored: {}\n      (experimental adapter — see docs/tcl-adapter.md)",
                     adapted.ignored.len(),
                     adapted.ignored.join(", ")
                 );

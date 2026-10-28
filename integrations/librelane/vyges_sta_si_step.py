@@ -2,7 +2,7 @@
 LibreLane / OpenROAD flow.
 
 EXPERIMENTAL — Layer 2 of the OpenSTA integration (see
-``../../docs/opensta-integration.md``). Unlike the ``vyges-sta-si tcl`` adapter (Layer 1),
+``../../docs/tcl-adapter.md``). Unlike the ``vyges-sta-si tcl`` adapter (Layer 1),
 this does **no TCL parsing** — it consumes the structured **State** the flow already has
 (netlist, per-corner SDC/SPEF, and the per-corner Liberty from config), runs the engine per
 corner, and writes ``vyges__…`` metrics *beside* OpenSTA's. The point is the comparison: run

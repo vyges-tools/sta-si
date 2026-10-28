@@ -10,7 +10,7 @@ Run (with this directory on PYTHONPATH so the plugin modules import):
     export PYTHONPATH="$PWD:$PYTHONPATH"
     librelane --flow ClassicWithVyges <your-config.json>
 
-EXPERIMENTAL — see ../../docs/opensta-integration.md.
+EXPERIMENTAL — see ../../docs/tcl-adapter.md.
 """
 
 from librelane.flows import Flow, SequentialFlow

@@ -16,6 +16,6 @@ post-route on the real parasitics. For most teams this is the highest-value sing
 
 ## sta-si-specific depth (code-coupled, stays in this repo)
 
-- [`docs/opensta-integration.md`](opensta-integration.md) — the experimental OpenSTA-TCL-subset
+- [`docs/tcl-adapter.md`](tcl-adapter.md) — the experimental OpenSTA-TCL-subset
   adapter and the LibreLane plugin Step.
 - `integrations/librelane/` — the LibreLane Step that emits `vyges__…` metrics.

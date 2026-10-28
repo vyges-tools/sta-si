@@ -1,7 +1,7 @@
 # Integrating `vyges-sta-si` with LibreLane
 
 > **EXPERIMENTAL** — Layer 2 of the OpenSTA integration
-> (see [`../../docs/opensta-integration.md`](../../docs/opensta-integration.md)).
+> (see [`../../docs/tcl-adapter.md`](../../docs/tcl-adapter.md)).
 
 This directory is a LibreLane **plugin Step** that runs `vyges-sta-si` as a **second-opinion
 timer** inside a LibreLane / OpenROAD flow. It does **no TCL parsing** — it consumes the

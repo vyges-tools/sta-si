@@ -3,7 +3,7 @@
 //! Ingests an **OpenSTA-style TCL *subset*** and drives the vyges-sta-si engine,
 //! emitting OpenSTA-flavoured reports. This is **not** a TCL interpreter and **not**
 //! a drop-in for LibreLane's `corner.tcl` (which needs OpenSTA's command API +
-//! LibreLane's `io.tcl` + OpenROAD's ODB) — see `docs/opensta-integration.md`. It
+//! LibreLane's `io.tcl` + OpenROAD's ODB) — see `docs/tcl-adapter.md`. It
 //! interoperates with the *portable* command set a hand-written OpenSTA script uses:
 //!
 //! ```tcl
