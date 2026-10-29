@@ -3,7 +3,7 @@
 *Status: design / intent. Created 2026-06-08.*
 
 > Goal: make `vyges-sta-si` usable by the flows that drive timing through **Tcl** today:
-> standalone timing scripts and, in production, **LibreLane**. A team can then run the Vyges
+> standalone OpenSTA scripts and, in production, **LibreLane**. A team can then run the Vyges
 > timer for the basic timing question *and* as the **SI + statistical-OCV** "second opinion" the
 > README describes. This doc explains **what those Tcl timing scripts actually contain**, why the
 > obvious adapter is the wrong target, and the **two-layer adapter** that is right.
@@ -86,7 +86,8 @@ flow's State and emits `vyges__…` metrics. The integration walkthrough is in
 
 ## 1. What a Tcl timing script actually contains
 
-A Tcl-driven timer runs a script whose commands go into the timer's embedded Tcl interpreter.
+OpenSTA, the timer inside OpenROAD and LibreLane, is a Tcl application: a script's commands go
+into its embedded Tcl interpreter.
 In a hand-written flow that script is short and portable:
 
 ```tcl

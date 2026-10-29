@@ -28,8 +28,8 @@ integrity) starts to move those numbers enough that ignoring it is not sign-off.
 
 In production, timing sign-off is **the commercial sign-off timer** — crosstalk
 delay/noise, statistical/AOCV-POCV derating,
-multi-corner multi-mode — gated behind major licenses. The open baseline is the
-**open-source reference timer** used inside open flows such as LibreLane; solid for delay, but
+multi-corner multi-mode — gated behind major licenses. The open baseline is
+**OpenSTA**, the timer inside OpenROAD and LibreLane; solid for delay, but
 SI/crosstalk and advanced OCV are where it stops short of advanced-node sign-off.
 `vyges-sta-si` is an open engine in that space, behind the standard file formats
 (Verilog, Liberty, SPEF, SDC), and correlated against that reference timer as its baseline.
@@ -189,7 +189,7 @@ SI + statistical-OCV view.
 
 ### Run an existing Tcl timing script — `tcl` (experimental)
 
-If you already have a Tcl timing script, the **experimental** `tcl` subcommand runs its
+If you already have an OpenSTA-style Tcl script, the **experimental** `tcl` subcommand runs its
 portable subset through the Vyges engine — no `.sta` job needed:
 
 ```sh
@@ -580,7 +580,7 @@ first sub-100nm node)**, whose reg-to-reg setup/hold/POCV example is in
 Propagation is **rise/fall-split by arc unateness** — an inverter chain alternates
 edges rather than taking `max(rise,fall)` per stage, matching how real paths behave.
 
-**Correlated against the reference timer per endpoint**, on a routed sky130 block (post-route netlist,
+**Correlated against OpenSTA per endpoint**, on a routed sky130 block (post-route netlist,
 the flow's own extracted SPEF, the same Liberty and SDC given to both), with the reference re-run rather than
 read from an archive:
 
