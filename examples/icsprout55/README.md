@@ -21,7 +21,7 @@ Typical corner (tt, 1.2 V, 25 °C), 2 ns clock:
 A 3-sigma statistical band trims both margins — the concrete reason advanced-node
 sign-off needs OCV, not a flat derate. The launch path is a real `DFFQX1H7R` CK→Q
 arc; cell delays *and* setup/hold constraints are bilinear interpolations of the
-foundry's NLDM tables (constraints correlated against OpenSTA).
+foundry's NLDM tables (constraints correlated against the reference timer).
 
 ## Multi-corner sign-off (MCMM)
 

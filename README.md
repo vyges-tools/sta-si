@@ -10,7 +10,7 @@ timing libraries, and a clock in — a slack report out.
 
 **Docs:** [docs.vyges.com](https://docs.vyges.com) — this engine's chapter, the
 [cross-engine integration guide](https://docs.vyges.com/engines/integration.html) (how the four
-Vyges engines work together and where each plugs into an OpenROAD / LibreLane flow), and the
+Vyges engines work together and where each plugs into a LibreLane or other open place-and-route flow), and the
 job-file formats. In-repo depth: [`docs/engines-integration.md`](docs/engines-integration.md),
 [`docs/tcl-adapter.md`](docs/tcl-adapter.md),
 [`integrations/librelane/`](integrations/librelane/). **Integrating at the binary level and need
@@ -28,14 +28,14 @@ integrity) starts to move those numbers enough that ignoring it is not sign-off.
 
 In production, timing sign-off is **the commercial sign-off timer** — crosstalk
 delay/noise, statistical/AOCV-POCV derating,
-multi-corner multi-mode — gated behind major licenses. The open baseline is
-**OpenSTA** (used inside OpenROAD/LibreLane); solid for delay, but SI/crosstalk
-and advanced OCV are where it stops short of advanced-node sign-off.
+multi-corner multi-mode — gated behind major licenses. The open baseline is the
+**open-source reference timer** used inside open flows such as LibreLane; solid for delay, but
+SI/crosstalk and advanced OCV are where it stops short of advanced-node sign-off.
 `vyges-sta-si` is an open engine in that space, behind the standard file formats
-(Verilog, Liberty, SPEF, SDC), and correlated against OpenSTA as its baseline.
+(Verilog, Liberty, SPEF, SDC), and correlated against that reference timer as its baseline.
 
-**Describe the job, not the script.** Every incumbent here — the commercial sign-off timer,
-OpenSTA — is driven by hand-written **Tcl**, a recurring source of silent typos,
+**Describe the job, not the script.** Every incumbent here — the commercial sign-off timer and
+the open reference timer alike — is driven by hand-written **Tcl**, a recurring source of silent typos,
 copy-paste drift across corners and blocks, and brittle maintenance. `vyges-sta-si`
 takes a small **declarative job file** (`.sta`) instead: readable, diffable,
 schema-checkable, with no control flow to get wrong. And the one constraint artifact
@@ -44,9 +44,9 @@ is a toolchain-wide property: char, extract, and em-ir are configured the same w
 
 **Validate fast, sign off with your tool.** `vyges-sta-si` reads the **standard
 formats** (Verilog, Liberty, SPEF, SDC), so you iterate timing in the fast Vyges loop
-and hand the *same files* to OpenSTA or the commercial sign-off timer for final sign-off — no flow change,
+and hand the *same files* to the reference timer or the commercial sign-off timer for final sign-off — no flow change,
 just a different timer on identical inputs. That interop is demonstrated, not promised:
-on a real routed block, sta-si and OpenSTA agree on WNS within **~1 %** — on the same critical
+on a real routed block, sta-si and the reference timer agree on WNS within **~1 %** — on the same critical
 path — from the same library/SPEF/SDC. Adopt it for the fast inner loop where licenses are scarce and runs
 are slow; keep your sign-off tool for tape-out.
 
@@ -96,7 +96,7 @@ else flat.
 ## When & how to use it in your flow
 
 ```text
-  RTL  ─[Yosys]─► netlist ─[OpenROAD: place+route]─► layout
+  RTL  ─[Yosys]─► netlist ─[place + route]─────────► layout
                     │                                  │
                     │                                  └─[vyges-extract]─► *.spef
    *.lib (from the PDK, or vyges-char) ──┐                                   │
@@ -127,7 +127,7 @@ stated as gaps rather than papered over.
 | **Statistical STA / on-chip variation** | **yes** | Flat derate, **AOCV** (depth-dependent derate table), and **POCV** — a per-stage sigma with an N-sigma band growing as √depth (RSS), not linearly. Auto-enables from Liberty **LVF** `ocv_sigma_*` tables when the library carries them. **CRPR** credits back shared launch/capture clock pessimism. |
 | **SI and crosstalk analysis** | **yes** | Coupling capacitance from SPEF with a Miller multiplier, filtered by **switching-window overlap** and iterated to convergence. **CCS** current-source delay when the Liberty has it, **effective capacitance** with resistive shielding (π-model reduction, Ceff iteration), and a **waveform-into-RC transient** for net delay and sink-slew degradation, measured at the library's own slew thresholds. |
 | **Very large designs (>10 M gates)** | **not proven** | Runs just under **1 M instances** in ~33 s at ~11 GB, single-threaded. Nothing at 10 M has been run, so nothing is claimed there. Measured numbers, and the thing that actually governs them, are below. |
-| **Fits an existing flow** | **partial** | Standard formats end to end: Liberty (NLDM/CCS/LVF), gate-level Verilog or Yosys JSON, SPEF, SDC in; SDF back-annotation and JSON reports out. Driven by a declarative job file, or an **experimental** OpenSTA-style Tcl subset. That subset is not a drop-in for a Tcl-driven sign-off flow, and is not meant to be — see below. |
+| **Fits an existing flow** | **partial** | Standard formats end to end: Liberty (NLDM/CCS/LVF), gate-level Verilog or Yosys JSON, SPEF, SDC in; SDF back-annotation and JSON reports out. Driven by a declarative job file, or an **experimental** Tcl subset in the common STA command style. That subset is not a drop-in for a Tcl-driven sign-off flow, and is not meant to be — see below. |
 
 The first two are the point: they are the margins the open baseline does not give you, and they
 are why running this **alongside** an open sign-off timer tells you something new rather than
@@ -165,11 +165,11 @@ loop, and with them when you want the SI and RC-accurate answer. The two are not
 and on this benchmark the parasitics move WNS by well under a picosecond on a 2 ns period — so
 which one you want is a real choice, not a formality.
 
-### Where it sits vs OpenSTA / the commercial signoff timer — run it *first*, not *instead*
+### Where it sits vs the reference and commercial signoff timers — run it *first*, not *instead*
 
 `vyges-sta-si` is an **early-flow and complementary** engine, **not a tapeout
-sign-off replacement** for OpenSTA or the commercial signoff timer. It is *correlated to*
-OpenSTA — on a routed sky130 block, setup and hold agree to an RMS of **0.03 ns per
+sign-off replacement** for the reference timer or the commercial signoff timer. It is *correlated to*
+the reference timer — on a routed sky130 block, setup and hold agree to an RMS of **0.03 ns per
 endpoint** over the endpoint set both report (see *Current state*) — and it is far narrower:
 it covers a flop-based standard-cell abstraction and declines the rest (see *What it does
 not model*). So it runs **upstream of**, and **alongside**, the signoff tool, never in lieu
@@ -178,18 +178,18 @@ of it for tape-out:
 | Stage | Run | Why |
 | --- | --- | --- |
 | RTL / synth / P&R **iteration** | **`vyges-sta-si`** as the fast inner-loop + CI gate | std-only binary, no Tcl, `--fail-on-violation` exit 3 — catch timing breaks in seconds before spinning a full signoff run |
-| **Pre-signoff** (open flow) | `vyges-sta-si` **then OpenSTA** | OpenSTA is the open signoff authority; sta-si adds the two margins OpenSTA genuinely lacks — **SI/crosstalk** and **statistical (AOCV/POCV-LVF) OCV** — as a second opinion. *(Multi-clock, timing exceptions, CRPR and flat-OCV derate OpenSTA already does, from the same SDC — so those agree, by design.)* |
+| **Pre-signoff** (open flow) | `vyges-sta-si` **then the open reference timer** | The reference timer is the open signoff authority; sta-si adds the two margins it lacks — **SI/crosstalk** and **statistical (AOCV/POCV-LVF) OCV** — as a second opinion. *(Multi-clock, timing exceptions, CRPR and flat-OCV derate the reference timer already does, from the same SDC — so those agree, by design.)* |
 | **Tape-out signoff** (if licensed) | `vyges-sta-si` early, **the commercial sign-off timer** for signoff | The commercial sign-off timer is the authority; sta-si stays the fast iteration loop + SI/crosstalk cross-check. Don't replace it with sta-si for the mask set |
 
 So the rule of thumb: **run `vyges-sta-si` first and often** (iteration + regression
-gate + SI/crosstalk + statistical-OCV insight), then hand off to **OpenSTA** (open
+gate + SI/crosstalk + statistical-OCV insight), then hand off to **the open reference timer** (open
 signoff) or **the commercial sign-off timer** (licensed signoff) for the authoritative final numbers. Its
 unique value even when you have the commercial sign-off timer is the fast, license-free loop and the bundled
 SI + statistical-OCV view.
 
-### Run an OpenSTA-style script — `tcl` (experimental)
+### Run an existing Tcl timing script — `tcl` (experimental)
 
-If you already have an OpenSTA TCL script, the **experimental** `tcl` subcommand runs its
+If you already have a Tcl timing script, the **experimental** `tcl` subcommand runs its
 portable subset through the Vyges engine — no `.sta` job needed:
 
 ```sh
@@ -198,18 +198,18 @@ vyges-sta-si tcl design.tcl --fail-on-violation   # same CI gate (exit 3)
 ```
 
 It reuses the SDC parser for all constraints (`read_sdc` + inline `create_clock`/`set_*`) and
-emits OpenSTA-flavoured reports. Commands outside the subset (`read_current_odb`,
+emits reports in the conventional STA text layout. Commands outside the subset (`read_current_odb`,
 `estimate_parasitics`, `report_power`, `check_setup`, …) are **listed and skipped**, never
 silently dropped. **It is experimental, not a TCL interpreter, and not a drop-in for
 LibreLane's `corner.tcl`** — see [`docs/tcl-adapter.md`](docs/tcl-adapter.md)
 for the boundary and the production (LibreLane-step) path.
 
-**Why this exists** — *can you use the Rust Vyges engines inside an OpenROAD stack?* **Yes.**
+**Why this exists** — *can you use the Rust Vyges engines inside a Tcl-driven open flow?* **Yes.**
 The engine doesn't *need* Tcl (it's declarative by design — no Tcl typos or copy-paste corner
-drift), but your OpenROAD / OpenSTA flow speaks Tcl today. So we built this adapter to let you
+drift), but your flow speaks Tcl today. So we built this adapter to let you
 try the Rust engine in your existing stack with **zero rewrite** — the on-ramp, not the
 destination (the `.sta` job stays the recommended driver). **It's experimental and we want your
-feedback**: which OpenSTA commands and report formats does your flow actually depend on? File a
+feedback**: which Tcl timing commands and report formats does your flow actually depend on? File a
 feature request (`vyges-sta-si --feature-request`) — real usage should draw the subset boundary.
 
 ### Coming from Yosys — feed `write_json` straight in
@@ -258,8 +258,7 @@ yosys -p "read_verilog top.v; write_json top.json"
 Post-layout, add your `spef:` as usual — the netlist source is independent of parasitics.
 
 **What about ABC's `-liberty` timing?** ABC reads Liberty and has its own static timer
-(`read_lib`, `stime`), and it is *not* OpenSTA — it is UC Berkeley ABC's own, independent of any
-sign-off timer. But it is **mapping-time estimation**: it exists to steer gate selection during
+(`read_lib`, `stime`), and it is UC Berkeley ABC's own, independent of any sign-off timer. But it is **mapping-time estimation**: it exists to steer gate selection during
 technology mapping, so it works from library delays alone — no parasitics, no SDC exceptions or
 generated clocks, no crosstalk, no OCV/AOCV derating. That is the right trade for choosing
 gates, and the wrong basis for believing a number.
@@ -272,10 +271,10 @@ Mapping estimate first, timing analysis second.
 
 1. **Direct binary** *(recommended for new / upstream integration)* — `vyges-sta-si` is a plain
    binary: a declarative `.sta` job in, **JSON out**, CI-gating exit code. Any tool or flow —
-   OpenROAD, LibreLane, a custom orchestrator, any language — can just `vyges-sta-si run job.sta
+   LibreLane, a place-and-route tool, a custom orchestrator, any language — can just `vyges-sta-si run job.sta
    --json`. **No Python, no Tcl, no linking.**
-2. **`vyges-sta-si tcl`** (above) — for existing OpenSTA *scripts*.
-3. **LibreLane Step** — for LibreLane-native *metrics* beside OpenSTA's
+2. **`vyges-sta-si tcl`** (above) — for existing Tcl timing *scripts*.
+3. **LibreLane Step** — for LibreLane-native *metrics* beside the flow's own timing metrics
    ([`integrations/librelane/`](integrations/librelane/)).
 
 The Tcl and Python paths are *conveniences*; the binary is the contract. **Integrating a Vyges
@@ -300,17 +299,17 @@ Run with `--json` for machine-readable output. Capture:
 How those feed the next step:
 
 1. **Gate the loop** — `--fail-on-violation` (exit 3) in CI stops a broken design
-   before it ever reaches OpenSTA/PT, saving the slow run.
+   before it ever reaches the sign-off timer, saving the slow run.
 2. **Fix, then re-run** — the worst path's gates are the ECO target: resize/buffer,
    re-place, retime, or reconstrain the clock; iterate on sta-si until it meets.
-3. **Cross-check at signoff** — compare `wns_ns` to OpenSTA/PT. Agreement within the
+3. **Cross-check at signoff** — compare `wns_ns` to the sign-off timer's. Agreement within the
    correlation band ⇒ confidence; a **gap ⇒ the SI/crosstalk or statistical-OCV delta
    sta-si adds** — coupling or variation risk to inspect in the signoff tool.
 4. **Hand off the same inputs** — netlist + `.lib` + `.spef` + SDC are unchanged, so
    the signoff tool runs on identical data; sta-si's worst-path report tells the
    signoff engineer which paths to scrutinise first.
 
-In the open flow it occupies the slot where OpenSTA runs inside LibreLane.
+In the open flow it occupies the slot where the reference timer runs inside LibreLane.
 
 ## Use it
 
@@ -387,7 +386,7 @@ pocv_n:     3.0             # POCV: number of sigmas for the bound (default 3.0)
 
 ### Constraints from SDC
 
-Real flows (synthesis, OpenROAD/LibreLane) emit their timing intent as **SDC**.
+Real flows (synthesis, place-and-route, LibreLane) emit their timing intent as **SDC**.
 Point the job at one with `sdc:` and the constraints are read straight from it —
 the netlist, libraries, and parasitics still come from the job (they are not in
 SDC). The SDC is **authoritative** for what it sets; explicit `.sta` values fill
@@ -438,7 +437,7 @@ flat / POCV / multi-corner (`mcmm.sta`) runs.
 Four rules shape this engine, and they explain most of what it does and does not do.
 
 **1. It is a transcription, not an independent implementation.** Where `vyges-sta-si`
-disagrees with OpenSTA, that is a defect here — not a difference of opinion, and not
+disagrees with the reference timer, that is a defect here — not a difference of opinion, and not
 something to argue about. The rules are read out of the reference's source, and each one is
 pinned by a test that states the rule it came from. The corollary trips people up: being
 *more accurate* than the reference is also a defect. When the reference computes an
@@ -569,10 +568,10 @@ of the SDC, independent of the timing run). Fully offline; one third-party depen
 
 It **closes the loop with the other engines**: it reads the
 Liberty `vyges-char` emits and the SPEF (incl. coupling + RC tree) `vyges-extract`
-emits — the SI margin OpenSTA lacks.
+emits — the SI margin the reference timer lacks.
 
 Cell delays *and* setup/hold constraints are bilinear NLDM interpolations at the
-operating slews (not table maxima) — the constraint methodology matches OpenSTA.
+operating slews (not table maxima) — the constraint methodology matches the reference timer.
 
 **Validated on real PDKs:** sky130, gf180, ihp-sg13g2, and **icsprout55 (55nm — our
 first sub-100nm node)**, whose reg-to-reg setup/hold/POCV example is in
@@ -581,8 +580,8 @@ first sub-100nm node)**, whose reg-to-reg setup/hold/POCV example is in
 Propagation is **rise/fall-split by arc unateness** — an inverter chain alternates
 edges rather than taking `max(rise,fall)` per stage, matching how real paths behave.
 
-**Correlated against OpenSTA per endpoint**, on a routed sky130 block (post-route netlist,
-OpenRCX SPEF, the same Liberty and SDC given to both), with the reference re-run rather than
+**Correlated against the reference timer per endpoint**, on a routed sky130 block (post-route netlist,
+the flow's own extracted SPEF, the same Liberty and SDC given to both), with the reference re-run rather than
 read from an archive:
 
 - **setup** — RMS **0.032 ns** over the 790 endpoints both timers report, 7 of them outside
@@ -598,7 +597,7 @@ engine's life setup WNS sat 1.9 % from the reference while a tenth of its endpoi
 by more than 11 ns — a worst-slack figure cannot see that, and neither can a reader who is
 only given one.
 
-On a **real routed sky130 block** (post-route netlist + OpenRCX SPEF), measured against the
+On a **real routed sky130 block** (post-route netlist + the flow's own extracted SPEF), measured against the
 sign-off timer's own checked-in results rather than a re-run:
 
 | | agreement |
@@ -621,4 +620,4 @@ load and delay. v1 uses a representative scalar; full slew/load-resolved receive
 load is future.
 
 The road to sign-off grade builds on the same graph: slew/load-resolved receiver
-load and widening PBA from 1-exchange to k-worst enumeration. The SI margin it adds over OpenSTA stays.
+load and widening PBA from 1-exchange to k-worst enumeration. The SI margin it adds over the reference timer stays.

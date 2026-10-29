@@ -1,12 +1,12 @@
 # Integrating `vyges-sta-si` with LibreLane
 
-> **EXPERIMENTAL** — Layer 2 of the OpenSTA integration
+> **EXPERIMENTAL** — Layer 2 of the Tcl flow integration
 > (see [`../../docs/tcl-adapter.md`](../../docs/tcl-adapter.md)).
 
 This directory is a LibreLane **plugin Step** that runs `vyges-sta-si` as a **second-opinion
-timer** inside a LibreLane / OpenROAD flow. It does **no TCL parsing** — it consumes the
-structured **State** the flow already has and writes `vyges__…` metrics **next to** OpenSTA's,
-so the SI + statistical-OCV delta is just a metric comparison. It runs *alongside* OpenSTA; it
+timer** inside a LibreLane flow. It does **no TCL parsing** — it consumes the
+structured **State** the flow already has and writes `vyges__…` metrics **next to** the flow's own timing metrics,
+so the SI + statistical-OCV delta is just a metric comparison. It runs *alongside* the flow's timer; it
 does not replace the signoff timer.
 
 ---
@@ -22,7 +22,7 @@ vyges-sta-si run corner.sta --json -o corner.json   # then parse corner.json
 ```
 
 Use the plugin below **only** when you want the result wired into LibreLane as native
-`vyges__…` **metrics** (so it shows up in the run's `metrics.json` beside OpenSTA's). For
+`vyges__…` **metrics** (so it shows up in the run's `metrics.json` beside the flow's own timing metrics). For
 anything else, the binary is the cleanest contract. *(Integrating directly and have questions?
 File at <https://vyges.com/contact> — we'll help; see the design doc's "Direct binary" section.)*
 
@@ -88,20 +88,20 @@ vyges__timing__hold__ws
 ```
 
 **The second opinion = the comparison.** For each corner, diff Vyges (SI-aware) against the
-OpenSTA value the flow already produced:
+timing value the flow already produced:
 
 ```
 vyges__timing__setup__ws__corner:<c>   vs   timing__setup__ws__corner:<c>
 ```
 
-A meaningful gap is the crosstalk/statistical-OCV margin OpenSTA-in-LibreLane doesn't model —
+A meaningful gap is the crosstalk/statistical-OCV margin LibreLane's timing step doesn't model —
 inspect it in your signoff tool. *(A timing violation is recorded as a metric here, **not** a
 step failure; the flow's own checkers decide pass/fail.)*
 
 ### What it reads from the flow (per corner)
 
 - **netlist** — `DesignFormat.NETLIST` (State)
-- **liberty** — `toolbox.get_timing_files_categorized(config, corner)` (the same per-corner libs OpenSTA uses)
+- **liberty** — `toolbox.get_timing_files_categorized(config, corner)` (the same per-corner libs the flow's timing step uses)
 - **SPEF** — per-corner `DesignFormat.SPEF` (State), if extracted
 - **SDC** — `DesignFormat.SDC` (State), else `SIGNOFF_SDC_FILE` / `PNR_SDC_FILE`
 
@@ -121,4 +121,4 @@ step failure; the flow's own checkers decide pass/fail.)*
 The pure job-builder core is unit-tested. The Step is written against the real LibreLane `Step`
 API but **not yet run end-to-end in a full flow** — that's the remaining validation pass (run
 `ClassicWithVyges` on a real design and diff `vyges__…` vs `timing__…`). Experimental until
-then; graduates into the Sley orchestrator's step set later.
+then.
