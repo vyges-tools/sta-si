@@ -21,7 +21,6 @@
 // library too, and its `vyges_sta_si::…` paths resolve here.
 extern crate self as vyges_sta_si;
 
-pub mod ipmeta; // the clock_domains slice of vyges-metadata.json
 pub mod job;
 // Parsers + CCS data model now come from the shared vyges-loom foundation
 // (sta-si was loom's seed — these originated here). Re-exported under the crate
@@ -32,7 +31,8 @@ pub use vyges_loom::{ccs, dmp, liberty, names, netlist, sdc, spef, yosys_json};
 pub mod repair;
 pub mod engine;
 mod inc;
-pub mod sdclint; // SDC constraint linter (completeness + consistency)
+// SDC constraint linter + its metadata reader: in loom since 2026-10-30, shared with `vyges sdc`.
+pub use vyges_loom::{ipmeta, sdc_lint as sdclint};
 pub mod sdf; // SDF (Standard Delay Format) back-annotation writer
 pub mod si;
 pub mod sta;
