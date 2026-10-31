@@ -3153,7 +3153,8 @@ fn build_report(
     let inst_of = |node: usize| instance_of(&labels[node]).to_string();
     // Membership, not equality: an exception may name a whole bus on either side, and the
     // rule for that lives once in `Exception::covers` rather than being re-derived here.
-    let match_exc = |ln: &str, cn: &str| job.exceptions.iter().find(|e| e.covers(ln, cn));
+    // the HOLD check's exception: a `-setup` false path leaves it timed (Exception::applies_to)
+    let match_exc = |ln: &str, cn: &str| job.exceptions.iter().filter(|e| e.applies_to(true)).find(|e| e.covers(ln, cn));
     let mut excluded_setup = vec![false; n]; // false-path endpoints (skip setup)
     // the reference's rule, where the job asks for it: an output with no output delay ends no path
     if job.unconstrained_outputs {
@@ -3197,9 +3198,9 @@ fn build_report(
             let lck = launch_ck(*idx, run.from);
             let pl = lck.map(&clock_period_of).unwrap_or(pc);
             let ln = lck.map(&inst_of).unwrap_or_default();
-            // A `-hold` multicycle does not move the SETUP check, and `-start` counts the launch
-            // clock's cycles where the default `-end` counts the capture clock's.
-            let setup_exc = |e: &&Exception| !(matches!(e.kind, ExcKind::Multicycle(_)) && e.hold);
+            // A `-hold` multicycle or false path does not reach the SETUP check, and `-start`
+            // counts the launch clock's cycles where the default `-end` counts the capture clock's.
+            let setup_exc = |e: &&Exception| e.applies_to(false);
             let mut shift = 0.0;
             if let Some(e) = job.exceptions.iter().filter(setup_exc).find(|e| e.covers(&ln, &inst_of(*idx))) {
                 match e.kind {
@@ -3791,7 +3792,7 @@ fn build_report(
             let pc = cap.map(&clock_period_of).unwrap_or(period);
             let pl = pl_or(pc);
             let shift = if max {
-                let setup_exc = |e: &&Exception| !(matches!(e.kind, ExcKind::Multicycle(_)) && e.hold);
+                let setup_exc = |e: &&Exception| e.applies_to(false);
                 match job.exceptions.iter().filter(setup_exc).find(|e| e.covers(&ln, &inst_of(v))) {
                     Some(e) => match &e.kind {
                         ExcKind::Multicycle(cyc) => cyc.saturating_sub(1) as f64 * if e.start { pl } else { pc },

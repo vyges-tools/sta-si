@@ -502,7 +502,9 @@ pub fn main() {
     "properties": {
       "job": { "type": "string", "description": "the timing job file" },
       "sdf": { "type": "string", "description": "optional SDF delays file" },
-      "out": { "type": "string", "description": "write the report to FILE instead of stdout" }
+      "out": { "type": "string", "description": "write the report to FILE instead of stdout" },
+      "nldm_only": { "type": "boolean", "description": "read the Liberty NLDM tables only, skipping CCS" },
+      "emit_liberty_json": { "type": "string", "description": "also write the parsed Liberty as JSON to FILE" }
     }
   },
   "artifacts": [ { "role": "timing_report", "field": "report_path" }, { "role": "sdf", "from_arg": "sdf" } ],
@@ -511,7 +513,27 @@ pub fn main() {
     "field": "timing_met",
     "pass_when": { "is_true": true }
   },
-  "consumes": ["netlist", "liberty", "spef"]
+  "consumes": ["netlist", "liberty", "spef"],
+  "tools": [
+    {
+      "name": "sta-si.tcl",
+      "summary": "static timing from an OpenSTA-style Tcl script (read_liberty / read_verilog / link_design / read_sdc / report_*), experimental subset; commands outside it are listed, not run",
+      "invocation": {
+        "args_template": ["tcl", "{script}"],
+        "optional": [ { "arg": "out", "flag": "-o" }, { "arg": "nldm_only", "flag": "--liberty-nldm-only" } ],
+        "emits_json": false
+      },
+      "inputs": {
+        "type": "object",
+        "required": ["script"],
+        "properties": {
+          "script": { "type": "string", "description": "the timing Tcl script" },
+          "out": { "type": "string", "description": "write the report to FILE instead of stdout" },
+          "nldm_only": { "type": "boolean", "description": "read the Liberty NLDM tables only, skipping CCS" }
+        }
+      }
+    }
+  ]
 }
 "#;
         print!("{DESCRIBE}");

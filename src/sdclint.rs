@@ -782,15 +782,22 @@ mod tests {
             .any(|f| f.code == "no-clock" && f.severity == Severity::Error));
     }
 
+    /// A zero period never reaches the lint: the reader refuses it, as the reference does
+    /// (`check_positive_float`, Error 572).
     #[test]
-    fn zero_period_and_dup_name_are_errors() {
+    fn a_zero_period_is_refused_at_read() {
+        let e = Sdc::parse("create_clock -name clk -period 0 [get_ports clk]\n").unwrap_err();
+        assert!(e.to_string().contains("positive float"), "{e}");
+    }
+
+    #[test]
+    fn dup_clock_name_is_an_error() {
         let sdc = Sdc::parse(
-            "create_clock -name clk -period 0 [get_ports clk]\n\
+            "create_clock -name clk -period 5 [get_ports clk]\n\
              create_clock -name clk -period 10 [get_ports clk]\n",
         )
         .unwrap();
         let r = lint(&nl(), &sdc, &lib());
-        assert!(r.findings.iter().any(|f| f.code == "clock-period"));
         assert!(r.findings.iter().any(|f| f.code == "dup-clock-name"));
     }
 
