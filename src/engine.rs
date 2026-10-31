@@ -63,6 +63,8 @@ pub fn demo() -> (StaJob, TimingReport) {
         unconstrained_outputs: false,
         io_input_delays: vec![],
         io_output_delays: vec![],
+        io_input_all_but: vec![],
+        io_output_all_but: vec![],
         setup_uncertainty: 0.0,
         hold_uncertainty: 0.0,
         late_derate: 1.0,

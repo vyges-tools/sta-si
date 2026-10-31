@@ -105,6 +105,13 @@ pub struct StaJob {
     pub unconstrained_outputs: bool,
     pub io_input_delays: Vec<(String, f64)>,
     pub io_output_delays: Vec<(String, f64)>,
+    /// Every delay on EVERY input (output) but some, in file order: the ports it leaves out and
+    /// its value — `[lsearch -inline -all -not -exact [all_inputs] clk]`, or
+    /// `[remove_from_collection [all_inputs] clk]` (the reader's `all_inputs_except`). A plain
+    /// default is one that leaves out none. Consulted after the per-port delays, as the default
+    /// is; the last that covers the port wins.
+    pub io_input_all_but: Vec<(Vec<String>, f64)>,
+    pub io_output_all_but: Vec<(Vec<String>, f64)>,
     // clock uncertainty (SDC set_clock_uncertainty): tightens setup required time,
     // relaxes hold required time.
     pub setup_uncertainty: f64,
@@ -168,6 +175,7 @@ impl StaJob {
             .rev()
             .find(|(p, _)| vyges_loom::sdc::object_matches(p, port))
             .map(|(_, d)| *d)
+            .or_else(|| all_but(&self.io_input_all_but, port))
             .or(if self.input_delay_declared {
                 Some(self.input_delay)
             } else {
@@ -200,7 +208,9 @@ impl StaJob {
     /// Whether output port `port` carries an output delay — its own, or a declared default. One
     /// that does not is unconstrained (no hold check there, as in the reference).
     pub fn output_delay_declared_for(&self, port: &str) -> bool {
-        self.output_delay_declared || self.io_output_delays.iter().any(|(p, _)| vyges_loom::sdc::object_matches(p, port))
+        self.output_delay_declared
+            || self.io_output_delays.iter().any(|(p, _)| vyges_loom::sdc::object_matches(p, port))
+            || all_but(&self.io_output_all_but, port).is_some()
     }
 
     /// Resolve the external output delay for a primary output port.
@@ -212,6 +222,7 @@ impl StaJob {
             .rev()
             .find(|(p, _)| vyges_loom::sdc::object_matches(p, port))
             .map(|(_, d)| *d)
+            .or_else(|| all_but(&self.io_output_all_but, port))
             .unwrap_or(self.output_delay)
     }
 }
@@ -358,6 +369,8 @@ impl StaJob {
             output_delay: num("output_delay", 0.0),
             io_input_delays: Vec::new(),
             io_output_delays: Vec::new(),
+            io_input_all_but: Vec::new(),
+            io_output_all_but: Vec::new(),
             setup_uncertainty: num("setup_uncertainty", 0.0),
             hold_uncertainty: num("hold_uncertainty", 0.0),
             late_derate: num("late_derate", 1.0),
@@ -516,10 +529,18 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
     // with 0, 0.5 network, 0.4 source and both; folding it in moved the worst slack by exactly
     // the latency. Where latency does not cancel (clocks with different latencies, latency on a
     // pin, a delay that says it includes latency) see `latency_not_modelled`.
+    // ⛔ An every-input-but delay names the ports it LEAVES OUT: read as named ports, the delay
+    // went onto the one port it excluded and off every other.
+    let all_but = |d: &vyges_loom::sdc::IoDelay| d.accessor.ends_with("_except");
     let mut in_def = None;
     for d in &sdc.input_delays {
+        if all_but(d) {
+            job.io_input_all_but.push((d.ports.clone(), d.value));
+            continue;
+        }
         if d.default {
             in_def = Some(d.value);
+            job.io_input_all_but.push((Vec::new(), d.value));
         }
         for p in &d.ports {
             job.io_input_delays
@@ -532,8 +553,13 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
     }
     let mut out_def = None;
     for d in &sdc.output_delays {
+        if all_but(d) {
+            job.io_output_all_but.push((d.ports.clone(), d.value));
+            continue;
+        }
         if d.default {
             out_def = Some(d.value);
+            job.io_output_all_but.push((Vec::new(), d.value));
         }
         for p in &d.ports {
             job.io_output_delays
@@ -586,6 +612,12 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
 /// A latency on a clock is on both sides of a path that clock launches and captures; it moves a
 /// slack only between clocks of different latency, when it is on a pin or port rather than a
 /// clock, or when an I/O delay declares it already includes the latency.
+/// The last every-port-but delay in `list` that covers `port`: one whose left-out ports do not
+/// match it.
+fn all_but(list: &[(Vec<String>, f64)], port: &str) -> Option<f64> {
+    list.iter().rev().find(|(out, _)| !out.iter().any(|p| vyges_loom::sdc::object_matches(p, port))).map(|(_, v)| *v)
+}
+
 pub fn latency_not_modelled(sdc: &crate::sdc::Sdc) -> Option<String> {
     if sdc.clock_latencies.is_empty() {
         return None;
@@ -615,6 +647,31 @@ pub fn latency_not_modelled(sdc: &crate::sdc::Sdc) -> Option<String> {
         why.push("an I/O delay that includes it".to_string());
     }
     (!why.is_empty()).then(|| format!("clock latency not modelled where it does not cancel: {}", why.join("; ")))
+}
+
+#[cfg(test)]
+mod every_port_but {
+    use super::*;
+
+    /// Reference rule (`lsearch -not -exact` drops the elements EQUAL to the pattern, a one-port
+    /// `[get_ports P]` handle; observed 2026-10-31: the excluded input starts no path): the delay is
+    /// on every input but that one, and a later per-port delay still wins on its port. Read as
+    /// named ports it was on the excluded port only.
+    #[test]
+    fn an_every_input_but_delay_is_on_every_other_input() {
+        let sdc = crate::sdc::Sdc::parse(
+            "create_clock -name clk -period 1 [get_ports clk]\n\
+             set_input_delay 0.4 -clock clk [lsearch -inline -all -not -exact [all_inputs] [get_ports a]]\n\
+             set_input_delay 0.2 -clock clk [get_ports b]\n\
+             set_output_delay 0.3 -clock clk [lsearch -inline -all -not -exact [all_outputs] [get_ports y]]\n",
+        )
+        .unwrap();
+        let mut job = StaJob::parse("design: t\nnetlist: t.v\nlib: t.lib\nclock: clk 1.0\n", ".").unwrap();
+        merge_sdc_into(&sdc, &mut job);
+        assert_eq!([job.input_delay_for("a"), job.input_delay_for("b"), job.input_delay_for("c")], [None, Some(0.2), Some(0.4)]);
+        assert_eq!([job.output_delay_declared_for("y"), job.output_delay_declared_for("z")], [false, true]);
+        assert_eq!(job.output_delay_for("z"), 0.3);
+    }
 }
 
 #[cfg(test)]
