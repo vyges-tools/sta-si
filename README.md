@@ -90,6 +90,11 @@ along the path, and the reported delay carries an N-sigma band — so pessimism 
 as **√depth** (RSS), not linearly. The per-stage sigma comes from **LVF**
 (`ocv_sigma_cell_rise/fall`, slew·load-dependent) when the library provides it —
 which auto-enables POCV — otherwise from the global `pocv_sigma · delay` fraction.
+LVF sigma is read early and late apart (`sigma_type`): a setup path takes the late sigma,
+a hold path the early one, and an `ocv_std_dev_cell_*` table, when present, serves both.
+The skew-normal moments (`ocv_mean_shift_*`, `ocv_skewness_*`) and the transition and
+constraint sigmas are read and kept but do not move a slack. The data and clock sides
+are banded separately and then subtracted, rather than combined as one distribution.
 POCV wins when LVF is present or `pocv_sigma > 0`, else AOCV when a table is present,
 else flat.
 
@@ -170,7 +175,7 @@ which one you want is a real choice, not a formality.
 `vyges-sta-si` is an **early-flow and complementary** engine, **not a tapeout
 sign-off replacement** for the reference timer or the commercial signoff timer. It is *correlated to*
 the reference timer — on a routed sky130 block, setup and hold agree to an RMS of **0.03 ns per
-endpoint** over the endpoint set both report (see *Current state*) — and it is far narrower:
+endpoint** over the endpoint set both report, against a fresh run of the reference (see *Current state*) — and it is far narrower:
 it covers a flop-based standard-cell abstraction and declines the rest (see *What it does
 not model*). So it runs **upstream of**, and **alongside**, the signoff tool, never in lieu
 of it for tape-out:
@@ -412,6 +417,7 @@ Supported SDC (a Tcl-subset reader — `set var`, `$var`, `[get_ports …]`,
 | `set_input_transition` / `set_load` | boundary slew / load |
 | `set_timing_derate -late | -early` | flat OCV derate |
 | `set_false_path` / `set_multicycle_path` | timing exceptions (`-from`/`-to`, pin → instance) |
+| `set_case_analysis` / `set_logic_zero` / `set_logic_one` | constants, propagated through combinational logic with netlist ties and tie cells: a held pin carries no arrival, a deselected input's arc is cut, a held input narrows the other arcs' sense, `rising` / `falling` pass one edge |
 
 Anything not modelled (`set_driving_cell`, `set_max_fanout`, …) is **never
 silently dropped** — `run -v` lists every ignored command so you know exactly
@@ -580,9 +586,13 @@ first sub-100nm node)**, whose reg-to-reg setup/hold/POCV example is in
 Propagation is **rise/fall-split by arc unateness** — an inverter chain alternates
 edges rather than taking `max(rise,fall)` per stage, matching how real paths behave.
 
-**Correlated against OpenSTA per endpoint**, on a routed sky130 block (post-route netlist,
-the flow's own extracted SPEF, the same Liberty and SDC given to both), with the reference re-run rather than
-read from an archive:
+Two different comparisons back the numbers below, and they are not the same run.
+
+**Correlated against OpenSTA per endpoint**, on a routed sky130 block (`fft_top`: post-route
+netlist, the flow's own extracted SPEF, the same Liberty and SDC given to both), with the reference
+**re-run** on those inputs rather than read from an archive. This comparison needs the reference
+timer installed and is run outside this repository; it is not what `scripts/correlate-sky130.sh`
+does:
 
 - **setup** — RMS **0.032 ns** over the 790 endpoints both timers report, 7 of them outside
   0.1 ns; WNS 6.7987 against 6.8508.
@@ -598,7 +608,11 @@ by more than 11 ns — a worst-slack figure cannot see that, and neither can a r
 only given one.
 
 On a **real routed sky130 block** (post-route netlist + the flow's own extracted SPEF), measured against the
-sign-off timer's own checked-in results rather than a re-run:
+sign-off timer's own **checked-in** results rather than a re-run. The repeatable part of this is
+[`scripts/correlate-sky130.sh`](scripts/correlate-sky130.sh): it reads WNS, WHS and the worst setup
+endpoint from the design's checked-in sign-off reports (`fft_ctrl_tlul`), runs this engine on the
+same netlist, SPEF, Liberty and SDC, and fails when setup or hold drift past a bound or a check
+category goes missing. It does not re-run the reference and does not compute per-endpoint RMS.
 
 | | agreement |
 | --- | --- |
