@@ -298,3 +298,37 @@ fn a_clock_multicycle_moves_setup_and_hold() {
     let mixed = group_slacks("set_false_path -hold -from [list [get_clocks b] [get_cells r9]] -to [get_cells r3]\n");
     assert!(!mixed.contains_key(&("a".into(), false)) && mixed.contains_key(&("a".into(), true)), "{mixed:?}");
 }
+
+/// Reference rule (an exception's pin side matches the path's startpoint pin and endpoint pin,
+/// `Sdc::exceptionFromStates` / `ExceptionTo::matches`): `-from [get_ports din]` cuts the input
+/// path, and `-to [get_ports dout]` reaches the output's SETUP check as well as its hold check.
+/// Measured on sky130 (two clocks, one input and one output delay): both cut, as the reference
+/// cuts them; before, the input side matched no path and the output's setup check ignored every
+/// exception.
+#[test]
+fn port_starts_and_output_ends_take_exceptions() {
+    let rep = |cmds: &str| {
+        let sdc = vyges_sta_si::sdc::Sdc::parse(&format!(
+            "create_clock -name a -period 0.25 [get_ports ca]\ncreate_clock -name b -period 0.25 [get_ports cb]\n\
+             set_input_delay 0.02 -clock a [get_ports din]\nset_output_delay 0.2 -clock a [get_ports dout]\n{cmds}"
+        ))
+        .unwrap();
+        let mut j = job(vec![]);
+        vyges_sta_si::job::merge_sdc_into(&sdc, &mut j);
+        analyze_inputs(NL_2CK, LIB, &j).unwrap()
+    };
+    let base = rep("");
+    let ends = |r: &vyges_sta_si::sta::TimingReport| r.check_paths.iter().filter(|p| p.max).map(|p| p.endpoint.clone()).collect::<Vec<_>>();
+    assert!(ends(&base).contains(&"dout".to_string()), "{:?}", ends(&base));
+    let cut_out = rep("set_false_path -to [get_ports dout]\n");
+    assert_eq!(cut_out.endpoints, base.endpoints - 1, "dout's setup check cut");
+    assert!(!ends(&cut_out).contains(&"dout".to_string()));
+    let cut_in = rep("set_false_path -from [get_ports din]\n");
+    assert_eq!(cut_in.endpoints, base.endpoints - 1, "r1/D's only path is from din");
+    // dout is group a's worst setup end; two cycles relax it by one period, and r3 takes over
+    let mc = rep("set_multicycle_path 2 -to [get_ports dout]\n");
+    let group_a = |r: &vyges_sta_si::sta::TimingReport| r.check_paths.iter().find(|p| p.max && p.group == "a").map(|p| (p.endpoint.clone(), p.slack)).unwrap();
+    assert_eq!(group_a(&base).0, "dout");
+    assert_eq!(group_a(&mc).0, "r3");
+    assert!(group_a(&mc).1 > group_a(&base).1);
+}

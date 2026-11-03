@@ -3164,11 +3164,23 @@ fn build_report(
         port: bool,
     }
     let reg_end = |ck: Option<usize>, node: usize| End { name: inst_of(node), clock: ck.and_then(clock_name_of).map(str::to_string), port: false };
-    // the start of the path into `endpoint` over `pred`: its launching register, else the port it
-    // starts at, timed against the primary clock
-    let launch_end = |lck: Option<usize>| match lck {
+    // The start of the path into `endpoint` over `pred`: its launching register (`lck`), else
+    // the input port it starts at, timed against the primary clock. Without the port's name a
+    // `-from [get_ports din]` matched no path at all.
+    let mut is_in_port = vec![false; n];
+    for (i, _) in &input_ports {
+        is_in_port[*i] = true;
+    }
+    let launch_end = |lck: Option<usize>, endpoint: usize, pred: &[Option<usize>]| match lck {
         Some(ck) => reg_end(Some(ck), ck),
-        None => End { name: String::new(), clock: Some(primary_clock.to_string()), port: true },
+        None => {
+            let mut v = endpoint;
+            while let Some(u) = pred[v] {
+                v = u;
+            }
+            let name = if is_in_port[v] { labels[v].clone() } else { String::new() };
+            End { name, clock: Some(primary_clock.to_string()), port: true }
+        }
     };
     fn point(e: &End) -> crate::exc::PathPoint<'_> {
         crate::exc::PathPoint { name: e.name.as_str(), clock: e.clock.as_deref(), port: e.port }
@@ -3195,10 +3207,25 @@ fn build_report(
     // register's, so its reported path is the edge that set the slack, followed lane by lane
     // (collapsed, each node's latest edge was printed — `_414_/Q` rise beside a falling path).
     // It is captured on the rise; a launch on the fall has that much less of the period.
-    for (idx, _) in &output_ports {
+    // An exception reaches the output's setup check as a register's: a false path drops this
+    // launch's check, a multicycle moves it (before, only the HOLD check at an output read them).
+    for (idx, name) in &output_ports {
+        let to = End { name: name.clone(), clock: Some(primary_clock.to_string()), port: true };
+        // the least a multicycle moved any launch's check: the collapsed requirement moves by it
+        let mut moved = f64::INFINITY;
         for (r, run) in runs.iter().enumerate() {
             let (rel, _) = edge_relation(period, run.edge, period, 0);
-            req_run[r][*idx] = [endpoint_req[*idx] - period + rel; 2];
+            let lck = launch_ck(*idx, run.from);
+            let pl = lck.map(clock_period_of).unwrap_or(period);
+            if let Some(shift) = exc_shift(false, &launch_end(lck, *idx, run.from), &to, pl, period) {
+                req_run[r][*idx] = [endpoint_req[*idx] - period + rel + shift; 2];
+                moved = moved.min(shift);
+            }
+        }
+        if moved.is_finite() {
+            endpoint_req[*idx] += moved;
+        } else {
+            excluded_setup[*idx] = true;
         }
     }
 
@@ -3222,7 +3249,7 @@ fn build_report(
             let pl = lck.map(clock_period_of).unwrap_or(pc);
             // A `-hold` multicycle or false path does not reach the SETUP check, and `-start`
             // counts the launch clock's cycles where the default `-end` counts the capture clock's.
-            let Some(shift) = exc_shift(false, &launch_end(lck), &reg_end(cap, *idx), pl, pc) else {
+            let Some(shift) = exc_shift(false, &launch_end(lck, *idx, run.from), &reg_end(cap, *idx), pl, pc) else {
                 continue;
             };
             if is_async(lck, cap) {
@@ -3529,7 +3556,7 @@ fn build_report(
             let pl = lck.map(clock_period_of).unwrap_or(pc);
             // apply exceptions: false path drops the check, multicycle shifts the hold capture
             // back by (cycles − 1).
-            let Some(shift) = exc_shift(true, &launch_end(lck), &reg_end(cap, idx), pl, pc) else {
+            let Some(shift) = exc_shift(true, &launch_end(lck, idx, run.from_min), &reg_end(cap, idx), pl, pc) else {
                 continue;
             };
             if is_async(lck, cap) {
@@ -3611,7 +3638,7 @@ fn build_report(
             let pl = lck.map(clock_period_of).unwrap_or(period);
             let (_, mut hold_rel) = edge_relation(pl, run.edge, period, 0);
             let to = End { name: name.clone(), clock: Some(primary_clock.to_string()), port: true };
-            match exc_shift(true, &launch_end(lck), &to, pl, period) {
+            match exc_shift(true, &launch_end(lck, idx, run.from_min), &to, pl, period) {
                 Some(s) => hold_rel += s,
                 None => continue,
             }
@@ -3753,7 +3780,7 @@ fn build_report(
                 })
                 .collect();
             let arrival = launch + arr[v][l];
-            let from_end = launch_end(lck);
+            let from_end = launch_end(lck, v, if max { run.from } else { run.from_min });
             if out_port.contains(&v) {
                 // an output port, captured on the rise of the clock its delay is relative to
                 let (setup_rel, hold_rel) = edge_relation(pl, run.edge, period, 0);
