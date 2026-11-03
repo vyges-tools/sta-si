@@ -18,8 +18,9 @@
 //! min-delay hold** (a second, min-corner forward pass; earliest data arrival at
 //! each flop D must clear its hold constraint). On-chip variation is flat scalar
 //! derates by default, or **AOCV** (depth-dependent derate table) / **POCV**
-//! (per-stage sigma — from LVF `ocv_sigma_*` tables when present, else a global
-//! fraction — N-sigma band growing as sqrt(depth)) when configured. Multiple
+//! (per-stage sigma — from LVF tables when present: `std_dev`, else the late sigma on setup
+//! and the early sigma on hold; else a global fraction — N-sigma band growing as
+//! sqrt(depth)) when configured. Multiple
 //! clocks (incl. generated) are supported — cross-domain paths use the tightest
 //! launch→capture edge relation — and false-path / multicycle **exceptions** drop or
 //! shift paths. With `pba` on, a path-based pass re-times the critical path and its
@@ -1836,9 +1837,11 @@ fn build_report(
     // auto-enables (the more accurate) POCV even without a global pocv_sigma.
     let has_lvf = lib.cells.values().any(|c| {
         c.pins.values().any(|p| {
-            p.arcs
-                .iter()
-                .any(|a| !a.sigma_rise.values.is_empty() || !a.sigma_fall.values.is_empty())
+            p.arcs.iter().any(|a| {
+                a.lvf_cell
+                    .iter()
+                    .any(|l| !l.delay_sigma(true).values.is_empty() || !l.delay_sigma(false).values.is_empty())
+            })
         })
     });
     let pocv = job.pocv_sigma > 0.0 || has_lvf;
@@ -2364,15 +2367,14 @@ fn build_report(
                                 let derate = cell_derate(late, stage);
                                 let nom = arr_nom[u][il] + d * derate;
                                 // per-stage delay sigma: LVF table (slew/load-dependent)
-                                // when present, else the global pocv_sigma fraction.
+                                // when present, else the global pocv_sigma fraction. The LVF
+                                // table is the analysis's own: `std_dev` when given, else the
+                                // LATE sigma on a max (setup) pass and the EARLY one on a min
+                                // (hold) pass (`GateTableModel::gateDelayPocv`, normal mode).
                                 let sigma = if !pocv {
                                     0.0
                                 } else {
-                                    let lvf = if ol == 0 {
-                                        &arc.sigma_rise
-                                    } else {
-                                        &arc.sigma_fall
-                                    };
+                                    let lvf = arc.lvf_cell[ol].delay_sigma(late);
                                     if !lvf.values.is_empty() {
                                         lvf.lookup(sin, leff)
                                     } else {

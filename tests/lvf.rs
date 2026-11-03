@@ -11,7 +11,11 @@ const SIGMA: &str = r#"
 "#;
 
 fn lib(with_lvf: bool) -> String {
-    let s = if with_lvf { SIGMA } else { "" };
+    lib_with(if with_lvf { SIGMA } else { "" })
+}
+
+/// The inverter library with `s` (LVF groups) inside its timing group.
+fn lib_with(s: &str) -> String {
     format!(
         r#"
 library (v) {{
@@ -104,4 +108,46 @@ fn lvf_tables_drive_pocv_band() {
         lvf.wns,
         nominal.wns
     );
+}
+
+// Early and late sigma apart. Reference rule (Liberty reader `readEarlyLateTableModels`, then
+// `GateTableModel::gateDelayPocv` in normal mode): each `ocv_sigma_cell_*` group sets the half
+// its `sigma_type` names; a max (setup) path takes the LATE sigma, a min (hold) path the EARLY
+// one; an `ocv_std_dev_cell_*` table, when given, is the standard deviation for both. The early
+// group is written FIRST here, so a reader that kept only the first group would give the setup
+// path the hold path's sigma.
+const EARLY_LATE: &str = r#"
+        ocv_sigma_cell_rise (t) { sigma_type : "early"; index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.01, 0.01", "0.01, 0.01" ); }
+        ocv_sigma_cell_rise (t) { sigma_type : "late"; index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.05, 0.05", "0.05, 0.05" ); }
+        ocv_sigma_cell_fall (t) { sigma_type : "early"; index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.01, 0.01", "0.01, 0.01" ); }
+        ocv_sigma_cell_fall (t) { sigma_type : "late"; index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.05, 0.05", "0.05, 0.05" ); }
+"#;
+
+const STD_DEV: &str = r#"
+        ocv_std_dev_cell_rise (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.02, 0.02", "0.02, 0.02" ); }
+        ocv_std_dev_cell_fall (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.02, 0.02", "0.02, 0.02" ); }
+"#;
+
+fn bands(tables: &str) -> (f64, f64) {
+    let mut j = job();
+    j.output_delay_declared = true; // an output delay of 0 checks setup AND hold at y
+    let nominal = analyze_inputs(NL, &lib(false), &j).unwrap();
+    let with = analyze_inputs(NL, &lib_with(tables), &j).unwrap();
+    (nominal.wns - with.wns, nominal.whs - with.whs)
+}
+
+#[test]
+fn setup_takes_late_sigma_and_hold_takes_early_sigma() {
+    // four stages: late band 3·sqrt(4·0.05²) = 0.30, early band 3·sqrt(4·0.01²) = 0.06
+    let (setup, hold) = bands(EARLY_LATE);
+    assert!((setup - 0.30).abs() < 1e-6, "setup band {setup}, want 0.30 (late sigma)");
+    assert!((hold - 0.06).abs() < 1e-6, "hold band {hold}, want 0.06 (early sigma)");
+}
+
+#[test]
+fn std_dev_is_the_sigma_of_both_analyses() {
+    // 3·sqrt(4·0.02²) = 0.12 on both sides, early/late sigma or not
+    let (setup, hold) = bands(&format!("{EARLY_LATE}{STD_DEV}"));
+    assert!((setup - 0.12).abs() < 1e-6, "setup band {setup}, want 0.12 (std_dev)");
+    assert!((hold - 0.12).abs() < 1e-6, "hold band {hold}, want 0.12 (std_dev)");
 }
