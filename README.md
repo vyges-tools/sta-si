@@ -418,6 +418,8 @@ Supported SDC (a Tcl-subset reader — `set var`, `$var`, `[get_ports …]`,
 | `set_timing_derate -late | -early` | flat OCV derate |
 | `set_false_path` / `set_multicycle_path` | timing exceptions (`-from`/`-to`, pin → instance) |
 | `set_case_analysis` / `set_logic_zero` / `set_logic_one` | constants, propagated through combinational logic with netlist ties and tie cells: a held pin carries no arrival, a deselected input's arc is cut, a held input narrows the other arcs' sense, `rising` / `falling` pass one edge |
+| `set_disable_timing` / `unset_disable_timing` | arcs and pins taken out of timing, by the kind of object named (cell arcs `-from`/`-to`, an instance, a pin, a port); later commands in file order take earlier ones back |
+| `set_data_check` / `unset_data_check` | a setup or hold check between two data pins (`-from`/`-to`, the edge forms, `-setup`/`-hold`); a later command overwrites, `unset` removes |
 
 Anything not modelled (`set_driving_cell`, `set_max_fanout`, …) is **never
 silently dropped** — `run -v` lists every ignored command so you know exactly
