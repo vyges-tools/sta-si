@@ -1321,6 +1321,28 @@ fn build_report(
     // interpolated at the operating slews later; the CK key resolves to a node whose
     // arrival is the clock insertion delay to this flop (skew).
     let mut flop_d: Vec<(usize, Vec<Constraint>, Option<String>)> = Vec::new();
+    // `set_disable_timing`: the pins and arcs the constraints take out (see `crate::disable`).
+    let mut disable_warnings = Vec::new();
+    let disables = crate::disable::Disables::new(&job.disabled_timing, nl, lib, &mut disable_warnings);
+    for w in &disable_warnings {
+        vyges_events::emit(
+            &vyges_events::Event::new("vyges-sta-si", vyges_events::Severity::Warn, format!("disable timing: {w}"))
+                .with_code("STA-DISABLE-TIMING"),
+        );
+    }
+    // The checks of data pin `pin` of `inst` that a disable leaves: one is not made when its
+    // clock pin is disabled (`checkEdgeEnabled` needs `searchFrom` of the check's from vertex) or
+    // when the instance or cell disables the check arc itself (a `-from`/`-to` names checks too;
+    // "all" does not).
+    let enabled_checks = |inst: &crate::netlist::Inst, pin: &str, cons: &[Constraint]| -> Vec<Constraint> {
+        cons.iter()
+            .filter(|c| {
+                !disables.pin(Some(&inst.name), Some(&inst.cell), &c.related_pin)
+                    && !disables.arc(&inst.name, &inst.cell, &c.related_pin, pin, true)
+            })
+            .cloned()
+            .collect()
+    };
     // the recovery / removal pins among them: the reference reports their checks in their own
     // path group, `asynchronous`
     let mut async_end: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -1418,12 +1440,14 @@ fn build_report(
                         ck_lane_list.push((idx, lane));
                     }
                     if cell.is_seq {
-                        if !cell.pins[pin].setup.is_empty() {
+                        let setup = enabled_checks(inst, pin, &cell.pins[pin].setup);
+                        if !setup.is_empty() {
                             is_endpoint[idx] = true; // data pin = setup capture endpoint
-                            flop_d.push((idx, cell.pins[pin].setup.clone(), ck_key.clone()));
+                            flop_d.push((idx, setup, ck_key.clone()));
                         }
-                        if !cell.pins[pin].hold.is_empty() {
-                            flop_hold.push((idx, cell.pins[pin].hold.clone(), ck_key.clone()));
+                        let hold = enabled_checks(inst, pin, &cell.pins[pin].hold);
+                        if !hold.is_empty() {
+                            flop_hold.push((idx, hold, ck_key.clone()));
                         }
                         // Asynchronous set/reset. Recovery is setup's counterpart (the
                         // release must arrive early enough before the capture edge) and
@@ -1435,13 +1459,15 @@ fn build_report(
                         // setup/hold groups, so nothing above ever names it. On a real
                         // block that is not a rounding error — sky130 `dfrtp` reset pins
                         // account for roughly a fifth of the design's hold checks.
-                        if !cell.pins[pin].recovery.is_empty() {
+                        let recovery = enabled_checks(inst, pin, &cell.pins[pin].recovery);
+                        if !recovery.is_empty() {
                             is_endpoint[idx] = true;
-                            flop_d.push((idx, cell.pins[pin].recovery.clone(), ck_key.clone()));
+                            flop_d.push((idx, recovery, ck_key.clone()));
                             async_end.insert(idx);
                         }
-                        if !cell.pins[pin].removal.is_empty() {
-                            flop_hold.push((idx, cell.pins[pin].removal.clone(), ck_key.clone()));
+                        let removal = enabled_checks(inst, pin, &cell.pins[pin].removal);
+                        if !removal.is_empty() {
+                            flop_hold.push((idx, removal, ck_key.clone()));
                             async_end.insert(idx);
                         }
                     }
@@ -1618,6 +1644,26 @@ fn build_report(
     let pass_lane = |node: usize, lane: usize| sim.passes(&labels[node], lane);
     // nodes whose every in-arc the constants cut: untimed, as a tie output is
     let mut sim_cut = vec![0usize; n];
+    // `set_disable_timing`: nodes that are disabled pins (nothing leaves them — `SearchPred0` and
+    // `DcalcPred` stop at `isDisabledConstraint(from_pin)`; arcs INTO them still arrive), and the
+    // count of each node's in-arcs a disable removed. A disabled arc is neither searched nor
+    // calculated: it is not built at all, so it sets no slew either.
+    let mut dis_pin = vec![false; n];
+    if !disables.is_empty() {
+        for p in nl.inputs.iter().chain(&nl.outputs).chain(&nl.inouts) {
+            if let Some(&v) = key2idx.get(&port_key(p)) {
+                dis_pin[v] = disables.pin(None, None, p);
+            }
+        }
+        for inst in &nl.insts {
+            for (pin, _) in &inst.conns {
+                if let Some(&v) = key2idx.get(&pin_key(&inst.name, pin)) {
+                    dis_pin[v] = disables.pin(Some(&inst.name), Some(&inst.cell), pin);
+                }
+            }
+        }
+    }
+    let mut dis_cut = vec![0usize; n];
 
     // ---- pass 2: edges ---------------------------------------------------
     let mut out_edges: Vec<Vec<Edge>> = (0..n).map(|_| Vec::new()).collect();
@@ -1649,6 +1695,10 @@ fn build_report(
                 // deselected mux input) carries no arrival but still sets the output's slews
                 if held[i_idx] || held[o_idx] {
                     sim_cut[o_idx] += 1;
+                    continue;
+                }
+                if dis_pin[i_idx] || disables.arc(&inst.name, &inst.cell, &arc.related_pin, opin, false) {
+                    dis_cut[o_idx] += 1;
                     continue;
                 }
                 let mut lanes = ALL_LANES;
@@ -1861,6 +1911,10 @@ fn build_report(
                         sim_cut[s] += 1;
                         continue;
                     }
+                    if dis_pin[d] {
+                        dis_cut[s] += 1;
+                        continue;
+                    }
                     let mut lanes = ALL_LANES;
                     for (l, row) in lanes.iter_mut().enumerate() {
                         row[l] = pass_lane(d, l) && pass_lane(s, l);
@@ -1882,10 +1936,21 @@ fn build_report(
         const_driver.resize(n, false);
     }
     for v in 0..n {
-        if held[v] || (indeg[v] == 0 && sim_cut[v] > 0) {
+        // A node whose every in-arc a disable removed is untimed the same way.
+        if held[v] || (indeg[v] == 0 && (sim_cut[v] > 0 || dis_cut[v] > 0)) {
             const_driver[v] = true;
         }
     }
+    // Its slews follow the reference's delay calculation, a walk from the graph's ROOTS
+    // (`seedRootSlews`, then each driver's fanout) through the arcs `DcalcPred` allows. A root is a
+    // pin with no arc into it at all — `Levelize::isRoot` does not consult the SDC, so a pin a
+    // disable cut off is NOT one. So a pin the walk never reaches keeps the graph's initial slew,
+    // 0, and so does all it alone drives; a driver the walk DOES reach (through another input)
+    // calculates every enabled arc into it, one from an unreached pin from slew 0. Measured on
+    // gcd: a flop with its arcs disabled leaves its Q and every load at 0 and a load gate's output
+    // slew is still set by the arc from it; a disabled clock buffer leaves a whole leaf's flops,
+    // their Q pins and an inverter fed only by one of them at 0.
+    let dis_src: Vec<bool> = (0..n).map(|v| !held[v] && indeg[v] == 0 && sim_cut[v] == 0 && dis_cut[v] > 0).collect();
     let sim_narrows = out_edges.iter().flatten().any(|e| e.lanes != ALL_LANES);
 
     // ---- on-chip variation model ----------------------------------------
@@ -2209,6 +2274,8 @@ fn build_report(
         let mut slew_only = vec![[false; 2]; n];
         let mut indeg_work = indeg.clone();
         let mut order: Vec<usize> = Vec::new();
+        // reached by the delay calculation's walk from the roots (see `dis_src`)
+        let mut reached = vec![false; n];
         for v in 0..n {
             if indeg_work[v] == 0 {
                 // A tie cell drives a LEVEL, not an edge — it is a source of no
@@ -2226,6 +2293,7 @@ fn build_report(
                     arr[v] = seed_l[v]; // input ports seed with their SDC arrival delay
                     arr_nom[v] = seed_l[v];
                 }
+                reached[v] = !dis_src[v];
                 order.push(v);
             }
         }
@@ -2233,8 +2301,17 @@ fn build_report(
         while head < order.len() {
             let u = order[head];
             head += 1;
+            // unreached: no slew was calculated for it (the graph's initial 0), and the arcs from
+            // it are calculated from that 0 for a load the walk reaches through another arc
+            if !reached[u] && fixed_slew.is_none() {
+                slew[u] = [0.0; 2];
+                slew_only[u] = [true; 2];
+            }
             for e in &out_edges[u] {
                 let v = e.to;
+                if reached[u] {
+                    reached[v] = true;
+                }
                 let mm = late as usize;
                 let load_lanes = node_load[v][mm];
                 // A flop's CK->Q arc starts a *new* launch, so a pass that is tracking

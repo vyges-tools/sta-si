@@ -95,6 +95,7 @@ fn job(exceptions: Vec<Exception>) -> StaJob {
         io_input_all_but: vec![],
         io_output_all_but: vec![],
         case_values: Vec::new(),
+        disabled_timing: Vec::new(),
         setup_uncertainty: 0.0,
         hold_uncertainty: 0.0,
         sdc: None,

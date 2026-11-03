@@ -32,6 +32,7 @@ pub mod repair;
 pub mod engine;
 /// Timing exceptions matched by object kind (clocks, instances, ports).
 pub mod exc;
+pub mod disable; // set_disable_timing / unset_disable_timing
 pub mod sim; // constants: set_case_analysis, set_logic_*, ties
 mod inc;
 // SDC constraint linter + its metadata reader: in loom since 2026-10-30, shared with `vyges sdc`.

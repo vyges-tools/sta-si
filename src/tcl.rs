@@ -104,7 +104,7 @@ pub struct Adapted {
     pub ignored: Vec<String>,
 }
 
-/// SDC constraint verbs we pass straight (raw line) to [`crate::sdc`].
+/// SDC constraint verbs passed straight (raw line) to [`crate::sdc`].
 const SDC_VERBS: &[&str] = &[
     "create_clock",
     "create_generated_clock",
@@ -128,6 +128,22 @@ const SDC_VERBS: &[&str] = &[
     "group_path",
     "current_design",
 ];
+
+/// Any other command the reference's `read_sdc` would run ([`crate::sdc::is_command`]) goes to
+/// [`crate::sdc`] too — `unset_*`, `reset_path`, the design-rule and kept commands — but only when
+/// the reader still reads with it: a script's general Tcl (`set x [sta::top_instance]`, a
+/// property on a design object) is the reference's to evaluate, not the reader's, and one line it
+/// cannot evaluate must not cost the constraints around it. A fixed list of 21 verbs dropped every
+/// other command unread until 2026-11-02 — `unset_disable_timing` among them, so a disable the
+/// script took back stayed in force.
+fn forwarded(combined: &str, line: &str) -> Result<(), String> {
+    let trial = format!("{combined}{line}\n");
+    match Sdc::parse(&trial) {
+        Ok(_) => Ok(()),
+        Err(e) if Sdc::parse(combined).is_ok() => Err(e.to_string()),
+        Err(_) => Ok(()), // already failing without it: the line is not what fails
+    }
+}
 
 /// Parse an OpenSTA-subset script and build an equivalent [`StaJob`].
 pub fn adapt(script_path: &str) -> Result<Adapted, TclError> {
@@ -238,6 +254,13 @@ pub fn adapt(script_path: &str) -> Result<Adapted, TclError> {
                 combined_sdc.push_str(&raw);
                 combined_sdc.push('\n');
             }
+            v if crate::sdc::is_command(v) => match forwarded(&combined_sdc, &raw) {
+                Ok(()) => {
+                    combined_sdc.push_str(&raw);
+                    combined_sdc.push('\n');
+                }
+                Err(why) => ignored.push(format!("{v} (not applied: {why})")),
+            },
             other => ignored.push(other.to_string()),
         }
     }
@@ -266,6 +289,10 @@ pub fn adapt(script_path: &str) -> Result<Adapted, TclError> {
         // the reader lists what IT does not model; this timer models these
         for ig in sdc.ignored.iter().filter(|c| !crate::job::MODELLED_HERE.contains(&c.as_str())) {
             ignored.push(format!("(sdc) {ig}"));
+        }
+        // a command the reader refused is not applied: said, never silently inert
+        for r in &sdc.rejected {
+            ignored.push(format!("(sdc) not applied: {r}"));
         }
         // an exception the reader or this timer cannot apply is said, never silently inert
         for r in job.exceptions.iter().filter_map(|e| e.refused.as_deref()) {
@@ -332,6 +359,7 @@ fn base_job(
         io_input_all_but: Vec::new(),
         io_output_all_but: Vec::new(),
         case_values: Vec::new(),
+        disabled_timing: Vec::new(),
         setup_uncertainty: 0.0,
         hold_uncertainty: 0.0,
         late_derate: 1.0,
@@ -783,6 +811,23 @@ mod tests {
     }
 
     const HEAD: &str = "read_liberty c.lib\nread_verilog t.v\nlink_design top\n";
+
+    // Rule: what the reference's `read_sdc` runs reaches the reader — an `unset_disable_timing`
+    // takes its disable back — while a line of general Tcl the reader cannot evaluate (a design
+    // object from `sta::top_instance`) is said and dropped, the constraints around it kept.
+    #[test]
+    fn every_constraint_command_reaches_the_reader_and_tcl_it_cannot_run_does_not_cost_the_rest() {
+        let a = adapt_text(
+            "fwd",
+            &format!(
+                "{HEAD}create_clock -name clk -period 5 [get_ports clk]\nset_disable_timing [get_cells u1]\nunset_disable_timing [get_cells u1]\nset top_inst [sta::top_instance]\nset_input_delay -clock clk 0 [get_ports in1]\n"
+            ),
+        );
+        let cmds: Vec<&str> = a.job.disabled_timing.iter().map(|c| c.cmd.as_str()).collect();
+        assert_eq!(cmds, ["set_disable_timing", "unset_disable_timing"]);
+        assert!(a.ignored.iter().any(|i| i.starts_with("set (not applied: ")), "{:?}", a.ignored);
+        assert!(a.job.input_delay_for("in1").is_some(), "the constraint after it is kept");
+    }
 
     // Rule: `create_clock -name clk -period P {clk1 clk2 clk3}` is ONE clock whose every port is
     // a source (the reference's own reg1_asap7 test). Taking only the first left r2/r3 unclocked.

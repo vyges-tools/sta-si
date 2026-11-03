@@ -191,6 +191,9 @@ pub struct StaJob {
     /// `set_case_analysis` and `set_logic_*`, in file order: the constants [`crate::sim`]
     /// propagates and the arcs they cut.
     pub case_values: Vec<crate::sim::CaseSpec>,
+    /// `set_disable_timing` and `unset_disable_timing`, in file order: the pins and arcs
+    /// [`crate::disable`] takes out of the graph.
+    pub disabled_timing: Vec<crate::sdc::ArcCmd>,
     // clock uncertainty (SDC set_clock_uncertainty): tightens setup required time,
     // relaxes hold required time.
     pub setup_uncertainty: f64,
@@ -460,6 +463,7 @@ impl StaJob {
             io_input_all_but: Vec::new(),
             io_output_all_but: Vec::new(),
             case_values: Vec::new(),
+            disabled_timing: Vec::new(),
             setup_uncertainty: num("setup_uncertainty", 0.0),
             hold_uncertainty: num("hold_uncertainty", 0.0),
             late_derate: num("late_derate", 1.0),
@@ -724,6 +728,7 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
         narrowed: narrowed(&c.written),
         names: c.objects.clone(),
     }));
+    job.disabled_timing.extend(sdc.disabled_timing.iter().cloned());
 }
 
 /// The clock latency a constraint file states that this timer does not model, in words — `None`
@@ -858,6 +863,8 @@ pub const MODELLED_HERE: &[&str] = &[
     "set_logic_zero",
     "set_logic_one",
     "set_logic_dc",
+    "set_disable_timing",
+    "unset_disable_timing",
 ];
 
 /// The SDC's ideal clocks — every clock with a source that no `set_propagated_clock` names (by
