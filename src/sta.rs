@@ -1985,7 +1985,10 @@ fn build_report(
     // The fast path keeps ONE clock-side base per endpoint, so one capture edge per pin.
     let mixed_capture =
         flop_d.iter().chain(&flop_hold).any(|(_, cons, _)| cons.windows(2).any(|w| w[0].clk_edge != w[1].clk_edge));
-    let simple_ctx = capture && spef.is_none() && !pocv && !aocv && !job.pba && !fall_launch && !mixed_capture && !sim_narrows;
+    // a data check's required time follows another pin's arrival, which the fast path does not
+    // re-derive
+    let simple_ctx = capture && spef.is_none() && !pocv && !aocv && !job.pba && !fall_launch && !mixed_capture && !sim_narrows
+        && job.data_check_cmds.is_empty();
     let mut inc_setup: Vec<SetupRec> = Vec::new();
     let mut inc_hold: Vec<HoldRec> = Vec::new();
     let pocv_sigma = job.pocv_sigma;
@@ -3614,6 +3617,64 @@ fn build_report(
         endpoint_req[*idx] = req_run.iter().flat_map(|q| q[*idx]).filter(|x| !x.is_nan()).fold(f64::INFINITY, f64::min);
     }
 
+    // ---- data checks (`set_data_check`, see `crate::data_check`) -------------------------------
+    // Timed where the reference's terms are this timer's: one launching edge of one clock (the
+    // from-pin's and the to-pin's paths then launch from the same edge, and the setup check is
+    // zero-cycle on it) and no exceptions (which the reference matches to the check's end). Any
+    // other case is refused, said, and not applied.
+    let data_checks: Vec<(usize, usize, crate::data_check::Margins)> = {
+        let mut w = Vec::new();
+        let dcs = crate::data_check::data_checks(&job.data_check_cmds, &mut w);
+        let node_of = |(acc, name): &(String, String)| -> Option<usize> {
+            let port = key2idx.get(&port_key(name)).copied();
+            let pin = split_inst_pin(name).and_then(|(i, p)| key2idx.get(&pin_key(i, p)).copied());
+            match acc.as_str() {
+                "get_ports" => port,
+                "get_pins" => pin,
+                _ => port.or(pin),
+            }
+        };
+        let in_terms = runs.len() == 1 && job.clocks.len() <= 1 && job.exceptions.is_empty();
+        let mut out = Vec::new();
+        for d in dcs {
+            if !in_terms {
+                w.push(format!("{} -> {}: a data check is timed here for one launching edge of one clock and no exceptions; not applied", d.from.1, d.to.1));
+                continue;
+            }
+            match (node_of(&d.from), node_of(&d.to)) {
+                (Some(f), Some(t)) => out.push((f, t, d.margins)),
+                _ => w.push(format!("{} -> {}: pin not found; not applied", d.from.1, d.to.1)),
+            }
+        }
+        for m in &w {
+            vyges_events::emit(
+                &vyges_events::Event::new("vyges-sta-si", vyges_events::Severity::Warn, format!("data check: {m}"))
+                    .with_code("STA-DATA-CHECK"),
+            );
+        }
+        out
+    };
+    // setup: zero-cycle, against the from-pin's EARLY arrival (`CycleAccting`, `PathEndDataCheck::
+    // requiredTimeNoCrpr` with the data clock path at the target min/max)
+    for (f, t, m) in &data_checks {
+        let mut any = false;
+        for tl in 0..2 {
+            let q = (0..2)
+                .filter_map(|fl| m[0][fl][tl].map(|mg| runs[0].early_arr[*f][fl] - job.setup_uncertainty - mg))
+                .filter(|q| q.is_finite())
+                .fold(f64::INFINITY, f64::min);
+            if q.is_finite() {
+                let cur = &mut req_run[0][*t][tl];
+                *cur = if cur.is_nan() { q } else { cur.min(q) };
+                any = true;
+            }
+        }
+        if any {
+            is_endpoint[*t] = true;
+            endpoint_req[*t] = req_run[0][*t].iter().copied().filter(|x| !x.is_nan()).fold(f64::INFINITY, f64::min);
+        }
+    }
+
     // ---- setup slack + worst path ---------------------------------------
     // Each endpoint's required time is fixed (period at outputs, period - setup at
     // flop D), so slack = required - latest arrival; no backward pass needed.
@@ -3935,6 +3996,50 @@ fn build_report(
         let g = path_group(idx, hold_end.get(&idx).and_then(|&e| ck_node(&flop_hold[e].2)));
         if hold_group_worst.get(&g).is_none_or(|w| slack < w.0) {
             hold_group_worst.insert(g, (slack, idx, slack_at.0, slack_at.1));
+        }
+    }
+    // data checks, hold: the to-pin's data from the NEXT launch (`src_cycle + 1`) against the
+    // from-pin's LATE arrival plus the hold uncertainty and margin
+    for (f, t, m) in &data_checks {
+        if hold_end.contains_key(t) {
+            vyges_events::emit(
+                &vyges_events::Event::new("vyges-sta-si", vyges_events::Severity::Warn, format!("data check: hold at {}, a register data pin, is not modelled; not applied", labels[*t]))
+                    .with_code("STA-DATA-CHECK"),
+            );
+            continue;
+        }
+        let mut slack = f64::INFINITY;
+        let mut slack_at = (0, 0);
+        for (tl, &a) in runs[0].early_arr[*t].iter().enumerate() {
+            if !a.is_finite() {
+                continue;
+            }
+            for (fl, by_to) in m[1].iter().enumerate() {
+                let (Some(mg), late) = (by_to[tl], runs[0].late_arr[*f][fl]) else { continue };
+                if late.is_finite() {
+                    let sl = a + period - (late + job.hold_uncertainty + mg);
+                    if sl < slack {
+                        slack = sl;
+                        slack_at = (0, tl);
+                    }
+                }
+            }
+        }
+        if !slack.is_finite() {
+            continue;
+        }
+        hold_endpoints += 1;
+        hold_slacks.push((*t, slack));
+        if slack < 0.0 {
+            ths += slack;
+        }
+        if slack < whs {
+            whs = slack;
+            worst_hold = Some((*t, slack_at));
+        }
+        let g = path_group(*t, None);
+        if hold_group_worst.get(&g).is_none_or(|w| slack < w.0) {
+            hold_group_worst.insert(g, (slack, *t, slack_at.0, slack_at.1));
         }
     }
     // An output port's HOLD check. `set_output_delay` constrains both analyses (the reference's

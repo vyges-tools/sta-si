@@ -360,6 +360,7 @@ fn base_job(
         io_output_all_but: Vec::new(),
         case_values: Vec::new(),
         disabled_timing: Vec::new(),
+        data_check_cmds: Vec::new(),
         setup_uncertainty: 0.0,
         hold_uncertainty: 0.0,
         late_derate: 1.0,

@@ -32,6 +32,7 @@ pub mod repair;
 pub mod engine;
 /// Timing exceptions matched by object kind (clocks, instances, ports).
 pub mod exc;
+pub mod data_check; // set_data_check / unset_data_check
 pub mod disable; // set_disable_timing / unset_disable_timing
 pub mod sim; // constants: set_case_analysis, set_logic_*, ties
 mod inc;
