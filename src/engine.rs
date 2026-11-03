@@ -121,16 +121,48 @@ pub fn analyze_job(job: &StaJob) -> Result<TimingReport, StaError> {
 /// This matters because Yosys is how most open flows produce a gate-level netlist in the first
 /// place: `write_json` is a first-class output, and taking it directly avoids a Verilog
 /// write/re-parse round trip (and the dialect drift that comes with it).
+///
+/// ⛔ **A hierarchical Verilog netlist is FLATTENED.** Its top alone holds only the top's own
+/// instances; the cells inside its module instances were never timed. When the top instantiates
+/// a module the file defines, the whole design is flattened (`CompactDesign::flatten`: names
+/// joined with `/`, child-port nets merged with the parent's) and that is what is timed; an
+/// `STA-FLATTEN` event says so, with anything the flattening found.
 pub fn load_netlist(path: &str) -> Result<crate::netlist::Netlist, StaError> {
-    let res = if std::path::Path::new(path)
+    let parse = |e: netlist::NetlistError| StaError::Parse(e.to_string());
+    if std::path::Path::new(path)
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("json"))
     {
-        yosys_json::load(path)
-    } else {
-        netlist::load(path)
-    };
-    res.map_err(|e| StaError::Parse(e.to_string()))
+        return yosys_json::load(path).map_err(parse);
+    }
+    let all = netlist::load_compact(path).map_err(parse)?;
+    let top = all.top();
+    if !top.insts.iter().any(|x| all.module(all.str(x.cell)).is_some()) {
+        return Ok(all.top_netlist());
+    }
+    // the Liberty is not loaded yet, so cells are not checked here: the netlist coverage event
+    // (`STA-NETLIST`) reports the cells no library defines
+    let (flat, rep) = all.flatten(&netlist::FlattenOptions::default());
+    let mut msg = format!(
+        "hierarchical netlist flattened from top {}: {} module instance(s) expanded into {} leaf instance(s)",
+        rep.top, rep.expanded, rep.leaves
+    );
+    let notes: Vec<String> = [
+        (!rep.recursive.is_empty()).then(|| format!("recursive module(s) kept as leaves: {}", rep.recursive.join(", "))),
+        (rep.unconnected_child_ports > 0)
+            .then(|| format!("{} child port bit(s) left unconnected by the parent", rep.unconnected_child_ports)),
+        (rep.constant_conflicts > 0).then(|| format!("{} net(s) tied to both 0 and 1", rep.constant_conflicts)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let attention = !notes.is_empty();
+    if attention {
+        msg.push_str(&format!("; {}", notes.join("; ")));
+    }
+    let sev = if attention { vyges_events::Severity::Warn } else { vyges_events::Severity::Info };
+    vyges_events::emit(&vyges_events::Event::new("vyges-sta-si", sev, msg).with_code("STA-FLATTEN"));
+    Ok(flat.top_netlist())
 }
 
 /// Report how much of the design the parasitics actually cover.
@@ -1226,4 +1258,35 @@ fn emit_input_coverage(job: &StaJob, nl: &netlist::Netlist, lib: &Lib) {
             .with_code("STA-LIBERTY")
             .with_objects(objs()),
     );
+}
+
+#[cfg(test)]
+mod load_netlist_tests {
+    use super::*;
+
+    /// A hierarchical netlist is timed FLAT: the cells inside the top's module instances are in
+    /// the netlist, under their paths, on the parent's nets. (The top alone had none of them.)
+    #[test]
+    fn a_hierarchical_netlist_is_flattened() {
+        let dir = std::env::temp_dir().join(format!("stasi-flat-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("h.v");
+        std::fs::write(
+            &f,
+            "module sub (a, y); input a; output y; INV u (.A(a), .Y(y)); endmodule\n\
+             module top (a, y); input a; output y; wire n; sub s0 (.a(a), .y(n)); sub s1 (.a(n), .y(y)); endmodule\n",
+        )
+        .unwrap();
+        let nl = load_netlist(f.to_str().unwrap()).unwrap();
+        let got: Vec<(&str, Vec<(&str, &str)>)> = nl
+            .insts
+            .iter()
+            .map(|x| (x.name.as_str(), x.conns.iter().map(|(p, n)| (p.as_str(), n.as_str())).collect()))
+            .collect();
+        assert_eq!(got, [("s0/u", vec![("A", "a"), ("Y", "n")]), ("s1/u", vec![("A", "n"), ("Y", "y")])]);
+        // a flat netlist is read as it always was
+        std::fs::write(&f, "module top (a, y); input a; output y; INV u (.A(a), .Y(y)); endmodule\n").unwrap();
+        assert_eq!(load_netlist(f.to_str().unwrap()).unwrap().insts.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
