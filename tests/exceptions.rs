@@ -234,3 +234,67 @@ fn an_exception_applies_to_a_hierarchical_instance_name() {
     );
     assert_eq!(fp.endpoints, base.endpoints - 1, "one fewer setup endpoint");
 }
+
+// Two clocks: r1 (clock a) -> r2 (clock b) -> r3 (clock a). Exceptions naming CLOCKS.
+const NL_2CK: &str = "module ex ( ca, cb, din, dout ); input ca, cb, din; output dout; wire q1, n1, q2, n2;\n\
+                      DFF r1 ( .CK(ca), .D(din), .Q(q1) );\n\
+                      INV g1 ( .A(q1), .Y(n1) );\n\
+                      DFF r2 ( .CK(cb), .D(n1), .Q(q2) );\n\
+                      INV g2 ( .A(q2), .Y(n2) );\n\
+                      DFF r3 ( .CK(ca), .D(n2), .Q(dout) );\n\
+                      endmodule";
+
+/// (setup, hold) worst slack of each capture clock's path group, from the report.
+fn group_slacks(cmds: &str) -> std::collections::BTreeMap<(String, bool), f64> {
+    let sdc = vyges_sta_si::sdc::Sdc::parse(&format!(
+        "create_clock -name a -period 0.25 [get_ports ca]\ncreate_clock -name b -period 0.25 [get_ports cb]\n{cmds}"
+    ))
+    .unwrap();
+    let mut j = job(vec![]);
+    vyges_sta_si::job::merge_sdc_into(&sdc, &mut j);
+    // register to register only: `din` starts no path and `dout` ends none
+    j.input_delay_declared = false;
+    j.unconstrained_outputs = true;
+    // the fixture's register with a hold check as well
+    let hold = "      capacitance : 0.001;\n      timing () {\n        related_pin : \"CK\";\n        timing_type : hold_rising;\n        \
+                rise_constraint (s) { index_1 (\"0.01\"); index_2 (\"0.01\"); values ( \"0.02\" ); }\n        \
+                fall_constraint (s) { index_1 (\"0.01\"); index_2 (\"0.01\"); values ( \"0.02\" ); }\n      }\n";
+    let lib = LIB.replacen("      capacitance : 0.001;\n", hold, 1);
+    let rep = analyze_inputs(NL_2CK, &lib, &j).unwrap();
+    rep.check_paths.iter().map(|p| ((p.group.clone(), p.max), p.slack)).collect()
+}
+
+/// Reference rule (`ExceptionTo::matches` with a clock edge; `Sdc::exceptionFromStates` with the
+/// launching clock): `-from [get_clocks a] -to [get_clocks b]` cuts the a->b check, setup and
+/// hold, and leaves b->a timed. Matched on names it never applied (no register is named `a`).
+#[test]
+fn a_clock_to_clock_false_path_cuts_that_crossing_only() {
+    let base = group_slacks("");
+    let fp = group_slacks("set_false_path -from [get_clocks a] -to [get_clocks b]\n");
+    assert!(base.contains_key(&("b".into(), true)) && base.contains_key(&("b".into(), false)), "{base:?}");
+    assert!(!fp.contains_key(&("b".into(), true)) && !fp.contains_key(&("b".into(), false)), "a->b cut: {fp:?}");
+    assert_eq!(fp.get(&("a".into(), true)), base.get(&("a".into(), true)), "b->a still timed");
+    // the other direction, and a bare name read as the clock it names
+    let rev = group_slacks("set_false_path -from b -to a\n");
+    assert!(!rev.contains_key(&("a".into(), true)) && rev.contains_key(&("b".into(), true)), "{rev:?}");
+}
+
+/// Reference rule (`checkSetupMcpAdjustment`, `findHoldMcps`): `set_multicycle_path 2 -from
+/// [get_clocks a]` moves the a-launched setup check one period out and its hold check with it;
+/// `-hold 1` beside a `-setup 2` brings the hold check back. Measured on sky130 with the same
+/// shape: setup +1 period, hold -1 period, then hold unchanged.
+#[test]
+fn a_clock_multicycle_moves_setup_and_hold() {
+    let p = 0.25;
+    let base = group_slacks("");
+    let mc = group_slacks("set_multicycle_path 2 -from [get_clocks a]\n");
+    let d = |m: &std::collections::BTreeMap<(String, bool), f64>, g: &str, max: bool| m[&(g.to_string(), max)] - base[&(g.to_string(), max)];
+    assert!((d(&mc, "b", true) - p).abs() < 1e-9, "setup +1 period: {mc:?}");
+    assert!((d(&mc, "b", false) + p).abs() < 1e-9, "hold -1 period: {mc:?}");
+    assert!(d(&mc, "a", true).abs() < 1e-9 && d(&mc, "a", false).abs() < 1e-9, "b-launched untouched: {mc:?}");
+    let pair = group_slacks("set_multicycle_path 2 -setup -to [get_clocks a]\nset_multicycle_path 1 -hold -to [get_clocks a]\n");
+    assert!((d(&pair, "a", true) - p).abs() < 1e-9 && d(&pair, "a", false).abs() < 1e-9, "{pair:?}");
+    // mixed: a clock and a register on one side
+    let mixed = group_slacks("set_false_path -hold -from [list [get_clocks b] [get_cells r9]] -to [get_cells r3]\n");
+    assert!(!mixed.contains_key(&("a".into(), false)) && mixed.contains_key(&("a".into(), true)), "{mixed:?}");
+}

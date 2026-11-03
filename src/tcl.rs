@@ -267,6 +267,10 @@ pub fn adapt(script_path: &str) -> Result<Adapted, TclError> {
         for ig in sdc.ignored.iter().filter(|c| !crate::job::MODELLED_HERE.contains(&c.as_str())) {
             ignored.push(format!("(sdc) {ig}"));
         }
+        // an exception the reader or this timer cannot apply is said, never silently inert
+        for r in job.exceptions.iter().filter_map(|e| e.refused.as_deref()) {
+            ignored.push(format!("(sdc) timing exception not applied: {r}"));
+        }
     }
 
     // Derive the primary clock from the merged SDC clocks (mirrors StaJob::parse).

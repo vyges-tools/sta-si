@@ -30,6 +30,8 @@ pub use vyges_loom::{ccs, dmp, liberty, names, netlist, sdc, spef, yosys_json};
 /// Timing repair — deciding which fixes are worth making (the ECO planner).
 pub mod repair;
 pub mod engine;
+/// Timing exceptions matched by object kind (clocks, instances, ports).
+pub mod exc;
 mod inc;
 // SDC constraint linter + its metadata reader: in loom since 2026-10-30, shared with `vyges sdc`.
 pub use vyges_loom::{ipmeta, sdc_lint as sdclint};

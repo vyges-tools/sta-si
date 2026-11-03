@@ -653,6 +653,8 @@ pub fn main() {
                 if let Ok(mut sdc) = job.load_sdc(sdc_path) {
                     // the reader lists what IT does not model; this timer models these
                     sdc.ignored.retain(|c| !vyges_sta_si::job::MODELLED_HERE.contains(&c.as_str()));
+                    // and refuses the exceptions it cannot match, as the analysis did
+                    vyges_sta_si::exc::refuse_unmatchable(&mut sdc);
                     if let Some(h) = sdc.health().filter(|_| !cli.quiet) {
                         note(vyges_events::Severity::Warn, "STA-SDC-HEALTH", format!("sdc: {h}"));
                     }

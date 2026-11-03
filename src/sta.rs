@@ -29,7 +29,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crate::inc::{checks_edge, HoldRec, InEdge, IncGraph, IncState, IncTopo, Lanes, Pred, SetupRec};
-use crate::job::{ExcKind, Exception, StaJob};
+use crate::job::StaJob;
 use crate::liberty::{Arc, ClkEdge, Constraint, Dir, Lib};
 use crate::names::{instance_of, split_inst_pin};
 use crate::netlist::Netlist;
@@ -3149,12 +3149,35 @@ fn build_report(
     // worst (max) constraint over a pin's groups, interpolated at the operating
     // clock + data transitions — matches how delay arcs are looked up.
 
-    // timing exceptions, matched on launch/capture instance (or port) names.
+    // Timing exceptions, matched BY OBJECT KIND (`crate::exc`): a clock against the path's
+    // launching / capturing clock, an instance or port against its start / end object. Matched
+    // on names alone, `-from [get_clocks a]` compared the clock's name with register names and
+    // never applied.
     let inst_of = |node: usize| instance_of(&labels[node]).to_string();
-    // Membership, not equality: an exception may name a whole bus on either side, and the
-    // rule for that lives once in `Exception::covers` rather than being re-derived here.
-    // the HOLD check's exception: a `-setup` false path leaves it timed (Exception::applies_to)
-    let match_exc = |ln: &str, cn: &str| job.exceptions.iter().filter(|e| e.applies_to(true)).find(|e| e.covers(ln, cn));
+    let exc_clocks: Vec<&str> = job.clocks.iter().map(|c| c.0.as_str()).collect();
+    let exc_matchers = crate::exc::matchers(&job.exceptions, &exc_clocks);
+    // A path end as an exception sees it: a register by its instance and the clock reaching its
+    // clock pin; a port (`port`) by its name and the clock its I/O delay is relative to here.
+    struct End {
+        name: String,
+        clock: Option<String>,
+        port: bool,
+    }
+    let reg_end = |ck: Option<usize>, node: usize| End { name: inst_of(node), clock: ck.and_then(clock_name_of).map(str::to_string), port: false };
+    // the start of the path into `endpoint` over `pred`: its launching register, else the port it
+    // starts at, timed against the primary clock
+    let launch_end = |lck: Option<usize>| match lck {
+        Some(ck) => reg_end(Some(ck), ck),
+        None => End { name: String::new(), clock: Some(primary_clock.to_string()), port: true },
+    };
+    fn point(e: &End) -> crate::exc::PathPoint<'_> {
+        crate::exc::PathPoint { name: e.name.as_str(), clock: e.clock.as_deref(), port: e.port }
+    }
+    // How far the check (`hold`) on the path `from` -> `to` moves its capture edge, `None` when
+    // a false path drops it — by the reference's exception priority, not file order.
+    let exc_shift = |hold: bool, from: &End, to: &End, pl: f64, pc: f64| {
+        crate::exc::check_shift(&exc_matchers, hold, &point(from), &point(to), pl, pc)
+    };
     let mut excluded_setup = vec![false; n]; // false-path endpoints (skip setup)
     // the reference's rule, where the job asks for it: an output with no output delay ends no path
     if job.unconstrained_outputs {
@@ -3192,22 +3215,16 @@ fn build_report(
             excluded_setup[*idx] = true;
             continue;
         }
-        let pc = cap.map(&clock_period_of).unwrap_or(period);
+        let pc = cap.map(clock_period_of).unwrap_or(period);
         let mut checked = false;
         for (r, run) in runs.iter().enumerate() {
             let lck = launch_ck(*idx, run.from);
-            let pl = lck.map(&clock_period_of).unwrap_or(pc);
-            let ln = lck.map(&inst_of).unwrap_or_default();
+            let pl = lck.map(clock_period_of).unwrap_or(pc);
             // A `-hold` multicycle or false path does not reach the SETUP check, and `-start`
             // counts the launch clock's cycles where the default `-end` counts the capture clock's.
-            let setup_exc = |e: &&Exception| e.applies_to(false);
-            let mut shift = 0.0;
-            if let Some(e) = job.exceptions.iter().filter(setup_exc).find(|e| e.covers(&ln, &inst_of(*idx))) {
-                match e.kind {
-                    ExcKind::FalsePath => continue,
-                    ExcKind::Multicycle(cyc) => shift = cyc.saturating_sub(1) as f64 * if e.start { pl } else { pc },
-                }
-            }
+            let Some(shift) = exc_shift(false, &launch_end(lck), &reg_end(cap, *idx), pl, pc) else {
+                continue;
+            };
             if is_async(lck, cap) {
                 continue; // async clock groups: no setup check
             }
@@ -3240,7 +3257,7 @@ fn build_report(
             // capture the clock-side constants so the fast path can re-derive required time
             // from the (possibly changed) data slew without re-walking the clock network.
             if simple_ctx {
-                if let Some((base, ck_slew)) = setup.first().map(&base_of) {
+                if let Some((base, ck_slew)) = setup.first().map(base_of) {
                     inc_setup.push(SetupRec {
                         idx: *idx,
                         base,
@@ -3493,7 +3510,7 @@ fn build_report(
         if unclocked_ck(cap) {
             continue;
         }
-        let pc = cap.map(&clock_period_of).unwrap_or(period);
+        let pc = cap.map(clock_period_of).unwrap_or(period);
         // ⛔ PER LAUNCHING EDGE AND DATA EDGE. A check exists for ONE data edge at a time —
         // `VisitPathEnds::visitCheckEnd` matches `check_arc->toEdge()` against the path's
         // `end_rf` — so each edge's own arrival is scored against that edge's own
@@ -3509,17 +3526,12 @@ fn build_report(
         let mut checked = false;
         for (r, run) in runs.iter().enumerate() {
             let lck = launch_ck(idx, run.from_min);
-            let pl = lck.map(&clock_period_of).unwrap_or(pc);
+            let pl = lck.map(clock_period_of).unwrap_or(pc);
             // apply exceptions: false path drops the check, multicycle shifts the hold capture
             // back by (cycles − 1).
-            let ln = lck.map(&inst_of).unwrap_or_default();
-            let mut shift = 0.0;
-            if let Some(e) = match_exc(&ln, &inst_of(idx)) {
-                match e.kind {
-                    ExcKind::FalsePath => continue,
-                    ExcKind::Multicycle(cyc) => shift = cyc.saturating_sub(1) as f64 * pc,
-                }
-            }
+            let Some(shift) = exc_shift(true, &launch_end(lck), &reg_end(cap, idx), pl, pc) else {
+                continue;
+            };
             if is_async(lck, cap) {
                 continue; // async clock groups: no hold check
             }
@@ -3553,7 +3565,7 @@ fn build_report(
             }
             checked |= reached;
             if reached && simple_ctx {
-                if let Some((base, ck_slew)) = hold.first().map(&base_of) {
+                if let Some((base, ck_slew)) = hold.first().map(base_of) {
                     inc_hold.push(HoldRec {
                         idx,
                         base,
@@ -3596,14 +3608,12 @@ fn build_report(
         let mut slack_at = (0, 0);
         for (r, run) in runs.iter().enumerate() {
             let lck = launch_ck(idx, run.from_min);
-            let pl = lck.map(&clock_period_of).unwrap_or(period);
+            let pl = lck.map(clock_period_of).unwrap_or(period);
             let (_, mut hold_rel) = edge_relation(pl, run.edge, period, 0);
-            let ln = lck.map(&inst_of).unwrap_or_default();
-            if let Some(e) = match_exc(&ln, name) {
-                match e.kind {
-                    ExcKind::FalsePath => continue,
-                    ExcKind::Multicycle(cyc) => hold_rel += cyc.saturating_sub(1) as f64 * period,
-                }
+            let to = End { name: name.clone(), clock: Some(primary_clock.to_string()), port: true };
+            match exc_shift(true, &launch_end(lck), &to, pl, period) {
+                Some(s) => hold_rel += s,
+                None => continue,
             }
             let base = job.output_delay_for(name) - hold_rel - job.hold_uncertainty;
             let mut reached = false;
@@ -3715,7 +3725,7 @@ fn build_report(
             let src_name = lck.and_then(clock_name_of).unwrap_or(primary_clock);
             // the launch clock's period; with no launching clock pin (an input), the period the
             // check defaults to: the capture clock's for a register, the job's for an output
-            let pl_or = |default: f64| lck.map(&clock_period_of).unwrap_or(default);
+            let pl_or = |default: f64| lck.map(clock_period_of).unwrap_or(default);
             let pl = pl_or(period);
             let launch_edge = if k.is_some() { s0l } else { 0 };
             let launch = if launch_edge == 1 { pl / 2.0 } else { 0.0 };
@@ -3743,15 +3753,13 @@ fn build_report(
                 })
                 .collect();
             let arrival = launch + arr[v][l];
-            let ln = lck.map(&inst_of).unwrap_or_default();
+            let from_end = launch_end(lck);
             if out_port.contains(&v) {
                 // an output port, captured on the rise of the clock its delay is relative to
                 let (setup_rel, hold_rel) = edge_relation(pl, run.edge, period, 0);
                 // as the output hold check shifts it
-                let mc = match match_exc(&ln, &labels[v]).map(|e| &e.kind) {
-                    Some(ExcKind::Multicycle(cyc)) => cyc.saturating_sub(1) as f64 * period,
-                    _ => 0.0,
-                };
+                let to = End { name: labels[v].clone(), clock: Some(primary_clock.to_string()), port: true };
+                let mc = exc_shift(true, &from_end, &to, pl, period).unwrap_or(0.0);
                 let (tgt_time, required, uncertainty) = if max {
                     (launch + setup_rel, launch + req_run[r][v][l], -job.setup_uncertainty)
                 } else {
@@ -3789,23 +3797,9 @@ fn build_report(
                 (&flop_hold[*e].1, &flop_hold[*e].2)
             };
             let cap = ck_node(ck);
-            let pc = cap.map(&clock_period_of).unwrap_or(period);
+            let pc = cap.map(clock_period_of).unwrap_or(period);
             let pl = pl_or(pc);
-            let shift = if max {
-                let setup_exc = |e: &&Exception| e.applies_to(false);
-                match job.exceptions.iter().filter(setup_exc).find(|e| e.covers(&ln, &inst_of(v))) {
-                    Some(e) => match &e.kind {
-                        ExcKind::Multicycle(cyc) => cyc.saturating_sub(1) as f64 * if e.start { pl } else { pc },
-                        ExcKind::FalsePath => 0.0,
-                    },
-                    None => 0.0,
-                }
-            } else {
-                match match_exc(&ln, &inst_of(v)).map(|e| &e.kind) {
-                    Some(ExcKind::Multicycle(cyc)) => cyc.saturating_sub(1) as f64 * pc,
-                    _ => 0.0,
-                }
-            };
+            let shift = exc_shift(!max, &from_end, &reg_end(cap, v), pl, pc).unwrap_or(0.0);
             // (required, capture edge, capture clock arrival, relation) of each constraint;
             // the tightest one set the slack
             let terms = cons.iter().filter(|c| checks_edge(c, l == 0)).map(|c| {

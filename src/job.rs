@@ -604,7 +604,15 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
     if let Some(v) = sdc.early_derate {
         job.early_derate = v;
     }
-    job.exceptions.extend(sdc.exceptions.iter().cloned());
+    // An exception naming an object kind this timer cannot match is refused here, as the
+    // reader refuses what it cannot express: never applied, and counted on the health line.
+    let clocks: Vec<&str> = sdc.clocks.iter().map(|c| c.name.as_str()).collect();
+    job.exceptions.extend(sdc.exceptions.iter().cloned().map(|mut e| {
+        if e.refused.is_none() {
+            e.refused = crate::exc::unmatchable(&e, &clocks);
+        }
+        e
+    }));
 }
 
 /// The clock latency a constraint file states that this timer does not model, in words — `None`
