@@ -331,6 +331,7 @@ fn base_job(
         io_output_delays: Vec::new(),
         io_input_all_but: Vec::new(),
         io_output_all_but: Vec::new(),
+        case_values: Vec::new(),
         setup_uncertainty: 0.0,
         hold_uncertainty: 0.0,
         late_derate: 1.0,

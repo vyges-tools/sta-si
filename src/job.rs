@@ -188,6 +188,9 @@ pub struct StaJob {
     /// it winning, relative to the primary clock. The SDC reader fills `io_input_delays` instead.
     pub io_input_all_but: Vec<(Vec<String>, f64)>,
     pub io_output_all_but: Vec<(Vec<String>, f64)>,
+    /// `set_case_analysis` and `set_logic_*`, in file order: the constants [`crate::sim`]
+    /// propagates and the arcs they cut.
+    pub case_values: Vec<crate::sim::CaseSpec>,
     // clock uncertainty (SDC set_clock_uncertainty): tightens setup required time,
     // relaxes hold required time.
     pub setup_uncertainty: f64,
@@ -456,6 +459,7 @@ impl StaJob {
             io_output_delays: Vec::new(),
             io_input_all_but: Vec::new(),
             io_output_all_but: Vec::new(),
+            case_values: Vec::new(),
             setup_uncertainty: num("setup_uncertainty", 0.0),
             hold_uncertainty: num("hold_uncertainty", 0.0),
             late_derate: num("late_derate", 1.0),
@@ -710,6 +714,16 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
         }
         e
     }));
+    // Constants: `set_logic_*` and `set_case_analysis` in file order (the reference seeds the
+    // logic values before the case values, and a case value wins on a pin that has both).
+    let narrowed = |o: &crate::sdc::Objects| !o.keys.is_empty() || o.flags.iter().any(|f| !f.starts_with("-hier"));
+    job.case_values.extend(sdc.logic_values.iter().chain(&sdc.case_values).map(|c| crate::sim::CaseSpec {
+        cmd: c.cmd.clone(),
+        value: c.value.clone(),
+        accessor: c.written.accessor.clone(),
+        narrowed: narrowed(&c.written),
+        names: c.objects.clone(),
+    }));
 }
 
 /// The clock latency a constraint file states that this timer does not model, in words — `None`
@@ -834,8 +848,17 @@ mod clock_latency_rule {
 }
 
 /// Commands the SDC reader lists as not modelled that this timer DOES model: ideal versus
-/// propagated clocks (`ideal_clocks`) and the ideal clock's transition.
-pub const MODELLED_HERE: &[&str] = &["set_propagated_clock", "set_clock_transition", "set_driving_cell"];
+/// propagated clocks (`ideal_clocks`), the ideal clock's transition, input drives, and logic
+/// constants (`crate::sim`; an object it cannot resolve is warned of at analysis).
+pub const MODELLED_HERE: &[&str] = &[
+    "set_propagated_clock",
+    "set_clock_transition",
+    "set_driving_cell",
+    "set_case_analysis",
+    "set_logic_zero",
+    "set_logic_one",
+    "set_logic_dc",
+];
 
 /// The SDC's ideal clocks — every clock with a source that no `set_propagated_clock` names (by
 /// clock, `[all_clocks]`, or its source port / pin) — with its `set_clock_transition` per edge

@@ -97,7 +97,7 @@ fn glob(pat: &str, s: &str) -> bool {
     i == p.len()
 }
 
-fn named(pat: &str, name: &str) -> bool {
+pub(crate) fn named(pat: &str, name: &str) -> bool {
     pat == "*" || pat == name || (pat.contains(['*', '?']) && glob(pat, name))
 }
 

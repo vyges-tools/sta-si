@@ -506,6 +506,19 @@ enum EdgeKind {
 struct Edge {
     to: usize,
     kind: EdgeKind,
+    /// `[from edge][to edge]` the constants let through (0 rise, 1 fall) — see [`crate::sim`]: an
+    /// arc's sense once the held pins are substituted, and a pin held rising or falling. All
+    /// true without case analysis; a net arc reads the diagonal.
+    lanes: [[bool; 2]; 2],
+}
+
+const ALL_LANES: [[bool; 2]; 2] = [[true; 2]; 2];
+
+impl Edge {
+    /// Does any arrival cross this arc? (A cut arc stays for the slews after it.)
+    fn searched(&self) -> bool {
+        self.lanes != [[false; 2]; 2]
+    }
 }
 
 /// A receiver pin's load, `[analysis][edge]`: analysis 0 is EARLY (min caps, hold), 1 LATE
@@ -1591,6 +1604,21 @@ fn build_report(
         }
     }
 
+    // ---- constants: case analysis, logic values, ties (the reference's `Sim`) ----------
+    // A pin held at 0 or 1 starts nothing and is reached by nothing; an arc whose output no
+    // longer depends on its input is cut; a pin held rising / falling passes one edge.
+    let sim = crate::sim::run(nl, lib, &job.case_values);
+    for w in &sim.warnings {
+        vyges_events::emit(
+            &vyges_events::Event::new("vyges-sta-si", vyges_events::Severity::Warn, format!("case analysis: {w}"))
+                .with_code("STA-CASE-ANALYSIS"),
+        );
+    }
+    let held: Vec<bool> = labels.iter().map(|l| sim.is_constant(l)).collect();
+    let pass_lane = |node: usize, lane: usize| sim.passes(&labels[node], lane);
+    // nodes whose every in-arc the constants cut: untimed, as a tie output is
+    let mut sim_cut = vec![0usize; n];
+
     // ---- pass 2: edges ---------------------------------------------------
     let mut out_edges: Vec<Vec<Edge>> = (0..n).map(|_| Vec::new()).collect();
     let mut indeg = vec![0usize; n];
@@ -1615,9 +1643,24 @@ fn build_report(
                     continue;
                 }
                 let i_idx = key2idx[&pin_key(&inst.name, &arc.related_pin)];
+                let sense = sim.sense.get(&(inst.name.clone(), arc.related_pin.clone(), opin.clone()));
+                // an arc FROM a held pin is gone, delay calculation included; one INTO a held
+                // pin carries nothing; one whose output no longer follows its input (a
+                // deselected mux input) carries no arrival but still sets the output's slews
+                if held[i_idx] || held[o_idx] {
+                    sim_cut[o_idx] += 1;
+                    continue;
+                }
+                let mut lanes = ALL_LANES;
+                for (il, row) in lanes.iter_mut().enumerate() {
+                    for (ol, ok) in row.iter_mut().enumerate() {
+                        *ok = sense.is_none_or(|s| s.pairs(il, ol)) && pass_lane(i_idx, il) && pass_lane(o_idx, ol);
+                    }
+                }
                 out_edges[i_idx].push(Edge {
                     to: o_idx,
                     kind: EdgeKind::Cell(Box::new(arc.clone())),
+                    lanes,
                 });
                 indeg[o_idx] += 1;
             }
@@ -1814,9 +1857,18 @@ fn build_report(
                         sink: s,
                         sink_ip: ip_of(s),
                     });
+                    if held[d] || held[s] {
+                        sim_cut[s] += 1;
+                        continue;
+                    }
+                    let mut lanes = ALL_LANES;
+                    for (l, row) in lanes.iter_mut().enumerate() {
+                        row[l] = pass_lane(d, l) && pass_lane(s, l);
+                    }
                     out_edges[d].push(Edge {
                         to: s,
                         kind: EdgeKind::Net(aid),
+                        lanes,
                     });
                     indeg[s] += 1;
                 }
@@ -1824,6 +1876,17 @@ fn build_report(
         }
     }
     let n_arcs = arcs.len();
+    // A node the constants hold, or whose every in-arc they cut, is untimed exactly as a tie
+    // cell's output is: no seed, so nothing reaches its fanout.
+    if const_driver.len() < n {
+        const_driver.resize(n, false);
+    }
+    for v in 0..n {
+        if held[v] || (indeg[v] == 0 && sim_cut[v] > 0) {
+            const_driver[v] = true;
+        }
+    }
+    let sim_narrows = out_edges.iter().flatten().any(|e| e.lanes != ALL_LANES);
 
     // ---- on-chip variation model ----------------------------------------
     // Refines the flat late/early scalar derate. POCV (statistical) wins when a
@@ -1857,7 +1920,7 @@ fn build_report(
     // The fast path keeps ONE clock-side base per endpoint, so one capture edge per pin.
     let mixed_capture =
         flop_d.iter().chain(&flop_hold).any(|(_, cons, _)| cons.windows(2).any(|w| w[0].clk_edge != w[1].clk_edge));
-    let simple_ctx = capture && spef.is_none() && !pocv && !aocv && !job.pba && !fall_launch && !mixed_capture;
+    let simple_ctx = capture && spef.is_none() && !pocv && !aocv && !job.pba && !fall_launch && !mixed_capture && !sim_narrows;
     let mut inc_setup: Vec<SetupRec> = Vec::new();
     let mut inc_hold: Vec<HoldRec> = Vec::new();
     let pocv_sigma = job.pocv_sigma;
@@ -2031,7 +2094,8 @@ fn build_report(
     // false delay-cell insertions into a design that is already hold-clean.
     let mut clock_reached = vec![false; n];
     {
-        let mut stack: Vec<usize> = clock_src.keys().copied().collect();
+        // a clock source held at a constant launches no clock (`SearchPred0::searchFrom`)
+        let mut stack: Vec<usize> = clock_src.keys().copied().filter(|&s| !const_driver[s]).collect();
         for &s in &stack {
             clock_reached[s] = true;
         }
@@ -2039,7 +2103,7 @@ fn build_report(
             if is_ck[u] {
                 continue; // the clock edge stops here; CK->Q is a new launch
             }
-            for e in &out_edges[u] {
+            for e in out_edges[u].iter().filter(|e| e.searched()) {
                 if !clock_reached[e.to] {
                     clock_reached[e.to] = true;
                     stack.push(e.to);
@@ -2059,7 +2123,7 @@ fn build_report(
                 Some((inst, pin)) => key2idx.get(&pin_key(inst, pin)).copied(),
                 None => key2idx.get(&port_key(src)).copied(),
             };
-            if let Some(nd) = node {
+            if let Some(nd) = node.filter(|&nd| !const_driver[nd]) {
                 ideal_slew[nd] = Some(*sl);
                 stack.push(nd);
             }
@@ -2068,7 +2132,7 @@ fn build_report(
             if is_ck[u] {
                 continue;
             }
-            for e in &out_edges[u] {
+            for e in out_edges[u].iter().filter(|e| e.searched()) {
                 if ideal_slew[e.to].is_none() {
                     ideal_slew[e.to] = ideal_slew[u];
                     stack.push(e.to);
@@ -2139,6 +2203,10 @@ fn build_report(
         let mut from: Vec<[Pred; 2]> = vec![[None; 2]; n];
         // a driver lane's slew has been set by one of its arcs (merged from then on)
         let mut slew_set = vec![[false; 2]; n];
+        // a lane whose slew is computed though the constants stop its arrival: the reference's
+        // delay calculation (`DcalcPred`) skips only arcs FROM a held pin, so a deselected mux
+        // input or a pin held rising still sets the slews after it
+        let mut slew_only = vec![[false; 2]; n];
         let mut indeg_work = indeg.clone();
         let mut order: Vec<usize> = Vec::new();
         for v in 0..n {
@@ -2202,6 +2270,15 @@ fn build_report(
                                 (false, _) => (d, sink_slew),
                             };
                             let a = arr[u][l];
+                            // a pin held rising / falling passes one edge; the other edge's
+                            // slew still reaches the load
+                            if (!a.is_finite() && slew_only[u][l]) || (a.is_finite() && !e.lanes[l][l]) {
+                                if fixed_slew.is_none() && !arr[v][l].is_finite() {
+                                    slew[v][l] = if sink_slew > 0.0 { sink_slew } else { slew[u][l] };
+                                    slew_only[v][l] = true;
+                                }
+                                continue;
+                            }
                             if !a.is_finite() {
                                 continue;
                             }
@@ -2277,7 +2354,10 @@ fn build_report(
                                     continue;
                                 }
                                 let a_in = arr[u][il];
-                                if !a_in.is_finite() {
+                                // the constants narrow the pairs an arrival takes
+                                // (`searchThruTimingSense`), not the slews (see `slew_only`)
+                                let only_slew = !e.lanes[il][ol] || !a_in.is_finite();
+                                if !a_in.is_finite() && !slew_only[u][il] {
                                     continue;
                                 }
                                 let sin = slew[u][il];
@@ -2400,6 +2480,10 @@ fn build_report(
                                 if fixed_slew.is_none() && (!slew_set[v][ol] || (late && sout > slew[v][ol]) || (!late && sout < slew[v][ol])) {
                                     slew[v][ol] = sout;
                                     slew_set[v][ol] = true;
+                                }
+                                if only_slew {
+                                    slew_only[v][ol] = true;
+                                    continue;
                                 }
                                 let better = if late {
                                     metric > arr[v][ol]
@@ -3567,7 +3651,7 @@ fn build_report(
     let pba_wns = if job.pba {
         let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
         for (u, edges) in out_edges.iter().enumerate() {
-            for e in edges {
+            for e in edges.iter().filter(|e| e.searched()) {
                 preds[e.to].push(u);
             }
         }
