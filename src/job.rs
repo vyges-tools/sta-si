@@ -65,6 +65,80 @@ pub struct PortSlew {
     pub value: f64,
 }
 
+/// One `set_input_delay` / `set_output_delay` as the timer applies it, in file order.
+///
+/// The reference keeps one delay object per port AND CLOCK EDGE (`InputDelay` / `OutputDelay`):
+/// a command without `-add_delay` replaces every other edge's object on the port and sets the
+/// slots it names; with `-add_delay` it merges into its own edge's object (the larger max, the
+/// smaller min). See [`resolve_port_delays`].
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct IoDelaySpec {
+    /// The ports (patterns) it names; with `all_but` set, the ports it LEAVES OUT.
+    pub ports: Vec<String>,
+    /// Every port but `ports` (`[all_inputs]` leaves out none).
+    pub all_but: bool,
+    pub clock: Option<String>,
+    /// `-clock_fall`: relative to the clock's falling edge.
+    pub clock_fall: bool,
+    /// The edges (`-rise` / `-fall`) and analyses (`-min` / `-max`) it sets: `[rise, fall]`,
+    /// `[min, max]`; both when neither is written.
+    pub rf: [bool; 2],
+    pub mm: [bool; 2],
+    pub add: bool,
+    /// The delay per `[min, max][rise, fall]`, with any clock latency the command says it already
+    /// includes taken out (an input) or put in (an output) — this timer leaves a latency that is
+    /// the same on both sides of a path out of both.
+    pub value: [[f64; 2]; 2],
+}
+
+/// One port's delay for one clock edge, resolved over every command that names the port: the
+/// value per `[min, max][rise, fall]`, `None` where no command set it (that edge has no arrival,
+/// or no requirement, in that analysis).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PortDelay {
+    pub clock: Option<String>,
+    pub clock_fall: bool,
+    pub value: [[Option<f64>; 2]; 2],
+}
+
+/// The delays on `port`, per clock edge, over `specs` in order (`Sdc::setInputDelay`: a command
+/// without `-add_delay` deletes the port's delays on other clock edges and sets the slots it
+/// names on its own; with it, the slots merge — the larger max and the smaller min).
+pub fn resolve_port_delays(specs: &[IoDelaySpec], port: &str) -> Vec<PortDelay> {
+    let mut out: Vec<PortDelay> = Vec::new();
+    for d in specs {
+        let named = d.ports.iter().any(|p| vyges_loom::sdc::object_matches(p, port));
+        if named == d.all_but {
+            continue;
+        }
+        let same = |e: &PortDelay| e.clock == d.clock && e.clock_fall == d.clock_fall;
+        if !d.add {
+            out.retain(same);
+        }
+        let k = match out.iter().position(same) {
+            Some(k) => k,
+            None => {
+                out.push(PortDelay { clock: d.clock.clone(), clock_fall: d.clock_fall, value: [[None; 2]; 2] });
+                out.len() - 1
+            }
+        };
+        for (mm, row) in out[k].value.iter_mut().enumerate() {
+            for (rf, slot) in row.iter_mut().enumerate() {
+                if !(d.mm[mm] && d.rf[rf]) {
+                    continue;
+                }
+                let v = d.value[mm][rf];
+                *slot = Some(match (*slot, d.add) {
+                    (Some(old), true) if mm == 1 => old.max(v),
+                    (Some(old), true) => old.min(v),
+                    _ => v,
+                });
+            }
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 pub struct StaJob {
     pub design: String,
@@ -103,13 +177,15 @@ pub struct StaJob {
     /// either. On for the Tcl adapter (a reference script); off for a `.sta` job, whose format
     /// has always checked every output at the default output delay.
     pub unconstrained_outputs: bool,
-    pub io_input_delays: Vec<(String, f64)>,
-    pub io_output_delays: Vec<(String, f64)>,
-    /// Every delay on EVERY input (output) but some, in file order: the ports it leaves out and
-    /// its value — `[lsearch -inline -all -not -exact [all_inputs] clk]`, or
-    /// `[remove_from_collection [all_inputs] clk]` (the reader's `all_inputs_except`). A plain
-    /// default is one that leaves out none. Consulted after the per-port delays, as the default
-    /// is; the last that covers the port wins.
+    /// Every `set_input_delay` (`set_output_delay`), in file order, with its clock, edge and
+    /// flags — see [`IoDelaySpec`]; a delay on every input but some (`[lsearch -inline -all
+    /// -not -exact [all_inputs] clk]`, `[remove_from_collection [all_inputs] clk]`) names the
+    /// ports it leaves out.
+    pub io_input_delays: Vec<IoDelaySpec>,
+    pub io_output_delays: Vec<IoDelaySpec>,
+    /// Delays on every input (output) but some as `(left out, value)`, for a job built by hand:
+    /// consulted when no [`StaJob::io_input_delays`] entry covers the port, the last that covers
+    /// it winning, relative to the primary clock. The SDC reader fills `io_input_delays` instead.
     pub io_input_all_but: Vec<(Vec<String>, f64)>,
     pub io_output_all_but: Vec<(Vec<String>, f64)>,
     // clock uncertainty (SDC set_clock_uncertainty): tightens setup required time,
@@ -164,23 +240,24 @@ pub struct StaJob {
 }
 
 impl StaJob {
-    /// Resolve the input arrival for a primary input port (per-port override,
-    /// else the default `input_delay`).
-    /// `None` means the port is **unconstrained** and must not start a timed path.
+    /// The input delays on `port`, per clock edge: its own commands, else a hand-built
+    /// every-port-but delay, else the declared default (relative to the primary clock). Empty:
+    /// the port is **unconstrained** and starts no timed path.
+    pub fn input_delays_for(&self, port: &str) -> Vec<PortDelay> {
+        let own = resolve_port_delays(&self.io_input_delays, port);
+        if !own.is_empty() {
+            return own;
+        }
+        all_but(&self.io_input_all_but, port)
+            .or(if self.input_delay_declared { Some(self.input_delay) } else { None })
+            .map(|v| vec![PortDelay { clock: None, clock_fall: false, value: [[Some(v); 2]; 2] }])
+            .unwrap_or_default()
+    }
+
+    /// The latest input arrival declared for `port` (any clock edge, either data edge), `None`
+    /// when the port is unconstrained.
     pub fn input_delay_for(&self, port: &str) -> Option<f64> {
-        // the object as written may be a PATTERN (`[get_ports in*]`), and a later command on the
-        // same port replaces an earlier one — the reference's rules
-        self.io_input_delays
-            .iter()
-            .rev()
-            .find(|(p, _)| vyges_loom::sdc::object_matches(p, port))
-            .map(|(_, d)| *d)
-            .or_else(|| all_but(&self.io_input_all_but, port))
-            .or(if self.input_delay_declared {
-                Some(self.input_delay)
-            } else {
-                None
-            })
+        latest(&self.input_delays_for(port))
     }
 
     /// The input transition of input port `port`, `[analysis][edge]` (analysis 0 early / min,
@@ -209,22 +286,30 @@ impl StaJob {
     /// that does not is unconstrained (no hold check there, as in the reference).
     pub fn output_delay_declared_for(&self, port: &str) -> bool {
         self.output_delay_declared
-            || self.io_output_delays.iter().any(|(p, _)| vyges_loom::sdc::object_matches(p, port))
+            || !resolve_port_delays(&self.io_output_delays, port).is_empty()
             || all_but(&self.io_output_all_but, port).is_some()
     }
 
-    /// Resolve the external output delay for a primary output port.
-    pub fn output_delay_for(&self, port: &str) -> f64 {
-        // the object as written may be a PATTERN (`[get_ports in*]`), and a later command on the
-        // same port replaces an earlier one — the reference's rules
-        self.io_output_delays
-            .iter()
-            .rev()
-            .find(|(p, _)| vyges_loom::sdc::object_matches(p, port))
-            .map(|(_, d)| *d)
-            .or_else(|| all_but(&self.io_output_all_but, port))
-            .unwrap_or(self.output_delay)
+    /// The output delays on `port`, per clock edge: its own commands, else a hand-built
+    /// every-port-but delay, else the default `output_delay` (relative to the primary clock).
+    pub fn output_delays_for(&self, port: &str) -> Vec<PortDelay> {
+        let own = resolve_port_delays(&self.io_output_delays, port);
+        if !own.is_empty() {
+            return own;
+        }
+        let v = all_but(&self.io_output_all_but, port).unwrap_or(self.output_delay);
+        vec![PortDelay { clock: None, clock_fall: false, value: [[Some(v); 2]; 2] }]
     }
+
+    /// The largest (setup) output delay on `port`, any clock edge, either data edge.
+    pub fn output_delay_for(&self, port: &str) -> f64 {
+        latest(&self.output_delays_for(port)).unwrap_or(self.output_delay)
+    }
+}
+
+/// The largest max value over `delays`, either data edge.
+fn latest(delays: &[PortDelay]) -> Option<f64> {
+    delays.iter().flat_map(|d| d.value[1].iter().flatten()).copied().reduce(f64::max)
 }
 
 /// Timing exception types now live in the shared `vyges-loom` SDC model; re-export
@@ -531,44 +616,56 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
     // pin, a delay that says it includes latency) see `latency_not_modelled`.
     // ⛔ An every-input-but delay names the ports it LEAVES OUT: read as named ports, the delay
     // went onto the one port it excluded and off every other.
-    let all_but = |d: &vyges_loom::sdc::IoDelay| d.accessor.ends_with("_except");
-    let mut in_def = None;
+    // Each command keeps its clock, edge (`-clock_fall`), analyses and data edges, `-add_delay`
+    // and the latency it says it includes (`IoDelaySpec`); before, every delay was one number
+    // relative to the primary clock.
+    let ideal = ideal_clocks(sdc);
+    let spec = |d: &vyges_loom::sdc::IoDelay, input: bool| -> IoDelaySpec {
+        let has = |f: &str| d.flags.iter().any(|x| x == f);
+        let pick = |a: &str, b: &str| if has(a) || has(b) { [has(a), has(b)] } else { [true, true] };
+        let mut value = [[d.value; 2]; 2];
+        if let Some(c) = &d.clock {
+            let is_ideal = sdc.clocks.iter().find(|k| &k.name == c).is_some_and(|k| k.sources.iter().any(|s| ideal.contains_key(s)) || k.is_virtual());
+            for (mm, row) in value.iter_mut().enumerate() {
+                for (rf, v) in row.iter_mut().enumerate() {
+                    // `inputDelayClkArrival`: source latency unless `-source_latency_included`,
+                    // network latency on an ideal clock unless `-network_latency_included`.
+                    let mut included = 0.0;
+                    if has("-source_latency_included") {
+                        included += clock_latency(sdc, c, true, mm, rf);
+                    }
+                    if has("-network_latency_included") && is_ideal {
+                        included += clock_latency(sdc, c, false, mm, rf);
+                    }
+                    *v += if input { -included } else { included };
+                }
+            }
+        }
+        let all_but = d.default || d.accessor.ends_with("_except");
+        IoDelaySpec {
+            ports: if d.default { Vec::new() } else { d.ports.clone() },
+            all_but,
+            clock: d.clock.clone(),
+            clock_fall: has("-clock_fall"),
+            rf: pick("-rise", "-fall"),
+            mm: pick("-min", "-max"),
+            add: has("-add_delay"),
+            value,
+        }
+    };
     for d in &sdc.input_delays {
-        if all_but(d) {
-            job.io_input_all_but.push((d.ports.clone(), d.value));
-            continue;
-        }
         if d.default {
-            in_def = Some(d.value);
-            job.io_input_all_but.push((Vec::new(), d.value));
+            job.input_delay = d.value;
+            job.input_delay_declared = true;
         }
-        for p in &d.ports {
-            job.io_input_delays
-                .push((p.clone(), d.value));
-        }
+        job.io_input_delays.push(spec(d, true));
     }
-    if let Some(v) = in_def {
-        job.input_delay = v;
-        job.input_delay_declared = true;
-    }
-    let mut out_def = None;
     for d in &sdc.output_delays {
-        if all_but(d) {
-            job.io_output_all_but.push((d.ports.clone(), d.value));
-            continue;
-        }
         if d.default {
-            out_def = Some(d.value);
-            job.io_output_all_but.push((Vec::new(), d.value));
+            job.output_delay = d.value;
+            job.output_delay_declared = true;
         }
-        for p in &d.ports {
-            job.io_output_delays
-                .push((p.clone(), d.value));
-        }
-    }
-    if let Some(v) = out_def {
-        job.output_delay = v;
-        job.output_delay_declared = true;
+        job.io_output_delays.push(spec(d, false));
     }
     job.setup_uncertainty = sdc.setup_uncertainty;
     job.hold_uncertainty = sdc.hold_uncertainty;
@@ -626,6 +723,27 @@ fn all_but(list: &[(Vec<String>, f64)], port: &str) -> Option<f64> {
     list.iter().rev().find(|(out, _)| !out.iter().any(|p| vyges_loom::sdc::object_matches(p, port))).map(|(_, v)| *v)
 }
 
+/// The clock latency `set_clock_latency` gives clock `clock` (`source`: `-source`, else network)
+/// for analysis `mm` (0 min / early, 1 max / late) and edge `rf` (0 rise): the last command that
+/// names the clock and that slot.
+fn clock_latency(sdc: &crate::sdc::Sdc, clock: &str, source: bool, mm: usize, rf: usize) -> f64 {
+    let mut v = 0.0;
+    for l in sdc.clock_latencies.iter().filter(|l| l.accessor == "get_clocks" && l.objects.iter().any(|o| o == clock)) {
+        let has = |f: &str| l.flags.iter().any(|x| x == f);
+        if has("-source") != source {
+            continue;
+        }
+        let min = has("-min") || has("-early");
+        let max = has("-max") || has("-late");
+        let mm_ok = (!min && !max) || (mm == 0 && min) || (mm == 1 && max);
+        let rf_ok = (!has("-rise") && !has("-fall")) || (rf == 0 && has("-rise")) || (rf == 1 && has("-fall"));
+        if mm_ok && rf_ok {
+            v = l.value;
+        }
+    }
+    v
+}
+
 pub fn latency_not_modelled(sdc: &crate::sdc::Sdc) -> Option<String> {
     if sdc.clock_latencies.is_empty() {
         return None;
@@ -650,10 +768,7 @@ pub fn latency_not_modelled(sdc: &crate::sdc::Sdc) -> Option<String> {
             why.push(format!("{} latency differs between clocks or edges", if source { "source" } else { "network" }));
         }
     }
-    let included = ["-source_latency_included", "-network_latency_included"];
-    if sdc.input_delays.iter().chain(&sdc.output_delays).any(|d| d.flags.iter().any(|f| included.contains(&f.as_str()))) {
-        why.push("an I/O delay that includes it".to_string());
-    }
+    // an I/O delay that says it includes a clock's latency is modelled (`IoDelaySpec::value`)
     (!why.is_empty()).then(|| format!("clock latency not modelled where it does not cancel: {}", why.join("; ")))
 }
 
@@ -700,8 +815,8 @@ mod clock_latency_rule {
         .unwrap();
         let mut job = StaJob::parse("design: t\nnetlist: t.v\nlib: t.lib\nclock: clk 1.0\n", ".").unwrap();
         merge_sdc_into(&sdc, &mut job);
-        assert_eq!(job.io_input_delays, vec![("a".to_string(), 0.2)]);
-        assert_eq!(job.io_output_delays, vec![("y".to_string(), 0.3)]);
+        assert_eq!(job.input_delay_for("a"), Some(0.2));
+        assert_eq!(job.output_delay_for("y"), 0.3);
         assert!(latency_not_modelled(&sdc).is_none());
     }
 
@@ -768,5 +883,68 @@ mod ideal_clock_rule {
         assert_eq!(ideal["ca"], [0.04, 0.03]);
         let all = crate::sdc::Sdc::parse(&format!("{base}set_propagated_clock [all_clocks]\n")).unwrap();
         assert!(ideal_clocks(&all).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod io_delay_rule {
+    use super::*;
+
+    fn job_of(sdc: &str) -> StaJob {
+        let sdc = crate::sdc::Sdc::parse(&format!(
+            "create_clock -name a -period 1 [get_ports ca]\ncreate_clock -name b -period 2 [get_ports cb]\n{sdc}"
+        ))
+        .unwrap();
+        let mut job = StaJob::parse("design: t\nnetlist: t.v\nlib: t.lib\nclock: ca 1.0\n", ".").unwrap();
+        merge_sdc_into(&sdc, &mut job);
+        job
+    }
+
+    /// Reference rule (`Sdc::setInputDelay`, one delay per port and clock edge): without
+    /// `-add_delay` a command replaces the port's delays on other clock edges and sets only the
+    /// slots it names (`-max` then `-min` keep both); with it, a second clock edge is kept beside
+    /// the first.
+    #[test]
+    fn a_delay_replaces_other_edges_unless_added() {
+        let j = job_of(
+            "set_input_delay -max 0.3 -clock a [get_ports d]\nset_input_delay -min 0.1 -clock a [get_ports d]\n\
+             set_input_delay 0.2 -clock a [get_ports e]\nset_input_delay 0.5 -clock b [get_ports e]\n\
+             set_input_delay 0.2 -clock a [get_ports f]\nset_input_delay 0.3 -clock a -clock_fall -add_delay [get_ports f]\n",
+        );
+        let d = j.input_delays_for("d");
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].value, [[Some(0.1); 2], [Some(0.3); 2]]);
+        let e = j.input_delays_for("e");
+        assert_eq!((e.len(), e[0].clock.as_deref()), (1, Some("b")), "{e:?}");
+        let f = j.input_delays_for("f");
+        assert_eq!(f.iter().map(|x| x.clock_fall).collect::<Vec<_>>(), [false, true]);
+        assert_eq!(j.input_delays_for("g"), Vec::new(), "no delay: unconstrained");
+    }
+
+    /// Reference rule (`RiseFallMinMax`): `-rise` / `-fall` set one data edge; the other edge has
+    /// no arrival (no requirement at an output).
+    #[test]
+    fn a_rise_only_delay_leaves_the_fall_unset() {
+        let j = job_of("set_output_delay -fall 0.3 -clock a [get_ports y]\n");
+        assert_eq!(j.output_delays_for("y")[0].value, [[None, Some(0.3)], [None, Some(0.3)]]);
+    }
+
+    /// Reference rule (`Search::inputDelayClkArrival`): an input arrival includes the clock's
+    /// source latency unless `-source_latency_included`, and an IDEAL clock's network latency
+    /// unless `-network_latency_included`. This timer leaves a latency that is on both sides of a
+    /// path out of both, so a delay that includes it is that latency earlier (an output's, later).
+    /// Measured on sky130 with 0.3 network latency on an ideal clock: input hold and output setup
+    /// both 0.3 worse, as here.
+    #[test]
+    fn a_delay_that_includes_latency_takes_it_out() {
+        let j = job_of(
+            "set_clock_latency 0.3 [get_clocks a]\nset_clock_latency -source 0.25 [get_clocks a]\n\
+             set_input_delay 0.2 -clock a -network_latency_included [get_ports d]\n\
+             set_input_delay 0.2 -clock a -source_latency_included [get_ports e]\n\
+             set_output_delay 0.3 -clock a -network_latency_included [get_ports y]\n",
+        );
+        assert!((j.input_delay_for("d").unwrap() - -0.1).abs() < 1e-12);
+        assert!((j.input_delay_for("e").unwrap() - -0.05).abs() < 1e-12);
+        assert!((j.output_delay_for("y") - 0.6).abs() < 1e-12);
     }
 }

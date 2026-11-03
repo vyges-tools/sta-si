@@ -1450,7 +1450,16 @@ fn build_report(
     } else {
         job.clocks.iter().map(|(_, s, _)| s.clone()).collect()
     };
-    let mut seed = vec![0.0f64; n];
+    // `in_seed[edge][analysis][node]`: an input port's arrival per data edge, for the input delays
+    // relative to a clock's rising (edge 0) or falling (edge 1) edge, in the min (0) and max (1)
+    // analysis — measured from that clock edge, as every launch here is (the edge's own time is
+    // in the launch-capture relation). Non-finite: no arrival on that lane. `in_clock[node][edge]`:
+    // the clock those delays are relative to (`None`: the primary clock stands in).
+    let unset = [f64::NEG_INFINITY; 2];
+    let mut in_seed: [[Vec<[f64; 2]>; 2]; 2] = [[vec![[0.0; 2]; n], vec![[0.0; 2]; n]], [vec![unset; n], vec![unset; n]]];
+    let mut in_clock: Vec<[Option<String>; 2]> = vec![[None, None]; n];
+    let mut in_fall = false;
+    let mut multi_clock_in: Vec<&str> = Vec::new();
     // A port with no declared arrival is UNCONSTRAINED: it is not a timing start point, so
     // it is left unreached exactly as a tie cell is (see the indeg-0 loop below). Seeding it
     // at 0 instead invents a launch at time zero — harmless on setup, where a whole period
@@ -1462,11 +1471,32 @@ fn build_report(
     let mut unconstrained_names: Vec<&str> = Vec::new();
     for (idx, name) in &input_ports {
         if !clock_srcs.contains(name) {
-            match job.input_delay_for(name) {
-                Some(d) => seed[*idx] = d,
-                None => {
-                    unconstrained_in[*idx] = true;
-                    unconstrained_names.push(name.as_str());
+            let delays = job.input_delays_for(name);
+            if delays.is_empty() {
+                unconstrained_in[*idx] = true;
+                unconstrained_names.push(name.as_str());
+                continue;
+            }
+            for per_edge in in_seed.iter_mut() {
+                per_edge[0][*idx] = unset;
+                per_edge[1][*idx] = unset;
+            }
+            // `seedInputDelayArrival`: one arrival per delay, its value on each edge it sets, the
+            // latest kept for max and the earliest for min
+            for d in &delays {
+                let e = usize::from(d.clock_fall);
+                in_fall |= e == 1;
+                match (&in_clock[*idx][e], &d.clock) {
+                    (None, c) => in_clock[*idx][e] = c.clone(),
+                    (Some(a), Some(b)) if a != b => multi_clock_in.push(name.as_str()),
+                    _ => {}
+                }
+                for (mm, row) in d.value.iter().enumerate() {
+                    for (rf, v) in row.iter().enumerate() {
+                        let Some(v) = *v else { continue };
+                        let slot = &mut in_seed[e][mm][*idx][rf];
+                        *slot = if !slot.is_finite() { v } else if mm == 1 { slot.max(v) } else { slot.min(v) };
+                    }
                 }
             }
         }
@@ -1491,6 +1521,28 @@ fn build_report(
                 ),
             )
             .with_code("STA-UNCONSTRAINED-INPUT")
+            .with_objects(head.iter().map(|p| format!("port:{p}")).collect()),
+        );
+    }
+
+    // One arrival per node carries one launching clock: a port with delays relative to two
+    // clocks on one edge is timed at its latest (earliest) arrival against the first clock.
+    if !multi_clock_in.is_empty() {
+        multi_clock_in.sort_unstable();
+        multi_clock_in.dedup();
+        let head: Vec<&str> = multi_clock_in.iter().take(5).copied().collect();
+        vyges_events::emit(
+            &vyges_events::Event::new(
+                "vyges-sta-si",
+                vyges_events::Severity::Warn,
+                format!(
+                    "{} input port(s) carry input delays relative to more than one clock on one clock edge ({}{}); each is timed at its worst arrival against the first clock, not once per clock.",
+                    multi_clock_in.len(),
+                    head.join(", "),
+                    if multi_clock_in.len() > head.len() { ", …" } else { "" }
+                ),
+            )
+            .with_code("STA-INPUT-MULTICLOCK")
             .with_objects(head.iter().map(|p| format!("port:{p}")).collect()),
         );
     }
@@ -1797,7 +1849,8 @@ fn build_report(
     // A register launched on a clock's FALLING edge (a negative-edge flop; a memory macro whose
     // read data is clocked out on the fall): arrivals are then timed per launching edge (see
     // `EdgeRun`), which the incremental fast path does not carry.
-    let fall_launch = ck_lane_list.iter().any(|&(_, l)| l == Some(1));
+    // An input delay relative to a falling clock edge is a launch on the fall as well.
+    let fall_launch = ck_lane_list.iter().any(|&(_, l)| l == Some(1)) || in_fall;
     // The fast path keeps ONE clock-side base per endpoint, so one capture edge per pin.
     let mixed_capture =
         flop_d.iter().chain(&flop_hold).any(|(_, cons, _)| cons.windows(2).any(|w| w[0].clk_edge != w[1].clk_edge));
@@ -1872,7 +1925,24 @@ fn build_report(
     // happen at different absolute times. `seed_clk` starts a second pass at those
     // times so a path that runs from a clock port out through the clock network
     // carries the launch edge it actually left on. See `clk_arr` below.
-    let seed_main: Vec<[f64; 2]> = seed.iter().map(|&s| [s; 2]).collect();
+    // The merged passes (every launch from its own edge): per lane, the latest of the two edges'
+    // max arrivals and the earliest of their min arrivals.
+    let merge_edges = |mm: usize| -> Vec<[f64; 2]> {
+        (0..n)
+            .map(|i| {
+                let (a, b) = (in_seed[0][mm][i], in_seed[1][mm][i]);
+                std::array::from_fn(|l| match (a[l].is_finite(), b[l].is_finite()) {
+                    (true, true) if mm == 1 => a[l].max(b[l]),
+                    (true, true) => a[l].min(b[l]),
+                    (true, false) => a[l],
+                    (false, true) => b[l],
+                    (false, false) => f64::NEG_INFINITY,
+                })
+            })
+            .collect()
+    };
+    let seed_main: Vec<[f64; 2]> = merge_edges(1);
+    let seed_early: Vec<[f64; 2]> = merge_edges(0);
     let period_of_src = |name: &str| -> f64 {
         job.clocks
             .iter()
@@ -2878,7 +2948,7 @@ fn build_report(
     let (early_d, early_s) = {
         let (mut d, mut sl) = compute(&neg, &conv_net_slew, 0); // seeded from the late point
         for _ in 0..MAX_SI_ITERS {
-            let (_a, _s2, _f, _o, _ar, slw, _fl) = relax(&d, &sl, false, &seed_main, false, None, None);
+            let (_a, _s2, _f, _o, _ar, slw, _fl) = relax(&d, &sl, false, &seed_early, false, None, None);
             let e_net_slew: Vec<[f64; 2]> = (0..nn)
                 .map(|i| net_drv[i].map(|dv| slw[dv]).unwrap_or([0.0; 2]))
                 .collect();
@@ -2899,7 +2969,7 @@ fn build_report(
     let (arrival, slew, from, order_late, late_arr, late_slew, late_from) =
         relax(&arc_d, &arc_s, true, &seed_main, false, None, None);
     let (arr_min, slew_min, from_min, _ord_min, early_arr, early_slew, early_from) =
-        relax(&early_d, &early_s, false, &seed_main, false, None, None);
+        relax(&early_d, &early_s, false, &seed_early, false, None, None);
 
     // ---- per launching edge -----------------------------------------------
     // The reference keeps one arrival per clock EDGE that launched it (a tag per `ClockEdge`) and
@@ -2909,14 +2979,17 @@ fn build_report(
     // alone — its own launches only (inputs launch on the rise), at the slews merged over all of
     // them — and every endpoint is checked once per launching edge.
     let edge_runs: Vec<EdgeRun> = if fall_launch {
-        let fall_seed: Vec<[f64; 2]> =
-            (0..n).map(|i| if clock_src.contains_key(&i) { seed_main[i] } else { [f64::NEG_INFINITY; 2] }).collect();
-        [(0, &seed_main), (1, &fall_seed)]
+        // each edge's own launches: its input delays and, on both, the clock sources
+        let edge_seed = |e: usize, mm: usize| -> Vec<[f64; 2]> {
+            (0..n).map(|i| if clock_src.contains_key(&i) { [0.0; 2] } else { in_seed[e][mm][i] }).collect()
+        };
+        [0, 1]
             .into_iter()
-            .map(|(edge, sd)| {
-                let (_, _, from, _, late_arr, _, late_from) = relax(&arc_d, &arc_s, true, sd, false, Some(edge), Some(&late_slew));
+            .map(|edge| {
+                let (sd, sd_early) = (edge_seed(edge, 1), edge_seed(edge, 0));
+                let (_, _, from, _, late_arr, _, late_from) = relax(&arc_d, &arc_s, true, &sd, false, Some(edge), Some(&late_slew));
                 let (_, _, from_min, _, early_arr, _, early_from) =
-                    relax(&early_d, &early_s, false, sd, false, Some(edge), Some(&early_slew));
+                    relax(&early_d, &early_s, false, &sd_early, false, Some(edge), Some(&early_slew));
                 EdgeRun { edge, late_arr, late_from, from, early_arr, early_from, from_min }
             })
             .collect()
@@ -3124,6 +3197,20 @@ fn build_report(
             _ => false,
         }
     };
+    // The same separation between two clocks by NAME — an I/O delay's clock, which may be
+    // virtual and so has no source node to map.
+    let is_async_named = |a: Option<&str>, b: Option<&str>| -> bool {
+        let (Some(a), Some(b)) = (a, b) else { return false };
+        if !job.clock_groups.is_empty() {
+            return crate::sdc::clocks_unrelated(&job.clock_groups, a, b);
+        }
+        match (group_of_name.get(a), group_of_name.get(b)) {
+            (Some(x), Some(y)) => x != y,
+            _ => false,
+        }
+    };
+    // a clock's period by name (a virtual clock's too); the primary period for none
+    let period_named = |c: &str| job.clocks.iter().find(|k| k.0 == c).map_or(period, |k| k.2);
     // The clock every I/O delay is relative to here (the job keeps no per-delay clock), and the
     // path group an endpoint is reported in: `asynchronous` for recovery and removal, else the
     // capture clock's name (`PathGroups::pathGroup`).
@@ -3171,15 +3258,24 @@ fn build_report(
     for (i, _) in &input_ports {
         is_in_port[*i] = true;
     }
-    let launch_end = |lck: Option<usize>, endpoint: usize, pred: &[Option<usize>]| match lck {
+    // the input port a path into `endpoint` over `pred` starts at, when it starts at one
+    let start_port = |endpoint: usize, pred: &[Option<usize>]| -> Option<usize> {
+        let mut v = endpoint;
+        while let Some(u) = pred[v] {
+            v = u;
+        }
+        is_in_port[v].then_some(v)
+    };
+    // the clock an input port's delays on launching edge `edge` are relative to, if one is named
+    let in_clock_at = |port: Option<usize>, edge: usize| -> Option<&str> { port.and_then(|p| in_clock[p][edge].as_deref()) };
+    // the launch period of the path from an input port on edge `edge`: its delay's clock's
+    let in_period = |endpoint: usize, pred: &[Option<usize>], edge: usize| in_clock_at(start_port(endpoint, pred), edge).map(period_named);
+    let launch_end = |lck: Option<usize>, endpoint: usize, pred: &[Option<usize>], edge: usize| match lck {
         Some(ck) => reg_end(Some(ck), ck),
         None => {
-            let mut v = endpoint;
-            while let Some(u) = pred[v] {
-                v = u;
-            }
-            let name = if is_in_port[v] { labels[v].clone() } else { String::new() };
-            End { name, clock: Some(primary_clock.to_string()), port: true }
+            let p = start_port(endpoint, pred);
+            let name = p.map(|v| labels[v].clone()).unwrap_or_default();
+            End { name, clock: Some(in_clock_at(p, edge).unwrap_or(primary_clock).to_string()), port: true }
         }
     };
     fn point(e: &End) -> crate::exc::PathPoint<'_> {
@@ -3199,31 +3295,82 @@ fn build_report(
             }
         }
     }
+    // An output port's delays, one per clock edge (`OutputDelay`), resolved once.
+    let out_delays: HashMap<usize, Vec<crate::job::PortDelay>> =
+        output_ports.iter().map(|(i, name)| (*i, job.output_delays_for(name))).collect();
+    // An output port's check per data edge, for the path from `from` launched on edge `edge`
+    // (launch period `pl`), setup (`max`) or hold: over its delays, the tightest requirement
+    // `(required, capture clock, capture edge, relation)` — the reference checks each delay's
+    // clock edge as its own path end (`PathEndOutputDelay`), and the worst of them is the slack.
+    // The relation is the launch edge to that clock edge's capture (`CycleAccting`), moved by any
+    // exception; a false path, or clocks in separate groups, leave that delay unchecked. `None`
+    // on a data edge no delay sets.
+    type OutCheck = [Option<(f64, String, usize, f64)>; 2];
+    let out_check = |idx: usize, from: &End, edge: usize, pl: f64, max: bool| -> OutCheck {
+        let mut best: OutCheck = [None, None];
+        let name = labels[idx].as_str();
+        for d in out_delays.get(&idx).map(Vec::as_slice).unwrap_or_default() {
+            let clk = d.clock.clone().unwrap_or_else(|| primary_clock.to_string());
+            // clocks in separate groups: no check (a delay with no clock names none)
+            if d.clock.is_some() && is_async_named(from.clock.as_deref(), Some(&clk)) {
+                continue;
+            }
+            let cl = usize::from(d.clock_fall);
+            // a delay with no clock is relative to the job's primary period
+            let pc = d.clock.as_deref().map_or(period, period_named);
+            let to = End { name: name.to_string(), clock: Some(clk.clone()), port: true };
+            let Some(shift) = exc_shift(!max, from, &to, pl, pc) else { continue };
+            // a delay with no clock (a job file's default) keeps this timer's rule: setup from a
+            // launch of the primary period itself, hold from the launch clock's
+            let pl_setup = if d.clock.is_none() { period } else { pl };
+            let setup_rel = edge_relation(pl_setup, edge, pc, cl).0;
+            let hold_rel = edge_relation(pl, edge, pc, cl).1;
+            let rel = if max { setup_rel } else { hold_rel } + shift;
+            for (l, slot) in best.iter_mut().enumerate() {
+                let Some(od) = d.value[usize::from(max)][l] else { continue };
+                let req = if max { rel - od - job.setup_uncertainty } else { rel + job.hold_uncertainty - od };
+                if slot.as_ref().is_none_or(|b| if max { req < b.0 } else { req > b.0 }) {
+                    *slot = Some((req, clk.clone(), cl, rel));
+                }
+            }
+        }
+        best
+    };
+    // the launch period of the path into `v` over `pred` on edge `edge`: its register's clock,
+    // else its input delay's clock, else `default`
+    let launch_period = |lck: Option<usize>, v: usize, pred: &[Option<usize>], edge: usize, default: f64| {
+        lck.map(clock_period_of).or_else(|| in_period(v, pred, edge)).unwrap_or(default)
+    };
     // Required time PER LAUNCHING EDGE AND DATA EDGE: `req_run[r][v][l]` against `runs[r]`'s
     // arrivals; NaN = no check from that edge. `endpoint_req` keeps the tightest so the query API
     // still answers with one number; the scoring loop below uses them all.
     let mut req_run = vec![vec![[f64::NAN; 2]; n]; runs.len()];
-    // An output port's requirement is the same for either data edge; scored per edge like a
-    // register's, so its reported path is the edge that set the slack, followed lane by lane
-    // (collapsed, each node's latest edge was printed — `_414_/Q` rise beside a falling path).
-    // It is captured on the rise; a launch on the fall has that much less of the period.
-    // An exception reaches the output's setup check as a register's: a false path drops this
-    // launch's check, a multicycle moves it (before, only the HOLD check at an output read them).
-    for (idx, name) in &output_ports {
-        let to = End { name: name.clone(), clock: Some(primary_clock.to_string()), port: true };
-        // the least a multicycle moved any launch's check: the collapsed requirement moves by it
-        let mut moved = f64::INFINITY;
+    // An output port: scored per data edge like a register, so its reported path is the edge
+    // that set the slack, followed lane by lane. Each of its delays is a check of its own clock
+    // and edge; an exception reaches it as a register's.
+    // `out_setup_clock[(v, r)]`: the clock of the delay that set each data edge's requirement.
+    let mut out_setup_clock: HashMap<(usize, usize), [Option<String>; 2]> = HashMap::new();
+    for (idx, _) in &output_ports {
         for (r, run) in runs.iter().enumerate() {
-            let (rel, _) = edge_relation(period, run.edge, period, 0);
             let lck = launch_ck(*idx, run.from);
-            let pl = lck.map(clock_period_of).unwrap_or(period);
-            if let Some(shift) = exc_shift(false, &launch_end(lck, *idx, run.from), &to, pl, period) {
-                req_run[r][*idx] = [endpoint_req[*idx] - period + rel + shift; 2];
-                moved = moved.min(shift);
+            let pl = launch_period(lck, *idx, run.from, run.edge, period);
+            let chk = out_check(*idx, &launch_end(lck, *idx, run.from, run.edge), run.edge, pl, true);
+            for (l, c) in chk.iter().enumerate() {
+                if let Some((req, _, _, _)) = c {
+                    req_run[r][*idx][l] = *req;
+                }
             }
+            out_setup_clock.insert((*idx, r), chk.map(|c| c.map(|c| c.1)));
         }
-        if moved.is_finite() {
-            endpoint_req[*idx] += moved;
+        // the collapsed requirement: the rising launch's (the merged arrival is measured from
+        // it), else any launch's
+        let tightest = |q: &[[f64; 2]]| q[*idx].iter().copied().filter(|x| !x.is_nan()).fold(f64::INFINITY, f64::min);
+        let t = match tightest(&req_run[0]) {
+            t if t.is_finite() => t,
+            _ => req_run.iter().map(|q| tightest(q)).fold(f64::INFINITY, f64::min),
+        };
+        if t.is_finite() {
+            endpoint_req[*idx] = t;
         } else {
             excluded_setup[*idx] = true;
         }
@@ -3246,13 +3393,15 @@ fn build_report(
         let mut checked = false;
         for (r, run) in runs.iter().enumerate() {
             let lck = launch_ck(*idx, run.from);
-            let pl = lck.map(clock_period_of).unwrap_or(pc);
+            let pl = launch_period(lck, *idx, run.from, run.edge, pc);
             // A `-hold` multicycle or false path does not reach the SETUP check, and `-start`
             // counts the launch clock's cycles where the default `-end` counts the capture clock's.
-            let Some(shift) = exc_shift(false, &launch_end(lck, *idx, run.from), &reg_end(cap, *idx), pl, pc) else {
+            let (from_end, to_end) = (launch_end(lck, *idx, run.from, run.edge), reg_end(cap, *idx));
+            let Some(shift) = exc_shift(false, &from_end, &to_end, pl, pc) else {
                 continue;
             };
-            if is_async(lck, cap) {
+            let in_clk = lck.map_or_else(|| in_clock_at(start_port(*idx, run.from), run.edge), |_| None);
+            if is_async(lck, cap) || is_async_named(in_clk, to_end.clock.as_deref()) {
                 continue; // async clock groups: no setup check
             }
             checked = true;
@@ -3356,7 +3505,9 @@ fn build_report(
             endpoint_req[v] = arr_v + slack;
         }
         if let Some((r, l)) = slack_at {
-            let g = path_group(v, setup_end.get(&v).and_then(|&e| ck_node(&flop_d[e].2)));
+            // an output's group is the clock of the delay that set its slack
+            let out_group = out_setup_clock.get(&(v, r)).and_then(|c| c[l].clone());
+            let g = out_group.unwrap_or_else(|| path_group(v, setup_end.get(&v).and_then(|&e| ck_node(&flop_d[e].2))));
             if setup_group_worst.get(&g).is_none_or(|w| slack < w.0) {
                 setup_group_worst.insert(g, (slack, v, r, l));
             }
@@ -3553,13 +3704,15 @@ fn build_report(
         let mut checked = false;
         for (r, run) in runs.iter().enumerate() {
             let lck = launch_ck(idx, run.from_min);
-            let pl = lck.map(clock_period_of).unwrap_or(pc);
+            let pl = launch_period(lck, idx, run.from_min, run.edge, pc);
             // apply exceptions: false path drops the check, multicycle shifts the hold capture
             // back by (cycles − 1).
-            let Some(shift) = exc_shift(true, &launch_end(lck, idx, run.from_min), &reg_end(cap, idx), pl, pc) else {
+            let (from_end, to_end) = (launch_end(lck, idx, run.from_min, run.edge), reg_end(cap, idx));
+            let Some(shift) = exc_shift(true, &from_end, &to_end, pl, pc) else {
                 continue;
             };
-            if is_async(lck, cap) {
+            let in_clk = lck.map_or_else(|| in_clock_at(start_port(idx, run.from_min), run.edge), |_| None);
+            if is_async(lck, cap) || is_async_named(in_clk, to_end.clock.as_deref()) {
                 continue; // async clock groups: no hold check
             }
             // Each check at ITS capture edge: that edge's late clock arrival and early slew, and
@@ -3628,32 +3781,30 @@ fn build_report(
     // whose only endpoint is an output port says `0.2196 slack`, this timer said nothing.
     for (idx, name) in &output_ports {
         let idx = *idx;
-        if excluded_setup[idx] || !arr_min[idx].is_finite() || !job.output_delay_declared_for(name) {
-            continue; // false-pathed, unreached, or unconstrained
+        if !arr_min[idx].is_finite() || !job.output_delay_declared_for(name) {
+            continue; // unreached, or unconstrained
         }
         let mut slack = f64::INFINITY;
         let mut slack_at = (0, 0);
+        let mut group = primary_clock.to_string();
         for (r, run) in runs.iter().enumerate() {
             let lck = launch_ck(idx, run.from_min);
-            let pl = lck.map(clock_period_of).unwrap_or(period);
-            let (_, mut hold_rel) = edge_relation(pl, run.edge, period, 0);
-            let to = End { name: name.clone(), clock: Some(primary_clock.to_string()), port: true };
-            match exc_shift(true, &launch_end(lck, idx, run.from_min), &to, pl, period) {
-                Some(s) => hold_rel += s,
-                None => continue,
-            }
-            let base = job.output_delay_for(name) - hold_rel - job.hold_uncertainty;
+            let pl = launch_period(lck, idx, run.from_min, run.edge, period);
+            let chk = out_check(idx, &launch_end(lck, idx, run.from_min, run.edge), run.edge, pl, false);
             let mut reached = false;
             for (l, &a) in run.early_arr[idx].iter().enumerate() {
+                let Some((req, clk, _, _)) = &chk[l] else { continue };
                 if a.is_finite() {
                     reached = true;
-                    if a + base < slack {
-                        slack = a + base;
+                    if a - req < slack {
+                        slack = a - req;
                         slack_at = (r, l);
+                        group = clk.clone();
                     }
                 }
             }
             if reached && simple_ctx {
+                let base = chk.iter().flatten().map(|c| -c.0).fold(f64::INFINITY, f64::min);
                 inc_hold.push(HoldRec { idx, base, cons: Vec::new(), ck_slew: input_slew, launch_ck: lck, port: true });
             }
         }
@@ -3669,9 +3820,8 @@ fn build_report(
             whs = slack;
             worst_hold = Some((idx, slack_at));
         }
-        let g = path_group(idx, hold_end.get(&idx).and_then(|&e| ck_node(&flop_hold[e].2)));
-        if hold_group_worst.get(&g).is_none_or(|w| slack < w.0) {
-            hold_group_worst.insert(g, (slack, idx, slack_at.0, slack_at.1));
+        if hold_group_worst.get(&group).is_none_or(|w| slack < w.0) {
+            hold_group_worst.insert(group, (slack, idx, slack_at.0, slack_at.1));
         }
     }
     // The path of the edge whose check set the slack — not the earliest lane at each node,
@@ -3748,13 +3898,16 @@ fn build_report(
             // the launching clock pin as the check was scored with it (`launch_ck` over the merged
             // predecessors), which on a design with several clocks need not be the one this
             // edge's path reaches
-            let lck = launch_ck(v, if max { run.from } else { run.from_min });
-            let src_name = lck.and_then(clock_name_of).unwrap_or(primary_clock);
-            // the launch clock's period; with no launching clock pin (an input), the period the
-            // check defaults to: the capture clock's for a register, the job's for an output
-            let pl_or = |default: f64| lck.map(clock_period_of).unwrap_or(default);
+            let pred = if max { run.from } else { run.from_min };
+            let lck = launch_ck(v, pred);
+            // an input's launching clock is its delay's, on this run's edge
+            let src_name = lck.and_then(clock_name_of).or_else(|| in_clock_at(start_port(v, pred), run.edge)).unwrap_or(primary_clock);
+            // the launch clock's period; with no launching clock pin, the input delay's clock's,
+            // else the period the check defaults to: the capture clock's for a register, the
+            // job's for an output
+            let pl_or = |default: f64| launch_period(lck, v, pred, run.edge, default);
             let pl = pl_or(period);
-            let launch_edge = if k.is_some() { s0l } else { 0 };
+            let launch_edge = if k.is_some() { s0l } else { run.edge };
             let launch = if launch_edge == 1 { pl / 2.0 } else { 0.0 };
             let src_clock = clock_line(src_name, launch_edge == 0, launch);
             let (startpoint, start_reason) = match k {
@@ -3780,32 +3933,25 @@ fn build_report(
                 })
                 .collect();
             let arrival = launch + arr[v][l];
-            let from_end = launch_end(lck, v, if max { run.from } else { run.from_min });
+            let from_end = launch_end(lck, v, pred, run.edge);
             if out_port.contains(&v) {
-                // an output port, captured on the rise of the clock its delay is relative to
-                let (setup_rel, hold_rel) = edge_relation(pl, run.edge, period, 0);
-                // as the output hold check shifts it
-                let to = End { name: labels[v].clone(), clock: Some(primary_clock.to_string()), port: true };
-                let mc = exc_shift(true, &from_end, &to, pl, period).unwrap_or(0.0);
-                let (tgt_time, required, uncertainty) = if max {
-                    (launch + setup_rel, launch + req_run[r][v][l], -job.setup_uncertainty)
-                } else {
-                    let rel = hold_rel + mc;
-                    (launch + rel, launch + rel + job.hold_uncertainty - job.output_delay_for(&labels[v]), job.hold_uncertainty)
-                };
+                // an output port, captured by the clock edge of the delay that set the slack
+                let (req, clk, cl, rel) = out_check(v, &from_end, run.edge, pl, max)[l].clone()?;
+                let (tgt_time, required, uncertainty) =
+                    (launch + rel, launch + req, if max { -job.setup_uncertainty } else { job.hold_uncertainty });
                 return Some(CheckPath {
                     max,
                     group: group.to_string(),
                     startpoint,
                     start_reason,
                     endpoint: labels[v].clone(),
-                    end_reason: format!("output port clocked by {primary_clock}"),
+                    end_reason: format!("output port clocked by {clk}"),
                     src_clock,
                     src_network_delay,
                     input_delay,
                     lines,
                     arrival,
-                    tgt_clock: clock_line(primary_clock, true, tgt_time),
+                    tgt_clock: clock_line(&clk, cl == 0, tgt_time),
                     tgt_network_delay: 0.0,
                     uncertainty,
                     crpr: 0.0,

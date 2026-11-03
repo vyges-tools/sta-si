@@ -332,3 +332,30 @@ fn port_starts_and_output_ends_take_exceptions() {
     assert_eq!(group_a(&mc).0, "r3");
     assert!(group_a(&mc).1 > group_a(&base).1);
 }
+
+/// I/O delays keep their own clock and edge (reference: `seedInputDelayArrival` launches from
+/// the delay's clock edge; `PathEndOutputDelay` captures on the delay's clock edge). Measured on
+/// sky130 against the reference: `-clock b` (period 2) on the output reports it in path group b;
+/// `-clock_fall` on the output halves its setup window; an output delay pair on the rising and
+/// (`-add_delay`) falling edge checks the tighter.
+#[test]
+fn io_delays_keep_their_clock_and_edge() {
+    let run = |io: &str| {
+        let sdc = vyges_sta_si::sdc::Sdc::parse(&format!(
+            "create_clock -name a -period 1 [get_ports ca]\ncreate_clock -name b -period 2 [get_ports cb]\n{io}"
+        ))
+        .unwrap();
+        let mut j = job(vec![]);
+        vyges_sta_si::job::merge_sdc_into(&sdc, &mut j);
+        let rep = analyze_inputs(NL_2CK, LIB, &j).unwrap();
+        rep.check_paths.iter().find(|p| p.max && p.endpoint == "dout").map(|p| (p.group.clone(), p.slack))
+    };
+    let base = run("set_output_delay 0.6 -clock a [get_ports dout]\n").unwrap();
+    assert_eq!(base.0, "a");
+    let on_b = run("set_output_delay 0.6 -clock b [get_ports dout]\n").unwrap();
+    assert_eq!(on_b.0, "b", "reported in its own clock's group");
+    let fall = run("set_output_delay 0.6 -clock a -clock_fall [get_ports dout]\n").unwrap();
+    assert!((base.1 - fall.1 - 0.5).abs() < 1e-9, "captured half a period earlier: {base:?} {fall:?}");
+    let ddr = run("set_output_delay 0.6 -clock a [get_ports dout]\nset_output_delay 0.2 -clock a -clock_fall -add_delay [get_ports dout]\n").unwrap();
+    assert!((base.1 - ddr.1 - 0.1).abs() < 1e-9, "the falling edge's 0.5 - 0.2 is the tighter: {ddr:?}");
+}
