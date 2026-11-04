@@ -221,4 +221,60 @@ library (k) {
             assert!(vyges_sta_si::job::MODELLED_HERE.contains(&c), "{c} must not be listed as unmodelled");
         }
     }
+
+    /// The constraints `cmds` — `(command, accessor, value, name)`, in file order — on `nl_text`.
+    fn timer_cmds(nl_text: &str, cmds: &[(&str, &str, &str, &str)]) -> Timer {
+        let mut job = StaJob::parse("design: k\nnetlist: x\nlib: x\nclock: clk 4.0\ninput_slew: 0.02\noutput_load: 0.001\ninput_delay: 0.0\n", ".").unwrap();
+        job.case_values = cmds
+            .iter()
+            .map(|(cmd, accessor, value, name)| CaseSpec {
+                cmd: cmd.to_string(),
+                value: value.to_string(),
+                accessor: accessor.to_string(),
+                narrowed: false,
+                names: vec![name.to_string()],
+            })
+            .collect();
+        Timer::build(&netlist::parse(nl_text).unwrap(), &Lib::parse(LIB).unwrap(), &job, None).unwrap()
+    }
+
+    // `set_logic_dc` (reference `Sdc::setLogicValue` with X, then `Sim::setPinValue`): the pin's
+    // constraint value is X, so a 0 or 1 reaching it — a netlist tie, a constant from upstream —
+    // differs from its constraint and is not taken (Warning 1521); and as a later value on the
+    // same pin it replaces an earlier `set_logic_zero` / `set_logic_one`. A case value on the pin
+    // is consulted first and wins. Witnessed on the reference's own simulator (debug `sim` 3).
+    // Here the select held at 0 leaves only A0 (y at 0.1); unheld, the long A1 path (1.0).
+
+    /// A netlist tie on a pin with `set_logic_dc` is not taken: the pin is not constant.
+    #[test]
+    fn a_dont_care_blocks_a_netlist_tie_on_its_pin() {
+        let tied = NL.replace(".S(s)", ".S(1'b0)");
+        assert!((at(&timer_cmds(&tied, &[]), "y") - 0.1).abs() < 1e-6, "the tie alone holds S");
+        let t = timer_cmds(&tied, &[("set_logic_dc", "get_pins", "X", "m/S")]);
+        assert!((at(&t, "y") - 1.0).abs() < 1e-6, "S under X takes no tie: both inputs pass, {}", at(&t, "y"));
+    }
+
+    /// `set_logic_dc` after `set_logic_zero` on the same port replaces it: the port is free.
+    #[test]
+    fn a_later_dont_care_replaces_a_constant() {
+        let t = timer_cmds(NL, &[("set_logic_zero", "get_ports", "0", "s"), ("set_logic_dc", "get_ports", "X", "s")]);
+        assert!((at(&t, "y") - 1.0).abs() < 1e-6, "{}", at(&t, "y"));
+        let z = timer_cmds(NL, &[("set_logic_dc", "get_ports", "X", "s"), ("set_logic_zero", "get_ports", "0", "s")]);
+        assert!((at(&z, "y") - 0.1).abs() < 1e-6, "and a later constant replaces the X, {}", at(&z, "y"));
+    }
+
+    /// A constant propagated from upstream stops at a pin with `set_logic_dc`.
+    #[test]
+    fn a_dont_care_blocks_a_propagated_constant() {
+        let t = timer_cmds(NL, &[("set_logic_zero", "get_ports", "0", "s"), ("set_logic_dc", "get_pins", "X", "m/S")]);
+        assert!(at(&t, "s").is_infinite(), "the port itself is held");
+        assert!((at(&t, "y") - 1.0).abs() < 1e-6, "but the 0 does not reach m/S, {}", at(&t, "y"));
+    }
+
+    /// A case value on the same pin wins over `set_logic_dc`.
+    #[test]
+    fn a_case_value_wins_over_a_dont_care() {
+        let t = timer_cmds(NL, &[("set_logic_dc", "get_ports", "X", "s"), ("set_case_analysis", "get_ports", "0", "s")]);
+        assert!((at(&t, "y") - 0.1).abs() < 1e-6, "{}", at(&t, "y"));
+    }
 }

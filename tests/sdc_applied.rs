@@ -176,6 +176,15 @@ fn set_logic_one_holds_its_pin_constant() {
     assert!(without.is_some() && with.is_none(), "{without:?} {with:?}");
 }
 
+/// `set_logic_dc`: X is a constraint value too. After `set_logic_zero` on the same port it
+/// replaces the 0, so the port is no longer constant and its path is timed again.
+#[test]
+fn set_logic_dc_replaces_a_constant_with_a_dont_care() {
+    let base = format!("{CLOCK}{IO}set_logic_zero [get_ports a]\n");
+    let (without, with) = moved(&base, "set_logic_dc [get_ports a]", "r1/D");
+    assert!(without.is_none() && with.is_some(), "{without:?} {with:?}");
+}
+
 /// `set_propagated_clock`: the clock's arrival at the register clock pins is computed from its
 /// source, not taken as an ideal edge with the `set_clock_transition` slew.
 #[test]

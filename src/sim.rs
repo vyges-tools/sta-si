@@ -41,7 +41,8 @@ pub enum Logic {
 
 impl Logic {
     /// The value an SDC command writes: `0` `1` `zero` `one` `rise` `rising` `fall` `falling`;
-    /// `None` for `X` (`set_logic_dc`), which holds nothing.
+    /// `None` otherwise — `X` (`set_logic_dc`) included, which [`resolve`] keeps as a constraint
+    /// value of its own.
     pub fn from_sdc(v: &str) -> Option<Logic> {
         match v {
             "0" | "zero" => Some(Logic::Zero),
@@ -217,8 +218,9 @@ pub fn run(nl: &Netlist, lib: &Lib, cases: &[CaseSpec]) -> Sim {
 
 struct State {
     sim: Sim,
-    /// the constraint value of each pin (`set_case_analysis` over `set_logic_*`)
-    constraint: HashMap<String, Logic>,
+    /// the constraint value of each pin (`set_case_analysis` over `set_logic_*`); `None` is X
+    /// (`set_logic_dc`), a constraint value too: a 0 or 1 reaching the pin differs from it
+    constraint: HashMap<String, Option<Logic>>,
     /// instances to re-evaluate, in order (`eval_queue_`)
     queue: VecDeque<usize>,
     /// instances that got a value on a pin (`instances_to_annotate_`)
@@ -245,7 +247,7 @@ fn seed_constants(c: &Conn, cases: &[CaseSpec], st: &mut State) {
         }
     }
     for (pin, v) in logic_pins.into_iter().chain(case_pins) {
-        set_pin_value(c, st, &pin, Some(v));
+        set_pin_value(c, st, &pin, v);
     }
     // setConstFuncPins: tie-cell outputs
     for inst in &c.nl.insts {
@@ -259,12 +261,17 @@ fn seed_constants(c: &Conn, cases: &[CaseSpec], st: &mut State) {
     }
 }
 
-/// The pins and ports each command names, with its value, in command order. An object this
-/// timer cannot resolve is not applied and said.
-fn resolve(c: &Conn, specs: &[&CaseSpec], warn: &mut Vec<String>) -> Vec<(String, Logic)> {
+/// The pins and ports each command names, with its value (`None` for X, `set_logic_dc`), in
+/// command order. An object this timer cannot resolve is not applied and said.
+fn resolve(c: &Conn, specs: &[&CaseSpec], warn: &mut Vec<String>) -> Vec<(String, Option<Logic>)> {
     let mut out = Vec::new();
     for s in specs {
-        let Some(v) = Logic::from_sdc(&s.value) else { continue }; // `X`: holds nothing
+        // `set_logic_dc` writes X (`Sdc::setLogicValue`): a constraint value, not an absence
+        let v = match Logic::from_sdc(&s.value) {
+            Some(v) => Some(v),
+            None if s.value.eq_ignore_ascii_case("x") => None,
+            None => continue,
+        };
         let pool: Vec<&String> = match s.accessor.as_str() {
             _ if s.narrowed => {
                 warn.push(format!("{} {}: objects selected by a filter or option are not resolved", s.cmd, s.value));
@@ -295,9 +302,10 @@ fn resolve(c: &Conn, specs: &[&CaseSpec], warn: &mut Vec<String>) -> Vec<(String
 /// re-evaluates its instance, a driver's goes to its net's loads. `None` is unknown.
 fn set_pin_value(c: &Conn, st: &mut State, pin: &str, value: Option<Logic>) {
     if let Some(&k) = st.constraint.get(pin) {
-        if value != Some(k) {
+        if value != k {
             if let Some(v) = value {
-                st.sim.warnings.push(format!("propagated logic value {v:?} differs from the constraint value {k:?} on {pin}"));
+                let k = k.map_or("X".to_string(), |k| format!("{k:?}"));
+                st.sim.warnings.push(format!("propagated logic value {v:?} differs from the constraint value {k} on {pin}"));
             }
             return;
         }
