@@ -1,0 +1,6 @@
+design:      app
+netlist:     app.v
+lib:         ../../examples/seq/seq.lib
+clock:       clk 2.0
+input_slew:  0.02
+output_load: 0.005
