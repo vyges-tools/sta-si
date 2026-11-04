@@ -655,6 +655,11 @@ pub fn main() {
                     sdc.ignored.retain(|c| !vyges_sta_si::job::MODELLED_HERE.contains(&c.as_str()));
                     // and refuses the exceptions it cannot match, as the analysis did
                     vyges_sta_si::exc::refuse_unmatchable(&mut sdc);
+                    if !cli.quiet {
+                        for w in vyges_sta_si::job::not_applied_warnings(&sdc) {
+                            note(vyges_events::Severity::Warn, "STA-SDC-NOT-APPLIED", format!("sdc: {w}"));
+                        }
+                    }
                     if let Some(h) = sdc.health().filter(|_| !cli.quiet) {
                         note(vyges_events::Severity::Warn, "STA-SDC-HEALTH", format!("sdc: {h}"));
                     }
@@ -756,7 +761,13 @@ pub fn main() {
                     exit(2);
                 }
             };
-            // Never silently drop: surface commands outside the subset.
+            // Never silently drop: a timing constraint not applied is a warning, with its count
+            if !cli.quiet {
+                for w in &adapted.sdc_warnings {
+                    note(vyges_events::Severity::Warn, "STA-SDC-NOT-APPLIED", format!("sdc: {w}"));
+                }
+            }
+            // and the commands outside the subset are surfaced
             if !adapted.ignored.is_empty() && !cli.quiet {
                 eprintln!(
                     "note: {} timing command(s) outside the supported subset, ignored: {}\n      (experimental adapter — see docs/tcl-adapter.md)",

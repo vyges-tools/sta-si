@@ -866,6 +866,29 @@ mod clock_latency_rule {
 /// Commands the SDC reader lists as not modelled that this timer DOES model: ideal versus
 /// propagated clocks (`ideal_clocks`), the ideal clock's transition, input drives, and logic
 /// constants (`crate::sim`; an object it cannot resolve is warned of at analysis).
+/// Every command the constraint file holds that can move a slack and that this timer does not
+/// apply, one line per kind with its count, in the reader's first-seen order: what the reader
+/// itself did not apply ([`Sdc::not_applied`]: refused, a query not evaluated, not modelled) and
+/// what it kept and wrote back for a consumer to apply ([`Sdc::kept_not_applied`]: a clock
+/// sense, `group_path`, `set_clock_gating_check`, …) — less what this timer applies
+/// ([`MODELLED_HERE`]). Each is a warning (`STA-SDC-NOT-APPLIED`): a constraint left out is a hole
+/// in the timing, and saying so is the only thing that keeps a clean report honest.
+///
+/// [`Sdc::not_applied`]: crate::sdc::Sdc::not_applied
+/// [`Sdc::kept_not_applied`]: crate::sdc::Sdc::kept_not_applied
+pub fn not_applied_warnings(sdc: &crate::sdc::Sdc) -> Vec<String> {
+    let times = |n: usize| if n == 1 { String::new() } else { format!(" ({n} commands)") };
+    let here = |c: &str| MODELLED_HERE.contains(&c);
+    let mut out = Vec::new();
+    for n in sdc.not_applied().into_iter().filter(|n| n.affects_timing && !here(&n.command)) {
+        out.push(format!("`{}`{}: {}", n.command, times(n.count), n.why));
+    }
+    for k in sdc.kept_not_applied().into_iter().filter(|k| k.affects_timing && !here(&k.command)) {
+        out.push(format!("`{}`{}: kept and written back; not applied by this timer", k.command, times(k.count)));
+    }
+    out
+}
+
 pub const MODELLED_HERE: &[&str] = &[
     "set_propagated_clock",
     "set_clock_transition",
@@ -931,6 +954,33 @@ mod ideal_clock_rule {
 
 #[cfg(test)]
 mod io_delay_rule {
+
+    /// Every timing command the file holds that this timer does not apply is a warning, with its
+    /// count: refused or not modelled by the reader, or kept for a consumer (a clock sense,
+    /// `group_path`). One this timer applies (`set_disable_timing`, `set_data_check`) and one that
+    /// moves no slack (`set_max_area` kept, `set_dont_touch` read past) is not.
+    #[test]
+    fn every_timing_command_not_applied_is_a_warning_with_its_count() {
+        let sdc = crate::sdc::Sdc::parse(
+            "create_clock -name c -period 2 [get_ports clk]\n\
+             set_sense -stop_propagation [get_pins r0/Q]\nset_sense -stop_propagation [get_pins r1/Q]\n\
+             set_clock_sense -positive [get_pins r2/Q]\ngroup_path -name g -to [get_ports y]\n\
+             set_sense -type data -positive [get_pins r3/Q]\n\
+             set_disable_timing [get_cells u1]\nset_data_check -from [get_pins r/D] -to [get_pins s/D] 0.1\nset_max_area 0\nset_dont_touch [get_cells u1]\n",
+        )
+        .unwrap();
+        let w = not_applied_warnings(&sdc);
+        assert_eq!(
+            w,
+            [
+                "`set_sense`: rejected: -type data is not modelled (the reference timer does not apply it either, its Warning 413); not applied",
+                "`set_sense` (2 commands): kept and written back; not applied by this timer",
+                "`set_clock_sense`: kept and written back; not applied by this timer",
+                "`group_path`: kept and written back; not applied by this timer",
+            ]
+        );
+    }
+
     use super::*;
 
     fn job_of(sdc: &str) -> StaJob {

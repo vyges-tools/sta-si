@@ -102,6 +102,9 @@ pub struct Adapted {
     pub job: StaJob,
     pub reports: Reports,
     pub ignored: Vec<String>,
+    /// The constraint file's timing commands this timer does not apply, one per kind with its
+    /// count ([`crate::job::not_applied_warnings`]): each a warning.
+    pub sdc_warnings: Vec<String>,
 }
 
 /// SDC constraint verbs passed straight (raw line) to [`crate::sdc`].
@@ -164,6 +167,7 @@ pub fn adapt(script_path: &str) -> Result<Adapted, TclError> {
     let mut combined_sdc = String::new(); // sourced .sdc contents + inline SDC lines, in order
     let mut reports = Reports::default();
     let mut ignored: Vec<String> = Vec::new();
+    let mut sdc_warnings: Vec<String> = Vec::new();
 
     for raw in commands(&text) {
         let toks = tokenize(&raw);
@@ -286,12 +290,15 @@ pub fn adapt(script_path: &str) -> Result<Adapted, TclError> {
     if !combined_sdc.trim().is_empty() {
         let sdc = Sdc::parse(&combined_sdc).map_err(|e| TclError(e.to_string()))?;
         crate::job::merge_sdc_into(&sdc, &mut job);
-        // the reader lists what IT does not model; this timer models these
-        for ig in sdc.ignored.iter().filter(|c| !crate::job::MODELLED_HERE.contains(&c.as_str())) {
+        // what can move a slack and is not applied: a warning each, with its count
+        sdc_warnings = crate::job::not_applied_warnings(&sdc);
+        // the rest the reader lists as not modelled (no slack moves with it): noted
+        let timing: Vec<String> = sdc.not_applied().into_iter().filter(|n| n.affects_timing).map(|n| n.command).chain(sdc.kept_not_applied().into_iter().filter(|k| k.affects_timing).map(|k| k.command)).collect();
+        for ig in sdc.ignored.iter().filter(|c| !crate::job::MODELLED_HERE.contains(&c.as_str()) && !timing.contains(c)) {
             ignored.push(format!("(sdc) {ig}"));
         }
-        // a command the reader refused is not applied: said, never silently inert
-        for r in &sdc.rejected {
+        // a command the reader refused that moves no slack: said, never silently inert
+        for r in sdc.rejected.iter().filter(|r| !timing.iter().any(|c| r.starts_with(c.as_str()))) {
             ignored.push(format!("(sdc) not applied: {r}"));
         }
         // an exception the reader or this timer cannot apply is said, never silently inert
@@ -319,6 +326,7 @@ pub fn adapt(script_path: &str) -> Result<Adapted, TclError> {
         job,
         reports: reports.defaulted(),
         ignored,
+        sdc_warnings,
     })
 }
 

@@ -423,7 +423,10 @@ Supported SDC (a Tcl-subset reader — `set var`, `$var`, `[get_ports …]`,
 
 Anything not modelled (`set_driving_cell`, `set_max_fanout`, …) is **never
 silently dropped** — `run -v` lists every ignored command so you know exactly
-what was and wasn't applied.
+what was and wasn't applied. Every command that can move a slack and is not applied (refused,
+not modelled, or kept for a consumer, as a clock sense or `group_path` is) is a warning on
+every run, once per kind with its count (`STA-SDC-NOT-APPLIED`), for example
+`` sdc: `set_sense` (2 commands): kept and written back; not applied by this timer``.
 
 For **MCMM**, a job instead lists scenario files and the engine reports the worst
 setup/hold across them:
