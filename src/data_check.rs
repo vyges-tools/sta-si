@@ -86,6 +86,12 @@ pub fn data_checks(cmds: &[KeptCmd], warnings: &mut Vec<String>) -> Vec<DataChec
             warnings.push(format!("{}: -clock (a check for one clock only) is not modelled; not applied", c.cmd));
             continue;
         }
+        // SDC's `-rise` / `-fall` restrict the check to one edge of the data; applied as a plain
+        // check it would also constrain the other edge
+        if let Some(edge) = ["-rise", "-fall"].into_iter().find(|f| c.has(f)) {
+            warnings.push(format!("{}: {edge} (a check on one data edge) is not modelled; not applied", c.cmd));
+            continue;
+        }
         let sides: &[usize] = match (c.has("-setup"), c.has("-hold")) {
             (true, false) => &[0],
             (false, true) => &[1],
@@ -147,6 +153,18 @@ mod tests {
         assert_eq!(m[0][1], [Some(0.1), None]);
         assert_eq!(m[1][0], [Some(0.3), Some(0.3)], "hold from rise overwritten");
         assert_eq!(m[1][1], [Some(0.1), Some(0.1)]);
+    }
+
+    /// SDC 1.4+ `set_data_check -rise` / `-fall` checks one edge of the data only. That is not
+    /// modelled, so the command is skipped with a warning, never applied to both edges.
+    #[test]
+    fn a_one_edge_check_is_skipped_not_applied_to_both_edges() {
+        for edge in ["-rise", "-fall"] {
+            let (d, w) = checks(&format!("set_data_check {edge} -from [get_pins a/A] -to [get_pins a/B] 0.1\n"));
+            assert!(d.is_empty(), "{edge}: applied: {d:?}");
+            assert_eq!(w.len(), 1, "{edge}: {w:?}");
+            assert!(w[0].contains(edge), "{w:?}");
+        }
     }
 
     /// Rule (`get_port_pin_arg`, Warning/Error 128): one pin per side; `-clock` is not modelled.
