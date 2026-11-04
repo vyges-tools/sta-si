@@ -410,7 +410,7 @@ Supported SDC (a Tcl-subset reader — `set var`, `$var`, `[get_ports …]`,
 
 | command | effect |
 | --- | --- |
-| `create_clock` / `create_generated_clock` | clock(s); a generated clock's period is resolved from its master × `divide_by` / `multiply_by` |
+| `create_clock` / `create_generated_clock` | clock(s) with their edge times (`-waveform`); a generated clock's period and edges are derived from its master (`-divide_by`, `-multiply_by` with `-duty_cycle`, `-edges` with `-edge_shift`, `-invert`) |
 | `set_input_delay` / `set_output_delay` | I/O timing budget — default (`all_inputs`/`all_outputs`) plus per-port overrides; seeds input arrival / eats the period at outputs |
 | `set_clock_uncertainty [-setup | -hold]` | guard band — tightens setup required, relaxes hold required |
 | `set_clock_latency` | source/network latency, applied to the I/O budget |
@@ -478,9 +478,13 @@ that it does not approximate — it simply has nothing to say:
 
 - **Transparent latches.** There is no D→Q transparent path and no time borrowing. A
   latch-based design is not timed less accurately here; it is not timed.
-- **Derived generated clocks.** A divided or generated clock is carried as its own clock
-  with a stated period. It is not derived from a master's waveform, so `-divide_by`,
-  `-edges` and edge-shift semantics are not honoured.
+- **Generated-clock source latency.** A generated clock's period and edges are derived from
+  its master, but its source latency (the master's arrival at the generated clock's pin, for a
+  propagated master) is not added, and a generated clock beside its master on one pin
+  (`-add`) is not timed as a second clock at the registers.
+- **Several launching clocks of different edge times into one endpoint.** Arrivals are merged
+  per launching edge, so where two clocks with different edge times launch into the same
+  endpoint the earlier one's path can be the one kept.
 - **Checks other than setup, hold, recovery and removal** — no clock-gating checks, no
   minimum pulse width, no minimum period, no maximum skew.
 - **Design-rule limit checks** — no maximum capacitance, transition or fanout reporting.
@@ -554,8 +558,8 @@ is credited back, removing reconvergence pessimism; `crpr: false` to disable), a
 **MCMM** (a job can list per-corner scenario `.sta` files; the worst setup and worst
 hold are reported across them), **rise/fall-split unate propagation**, and
 **multi-clock** (cross-domain paths use the tightest launch→capture
-edge relation, not a single period; a divided or generated clock is carried as its own
-clock with a stated period — it is not *derived* from a master's waveform), **timing exceptions** (false paths and
+edge relation, not a single period; each clock at its own edge times, a generated clock's
+derived from its master's waveform), **timing exceptions** (false paths and
 multicycle paths, matched on launch/capture instance or port), and **CCS-into-RC
 delay** — a current-source model (`output_current` waveforms) plus an **effective
 capacitance**: the driver behind a resistive net sees C1 + shielded-C2, not the

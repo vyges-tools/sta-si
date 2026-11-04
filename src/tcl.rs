@@ -378,6 +378,7 @@ fn base_job(
         async_groups: Vec::new(),
         clock_groups: vec![],
         ideal_clocks: Default::default(),
+        clock_waveforms: Default::default(),
         driving_cells: Default::default(),
         sdc: None,
         metadata: None,

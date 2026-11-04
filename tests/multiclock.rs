@@ -86,6 +86,7 @@ fn job(clocks: Vec<(String, String, f64)>) -> StaJob {
         async_groups: vec![],
         clock_groups: vec![],
         ideal_clocks: Default::default(),
+        clock_waveforms: Default::default(),
         driving_cells: Default::default(),
         crpr: true,
         pba: false,

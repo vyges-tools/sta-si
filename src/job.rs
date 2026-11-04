@@ -235,6 +235,10 @@ pub struct StaJob {
     /// it, as in the reference; a `.sta` file's own `clock:` lines are propagated (that format's
     /// rule), so they never appear here.
     pub ideal_clocks: std::collections::BTreeMap<String, [f64; 2]>,
+    /// Each clock's rise and fall edge times by name (`create_clock -waveform`, and the waveform
+    /// `create_generated_clock` derives from its master); a clock with none rises at 0 and falls
+    /// half a period on.
+    pub clock_waveforms: std::collections::BTreeMap<String, [f64; 2]>,
     /// `set_driving_cell` per input port, in the SDC's order (a later one for the same port
     /// wins): the port (`*INPUTS*` for every input, the clock source included, as `all_inputs`
     /// names them) and the cell that drives it. A `.sta` file's `driving_cell: CELL/PIN` is one
@@ -496,6 +500,7 @@ impl StaJob {
             async_groups: Vec::new(),
             clock_groups: Vec::new(),
             ideal_clocks: Default::default(),
+            clock_waveforms: Default::default(),
             driving_cells: kv
                 .get("driving_cell")
                 .filter(|s| !s.is_empty())
@@ -612,6 +617,7 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
         // hand over — it defaulted a sourceless clock's source to its own name — which made a
         // virtual clock indistinguishable from a real one on a port of that name, and would
         // silently launch through such a port if the design happened to have one.
+        job.clock_waveforms = sdc.clocks.iter().filter_map(|c| c.waveform.as_ref().filter(|w| w.len() >= 2).map(|w| (c.name.clone(), [w[0], w[1]]))).collect();
         let c = &job.clocks[0];
         job.clock_port = if c.1.is_empty() { c.0.clone() } else { c.1.clone() };
         job.period_ns = c.2;

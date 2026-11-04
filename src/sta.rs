@@ -139,6 +139,18 @@ fn fuzzy_equal(v1: f32, v2: f32) -> bool {
 ///
 /// One clock, launch on the fall (half a period) and capture on the rise: `(T/2, T/2)` — the
 /// register is captured half a period after it launched, where a period-only relation gives T.
+/// The time of clock `clk`'s edge `edge` (0 rise, 1 fall) within its period `period`
+/// (`ClockEdge::time`): its waveform's, as `create_clock -waveform` or `create_generated_clock`
+/// (`Clock::generate`) set it; with none, or no clock named, the rise at 0 and the fall half a
+/// period on.
+pub(crate) fn clock_edge_time(job: &StaJob, clk: Option<&str>, edge: usize, period: f64) -> f64 {
+    match clk.and_then(|c| job.clock_waveforms.get(c)) {
+        Some(w) => w[edge],
+        None if edge == 1 => period / 2.0,
+        None => 0.0,
+    }
+}
+
 pub(crate) fn cycle_accting(src_period: f64, src_time: f64, tgt_period: f64, tgt_time: f64) -> (f64, f64) {
     let less = |a: f32, b: f32| a < b && !fuzzy_equal(a, b);
     let less_equal = |a: f32, b: f32| a < b || fuzzy_equal(a, b);
@@ -2088,8 +2100,11 @@ fn build_report(
     let mut have_clock_launch = false;
     for (idx, name) in &input_ports {
         if clock_srcs.contains(name) {
-            // 50 % duty: the rising edge at t=0, the falling edge half a period later.
-            seed_clk[*idx] = [0.0, period_of_src(name) / 2.0];
+            // the clock's own edges ([`clock_edge_time`]): by default the rise at 0, the fall
+            // half a period later
+            let clk = job.clocks.iter().find(|(_, s, _)| s == name).map(|(c, _, _)| c.as_str());
+            let p = period_of_src(name);
+            seed_clk[*idx] = [clock_edge_time(job, clk, 0, p), clock_edge_time(job, clk, 1, p)];
             have_clock_launch = true;
         }
     }
@@ -3394,8 +3409,12 @@ fn build_report(
     // from the launch to the capture edge it must meet, hold the capture edge's time RELATIVE
     // to the launch (≤ 0). Same clock, same edge → (pc, 0); a falling launch captured on the
     // rise → (pc/2, −pc/2).
-    let edge_relation = |pl: f64, ll: usize, pc: f64, cl: usize| -> (f64, f64) {
-        let (setup, hold) = cycle_accting(pl, if ll == 1 { pl / 2.0 } else { 0.0 }, pc, if cl == 1 { pc / 2.0 } else { 0.0 });
+    //
+    // The edge times are the clocks' own (`ClockEdge::time`, the waveform `create_clock
+    // -waveform` or `create_generated_clock` gave it, [`clock_edge_time`]); a clock named by none
+    // (a job file's default) rises at 0 and falls at half its period.
+    let edge_relation = |pl: f64, lclk: Option<&str>, ll: usize, pc: f64, cclk: Option<&str>, cl: usize| -> (f64, f64) {
+        let (setup, hold) = cycle_accting(pl, clock_edge_time(job, lclk, ll, pl), pc, clock_edge_time(job, cclk, cl, pc));
         (setup, -hold)
     };
 
@@ -3489,8 +3508,9 @@ fn build_report(
             // a delay with no clock (a job file's default) keeps this timer's rule: setup from a
             // launch of the primary period itself, hold from the launch clock's
             let pl_setup = if d.clock.is_none() { period } else { pl };
-            let setup_rel = edge_relation(pl_setup, edge, pc, cl).0;
-            let hold_rel = edge_relation(pl, edge, pc, cl).1;
+            let lclk = d.clock.as_ref().and(from.clock.as_deref());
+            let setup_rel = edge_relation(pl_setup, lclk, edge, pc, d.clock.as_deref(), cl).0;
+            let hold_rel = edge_relation(pl, lclk, edge, pc, d.clock.as_deref(), cl).1;
             let rel = if max { setup_rel } else { hold_rel } + shift;
             for (l, slot) in best.iter_mut().enumerate() {
                 let Some(od) = d.value[usize::from(max)][l] else { continue };
@@ -3581,7 +3601,7 @@ fn build_report(
                     (Some(l), Some(c)) => crpr_credit(l, c, cl, true),
                     _ => 0.0,
                 };
-                (cap_early + edge_relation(pl, run.edge, pc, cl).0 + shift + crpr - job.setup_uncertainty, ck_slew)
+                (cap_early + edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), cl).0 + shift + crpr - job.setup_uncertainty, ck_slew)
             };
             // ⛔ PER DATA EDGE, for the same reason as hold: a check exists for one edge, so
             // the latest arrival must meet THAT edge's setup constraint, not the worse of the
@@ -3949,7 +3969,7 @@ fn build_report(
                 };
                 let cap_late = cap.map(|i| late_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
                 let ck_slew = cap.map(|i| early_slew[i][cl]).unwrap_or(input_slew);
-                let hold_rel = edge_relation(pl, run.edge, pc, cl).1 + shift;
+                let hold_rel = edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), cl).1 + shift;
                 (crpr - cap_late - hold_rel - job.hold_uncertainty, ck_slew)
             };
             let mut reached = false;
@@ -4176,7 +4196,7 @@ fn build_report(
             let pl_or = |default: f64| launch_period(lck, v, pred, run.edge, default);
             let pl = pl_or(period);
             let launch_edge = if k.is_some() { s0l } else { run.edge };
-            let launch = if launch_edge == 1 { pl / 2.0 } else { 0.0 };
+            let launch = clock_edge_time(job, Some(src_name), launch_edge, pl);
             let src_clock = clock_line(src_name, launch_edge == 0, launch);
             let (startpoint, start_reason) = match k {
                 Some(_) => (instance_of(&labels[s0]).to_string(), format!("{} clocked by {src_name}", reg_desc(s0, Some(s0l)))),
@@ -4240,7 +4260,8 @@ fn build_report(
             let cap = ck_node(ck);
             let pc = cap.map(clock_period_of).unwrap_or(period);
             let pl = pl_or(pc);
-            let shift = exc_shift(!max, &from_end, &reg_end(cap, v), pl, pc).unwrap_or(0.0);
+            let to_end = reg_end(cap, v);
+            let shift = exc_shift(!max, &from_end, &to_end, pl, pc).unwrap_or(0.0);
             // (required, capture edge, capture clock arrival, relation) of each constraint;
             // the tightest one set the slack
             let terms = cons.iter().filter(|c| checks_edge(c, l == 0)).map(|c| {
@@ -4252,13 +4273,13 @@ fn build_report(
                 if max {
                     let cap_early = cap.map(|i| early_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
                     let ck_slew = cap.map(|i| late_slew[i][cl]).unwrap_or(input_slew);
-                    let rel = edge_relation(pl, run.edge, pc, cl).0 + shift;
+                    let rel = edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), cl).0 + shift;
                     let req = cap_early + rel + crpr - job.setup_uncertainty - c.eval_edge(l == 0, ck_slew, late_slew[v][l]);
                     (req, cl, cap_early, rel, crpr)
                 } else {
                     let cap_late = cap.map(|i| late_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
                     let ck_slew = cap.map(|i| early_slew[i][cl]).unwrap_or(input_slew);
-                    let rel = edge_relation(pl, run.edge, pc, cl).1 + shift;
+                    let rel = edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), cl).1 + shift;
                     let req = cap_late + rel + job.hold_uncertainty - crpr + c.eval_edge(l == 0, ck_slew, early_slew[v][l]);
                     (req, cl, cap_late, rel, crpr)
                 }
