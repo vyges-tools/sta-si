@@ -883,8 +883,26 @@ pub fn not_applied_warnings(sdc: &crate::sdc::Sdc) -> Vec<String> {
     for n in sdc.not_applied().into_iter().filter(|n| n.affects_timing && !here(&n.command)) {
         out.push(format!("`{}`{}: {}", n.command, times(n.count), n.why));
     }
-    for k in sdc.kept_not_applied().into_iter().filter(|k| k.affects_timing && !here(&k.command)) {
-        out.push(format!("`{}`{}: kept and written back; not applied by this timer", k.command, times(k.count)));
+    // What the reader kept for a consumer, and what it keeps for ANOTHER timer that applies it
+    // (`APPLIED_ELSEWHERE`, so the reader no longer lists it as kept-not-applied) — together in
+    // the reader's first-seen order.
+    let mut kept: Vec<(usize, String, usize)> = sdc
+        .kept_not_applied()
+        .into_iter()
+        .filter(|k| k.affects_timing && !here(&k.command))
+        .enumerate()
+        .map(|(i, k)| (sdc.ignored.iter().position(|c| *c == k.command).unwrap_or(sdc.ignored.len() + i), k.command, k.count))
+        .collect();
+    for cmd in APPLIED_ELSEWHERE {
+        let n = sdc.ignored.iter().filter(|c| c.as_str() == *cmd).count();
+        let listed = kept.iter().any(|(_, c, _)| c == cmd);
+        if let (false, true, Some(at)) = (listed, n > 0, sdc.ignored.iter().position(|c| c.as_str() == *cmd)) {
+            kept.push((at, (*cmd).to_string(), n));
+        }
+    }
+    kept.sort_by_key(|(at, _, _)| *at);
+    for (_, cmd, n) in kept {
+        out.push(format!("`{cmd}`{}: kept and written back; not applied by this timer", times(n)));
     }
     for (cmd, n, why) in modelled_not_applied(sdc) {
         out.push(format!("`{cmd}`{}: {why}", times(n)));
@@ -941,6 +959,13 @@ pub(crate) fn modelled_not_applied(sdc: &crate::sdc::Sdc) -> Vec<(&'static str, 
     add("set_max_fanout", sdc.max_fanout.is_some() as usize + sdc.max_fanout_objects.len(), "a design-rule limit; read, not checked by this timer");
     out
 }
+
+/// Commands the reader keeps as written that another of our timers applies, and this one does
+/// not: `group_path` (the `sta` timer's path groups). The reader's registry calls them applied, so
+/// [`Sdc::kept_not_applied`] no longer lists them; this timer still warns of each.
+///
+/// [`Sdc::kept_not_applied`]: crate::sdc::Sdc::kept_not_applied
+pub const APPLIED_ELSEWHERE: &[&str] = &["group_path"];
 
 pub const MODELLED_HERE: &[&str] = &[
     "set_propagated_clock",
