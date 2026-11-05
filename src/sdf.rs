@@ -2,7 +2,7 @@
 //!
 //! Emits the timing `sta-si` computes as an SDF `DELAYFILE`: per-instance
 //! **IOPATH** cell delays (rise/fall from the Liberty NLDM arcs at the net load)
-//! and **TIMINGCHECK** SETUP/HOLD for sequential cells, plus top-level
+//! and **TIMINGCHECK** SETUP/HOLD/RECOVERY/REMOVAL for sequential cells, plus top-level
 //! **INTERCONNECT** net delays from the SPEF parasitics (Elmore). This is the
 //! standard hand-off a gate-level / back-annotated simulator consumes — the same
 //! Liberty + SPEF the rest of Loom already reads, serialized to SDF.
@@ -179,7 +179,15 @@ pub fn emit(design: &str, nl: &Netlist, lib: &Lib, spef: Option<&Spef>, t: &Time
         if cell.is_seq {
             let default_clk = cell.clock_pin.clone().unwrap_or_default();
             for (pname, pin) in &cell.pins {
-                for (kind, list) in [("SETUP", &pin.setup), ("HOLD", &pin.hold)] {
+                // recovery / removal are the async set/reset pin's checks against the clock, written
+                // like setup / hold (`SdfWriter::writeTimingChecks`: RECOVERY, REMOVAL roles)
+                let groups = [
+                    ("SETUP", &pin.setup),
+                    ("HOLD", &pin.hold),
+                    ("RECOVERY", &pin.recovery),
+                    ("REMOVAL", &pin.removal),
+                ];
+                for (kind, list) in groups {
                     for c in list {
                         let clk = if c.related_pin.is_empty() { &default_clk } else { &c.related_pin };
                         checks.extend(check_lines(kind, pname, clk, c, |p, rise| {

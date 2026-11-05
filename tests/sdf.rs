@@ -146,3 +146,18 @@ fn timing_check_clock_edge_is_the_constraints_own() {
     assert!(!block("n1").contains("posedge"), "no rising edge on a DFFN check:\n{}", block("n1"));
     assert!(block("r2").contains("(SETUP D (posedge CLK)"), "DFF setup at the rising edge:\n{}", block("r2"));
 }
+
+#[test]
+fn async_reset_pin_gets_recovery_and_removal() {
+    // Reference rule (`SdfWriter::writeTimingChecks`): RECOVERY and REMOVAL are written for
+    // the recovery / removal check arcs exactly as SETUP and HOLD are for setup / hold — the
+    // async pin as the data port, the clock with its edge. This writer emitted only SETUP and
+    // HOLD, so a reset pin's checks were missing from every SDF.
+    let lib = Lib::load("examples/async_rst/async_rst.lib").unwrap();
+    let nl = netlist::load("examples/async_rst/async_rst.v").unwrap();
+    let job = StaJob::load("examples/async_rst/async_rst.sta").unwrap();
+    let t = Timer::build(&nl, &lib, &job, None).unwrap();
+    let out = sdf::emit("async_rst", &nl, &lib, None, &t);
+    assert!(out.contains("(RECOVERY RESET_B (posedge CLK) (0.110000:0.110000:0.110000))"), "recovery:\n{out}");
+    assert!(out.contains("(REMOVAL RESET_B (posedge CLK) (0.070000:0.070000:0.070000))"), "removal:\n{out}");
+}
