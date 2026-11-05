@@ -76,13 +76,47 @@ fn net_load(nl: &Netlist, lib: &Lib, net: &str) -> f64 {
     load
 }
 
+/// The TIMINGCHECK lines of one Liberty check group (`kind` SETUP / HOLD / ...) on data pin
+/// `pin` against clock pin `clk`, as the reference writes them (`SdfWriter::writeCheck` /
+/// `writeEdgeCheck`):
+///   * the clock port always carries its edge, the constraint's own (`setup_rising` ->
+///     `posedge`, `_falling` -> `negedge`) — never assumed rising;
+///   * when the data pin has a rise and a fall constraint with equal values the check is one
+///     line without a data edge; otherwise one line per data edge that has a table, with
+///     `(posedge D)` / `(negedge D)` — SDF needs the data edge to carry two values;
+///   * each value is that edge's table at the clock slew on the check's clock edge and the data
+///     slew on that data edge (the timer's `eval_edge`), not the worse of the two at one slew.
+fn check_lines(
+    kind: &str,
+    pin: &str,
+    clk: &str,
+    c: &crate::liberty::Constraint,
+    slew: impl Fn(&str, bool) -> f64,
+) -> Vec<String> {
+    let clk_rise = c.clk_edge == crate::liberty::ClkEdge::Rise;
+    let clk_spec = format!("({} {clk})", if clk_rise { "posedge" } else { "negedge" });
+    let cslew = slew(clk, clk_rise);
+    let value = |data_rise: bool| {
+        let table = if data_rise { &c.rise } else { &c.fall };
+        (!table.values.is_empty()).then(|| c.eval_edge(data_rise, cslew, slew(pin, data_rise)))
+    };
+    match (value(true), value(false)) {
+        (Some(r), Some(f)) if crate::sta::fuzzy_equal(r as f32, f as f32) => {
+            vec![format!("      ({kind} {pin} {clk_spec} {})", triple(r))]
+        }
+        (r, f) => [(r, "posedge"), (f, "negedge")]
+            .into_iter()
+            .filter_map(|(v, e)| v.map(|v| format!("      ({kind} ({e} {pin}) {clk_spec} {})", triple(v))))
+            .collect(),
+    }
+}
+
 /// Emit a complete SDF `DELAYFILE` for the design, using `t`'s propagated slews and
 /// loads so the file agrees with the timing report by construction.
 pub fn emit(design: &str, nl: &Netlist, lib: &Lib, spef: Option<&Spef>, t: &Timer) -> String {
-    // the timer's state at `inst/pin`, or None if it carries no such node
-    let slew_at = |inst: &str, pin: &str| t.pin(&format!("{inst}/{pin}")).map(|p| t.slew(p));
-    // ... on one edge: an arc's delay to one output edge is looked up at the slew of the input
-    // edge that drives it and at the load of that output edge, never at the worst lane's
+    // the timer's state at `inst/pin` on one edge, or None if it carries no such node: an
+    // arc's delay to one output edge is looked up at the slew of the input edge that drives it
+    // and at the load of that output edge, never at the worst lane's
     let slew_edge_at =
         |inst: &str, pin: &str, rise: bool| t.pin(&format!("{inst}/{pin}")).map(|p| t.slew_edge(p, rise));
     let load_edge_at =
@@ -143,22 +177,15 @@ pub fn emit(design: &str, nl: &Netlist, lib: &Lib, spef: Option<&Spef>, t: &Time
 
         let mut checks: Vec<String> = Vec::new();
         if cell.is_seq {
-            let clk = cell.clock_pin.clone().unwrap_or_default();
-            // constraint tables are indexed by (clock slew, data slew) — both propagated
-            let cslew = slew_at(&inst.name, &clk).unwrap_or(SLEW);
+            let default_clk = cell.clock_pin.clone().unwrap_or_default();
             for (pname, pin) in &cell.pins {
-                let dslew = slew_at(&inst.name, pname).unwrap_or(SLEW);
-                if let Some(c) = pin.setup.first() {
-                    checks.push(format!(
-                        "      (SETUP {pname} (posedge {clk}) {})",
-                        triple(c.eval(cslew, dslew))
-                    ));
-                }
-                if let Some(c) = pin.hold.first() {
-                    checks.push(format!(
-                        "      (HOLD {pname} (posedge {clk}) {})",
-                        triple(c.eval(cslew, dslew))
-                    ));
+                for (kind, list) in [("SETUP", &pin.setup), ("HOLD", &pin.hold)] {
+                    for c in list {
+                        let clk = if c.related_pin.is_empty() { &default_clk } else { &c.related_pin };
+                        checks.extend(check_lines(kind, pname, clk, c, |p, rise| {
+                            slew_edge_at(&inst.name, p, rise).unwrap_or(SLEW)
+                        }));
+                    }
                 }
             }
         }

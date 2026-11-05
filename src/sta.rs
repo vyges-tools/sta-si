@@ -117,7 +117,7 @@ fn aocv_lookup(tbl: &[(f64, f64)], depth: f64) -> f64 {
 }
 
 /// The reference's comparison tolerance (`Fuzzy.cc`), in its `float` arithmetic.
-fn fuzzy_equal(v1: f32, v2: f32) -> bool {
+pub(crate) fn fuzzy_equal(v1: f32, v2: f32) -> bool {
     if v1 == v2 {
         true
     } else if v1 == 0.0 {

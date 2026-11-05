@@ -97,3 +97,52 @@ fn iopath_delays_are_the_timers_own_numbers() {
         "timer load {load} should exceed the bare sink pin cap {pin_caps_only} (wire cap missing?)"
     );
 }
+
+#[test]
+fn timing_checks_carry_their_data_edge_when_rise_and_fall_differ() {
+    // Reference rule (`SdfWriter::writeEdgeCheck`): a check whose rise and fall constraints are
+    // equal is one line with a bare data port; one whose values differ is written once per data
+    // edge, `(SETUP (posedge D) ...)` and `(SETUP (negedge D) ...)`, each with its own value.
+    // This writer used to write one line holding the worse of the two, so the other edge was
+    // stated wrong in every SDF of a real library (sky130 dfrtp setup: 0.14 rise, 0.29 fall).
+    let text = std::fs::read_to_string("examples/seq/seq.lib").unwrap();
+    // the setup group's fall_constraint is the first `values ( "0.05" )` after its rise one
+    let at = text.find("fall_constraint (s) { index_1 (\"0.01\"); index_2 (\"0.01\"); values ( \"0.05\" ); }").unwrap();
+    let text = format!("{}{}", &text[..at], text[at..].replacen("values ( \"0.05\" )", "values ( \"0.09\" )", 1));
+    let lib = Lib::parse(&text).unwrap();
+    let nl = netlist::load("examples/seq/seq.v").unwrap();
+    let job = StaJob::load("examples/seq/seq.sta").unwrap();
+    let t = Timer::build(&nl, &lib, &job, None).unwrap();
+    let out = sdf::emit("seq", &nl, &lib, None, &t);
+
+    assert!(out.contains("(SETUP (posedge D) (posedge CK) (0.050000:0.050000:0.050000))"), "rise setup:\n{out}");
+    assert!(out.contains("(SETUP (negedge D) (posedge CK) (0.090000:0.090000:0.090000))"), "fall setup:\n{out}");
+    assert!(!out.contains("(SETUP D "), "no edge-less setup once rise and fall differ:\n{out}");
+    // hold stayed symmetric: still one line, no data edge
+    assert!(out.contains("(HOLD D (posedge CK) (0.020000:0.020000:0.020000))"), "hold:\n{out}");
+}
+
+#[test]
+fn timing_check_clock_edge_is_the_constraints_own() {
+    // `setup_falling` / `hold_falling` check at the clock's FALLING edge: the reference writes
+    // the clock port as `(negedge CLK)` (`writeCheck` prints `sdfEdge(arc->fromEdge())`). This
+    // writer used to print `(posedge ...)` for every check, so a negative-edge register's
+    // checks named the wrong edge.
+    let lib = Lib::load("examples/fall_launch/fall_launch.lib").unwrap();
+    let nl = netlist::load("examples/fall_launch/fall_launch.v").unwrap();
+    let job = StaJob::parse(
+        "design: fall_launch\nnetlist: fall_launch.v\nlib: fall_launch.lib\nclock: clk 2.0\n",
+        "examples/fall_launch",
+    )
+    .unwrap();
+    let t = Timer::build(&nl, &lib, &job, None).unwrap();
+    let out = sdf::emit("fall_launch", &nl, &lib, None, &t);
+    let block = |inst: &str| {
+        let at = out.find(&format!("(INSTANCE {inst})")).unwrap_or_else(|| panic!("{inst} in:\n{out}"));
+        out[at..].split("  (CELL").next().unwrap().to_string()
+    };
+    assert!(block("n1").contains("(SETUP D (negedge CLK)"), "DFFN setup at the falling edge:\n{}", block("n1"));
+    assert!(block("n1").contains("(HOLD D (negedge CLK)"), "DFFN hold at the falling edge:\n{}", block("n1"));
+    assert!(!block("n1").contains("posedge"), "no rising edge on a DFFN check:\n{}", block("n1"));
+    assert!(block("r2").contains("(SETUP D (posedge CLK)"), "DFF setup at the rising edge:\n{}", block("r2"));
+}
