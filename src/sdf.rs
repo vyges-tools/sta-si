@@ -21,8 +21,13 @@
 //! pass a simulation it should fail — silently. Requiring the timer makes a second
 //! delay model structurally impossible rather than merely discouraged.
 //!
+//! Per EDGE: each IOPATH output edge is looked up at the timer's slew on the input edge that
+//! drives it and at the timer's load for that output edge (see `iopath_from_edge`).
+//!
 //! Scope (honest): single-corner (min=typ=max); INTERCONNECT needs a SPEF (none →
-//! omitted). Pure std.
+//! omitted); the lookup is the NLDM table, so where the timer drives an effective
+//! capacitance (DMP on a SPEF π-model) or a CCS waveform instead, the two can still differ.
+//! Pure std.
 
 use std::collections::BTreeMap;
 
@@ -37,6 +42,20 @@ const SLEW: f64 = 0.05;
 
 fn triple(v: f64) -> String {
     format!("({v:.6}:{v:.6}:{v:.6})")
+}
+
+/// The input edge whose delay an IOPATH carries for output edge `out_rise`, or None when no
+/// input edge drives that output edge (the IOPATH then writes `()` for it).
+///
+/// The reference writes, per output edge, the delay of the LAST arc of the arc set that drives
+/// it (`SdfWriter::writeArcDelays` sets the value per to-edge, later arcs overwriting earlier
+/// ones). `LibertyBuilder::makeCombinationalArcs` builds a positive-unate set as rise->rise,
+/// fall->fall, a negative-unate one as rise->fall, fall->rise, and a non-unate one as
+/// fall->fall, rise->fall, rise->rise, fall->rise — so where both input edges drive an output
+/// edge, the opposite input edge's arc is the one written. A clock arc has one input edge.
+fn iopath_from_edge(arc: &crate::liberty::Arc, out_rise: bool) -> Option<bool> {
+    let opposite = !out_rise;
+    [opposite, !opposite].into_iter().find(|&in_rise| arc.feeds(in_rise, out_rise))
 }
 
 /// Total downstream capacitive load on `net` (sum of sink input caps).
@@ -62,7 +81,12 @@ fn net_load(nl: &Netlist, lib: &Lib, net: &str) -> f64 {
 pub fn emit(design: &str, nl: &Netlist, lib: &Lib, spef: Option<&Spef>, t: &Timer) -> String {
     // the timer's state at `inst/pin`, or None if it carries no such node
     let slew_at = |inst: &str, pin: &str| t.pin(&format!("{inst}/{pin}")).map(|p| t.slew(p));
-    let load_at = |inst: &str, pin: &str| t.pin(&format!("{inst}/{pin}")).map(|p| t.load(p));
+    // ... on one edge: an arc's delay to one output edge is looked up at the slew of the input
+    // edge that drives it and at the load of that output edge, never at the worst lane's
+    let slew_edge_at =
+        |inst: &str, pin: &str, rise: bool| t.pin(&format!("{inst}/{pin}")).map(|p| t.slew_edge(p, rise));
+    let load_edge_at =
+        |inst: &str, pin: &str, rise: bool| t.pin(&format!("{inst}/{pin}")).map(|p| t.load_edge(p, rise));
 
     let mut s = String::new();
     s.push_str("(DELAYFILE\n");
@@ -89,18 +113,30 @@ pub fn emit(design: &str, nl: &Netlist, lib: &Lib, spef: Option<&Spef>, t: &Time
         let mut iopaths: Vec<String> = Vec::new();
         for out in cell.outputs() {
             // the timer's load includes SPEF wire capacitance; net_load does not
-            let load = load_at(&inst.name, &out.name).unwrap_or_else(|| {
-                conn.get(out.name.as_str())
-                    .map_or(0.0, |n| net_load(nl, lib, n))
-            });
+            let load = |rise: bool| {
+                load_edge_at(&inst.name, &out.name, rise).unwrap_or_else(|| {
+                    conn.get(out.name.as_str())
+                        .map_or(0.0, |n| net_load(nl, lib, n))
+                })
+            };
             for arc in &out.arcs {
-                let islew = slew_at(&inst.name, &arc.related_pin).unwrap_or(SLEW);
+                // one output edge: its table, at the slew of the input edge that drives it
+                let edge = |out_rise: bool| -> String {
+                    let table = if out_rise { &arc.cell_rise } else { &arc.cell_fall };
+                    match iopath_from_edge(arc, out_rise) {
+                        Some(in_rise) if !table.values.is_empty() => {
+                            let islew = slew_edge_at(&inst.name, &arc.related_pin, in_rise).unwrap_or(SLEW);
+                            triple(table.lookup(islew, load(out_rise)))
+                        }
+                        _ => "()".to_string(),
+                    }
+                };
                 iopaths.push(format!(
                     "      (IOPATH {} {} {} {})",
                     arc.related_pin,
                     out.name,
-                    triple(arc.cell_rise.lookup(islew, load)),
-                    triple(arc.cell_fall.lookup(islew, load)),
+                    edge(true),
+                    edge(false),
                 ));
             }
         }

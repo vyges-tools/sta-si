@@ -66,20 +66,28 @@ fn iopath_delays_are_the_timers_own_numbers() {
     let cell = lib.cells.get("INV").expect("INV");
     let o = cell.outputs().next().expect("an output pin");
     let arc = o.arcs.first().expect("an arc");
-    let islew = t.slew(t.pin("g2/A").expect("g2/A"));
-    let load = t.load(t.pin("g2/Y").expect("g2/Y"));
+    // Per EDGE. The INV is negative unate: its output RISE is driven by an input FALL, so the
+    // rise delay is the rise table at the input's FALLING slew and the rise load, and the
+    // fall delay the fall table at the RISING slew and the fall load. One slew for both (the
+    // worst lane's, as this writer used to take) is right for one edge only: against a
+    // reference timer's SDF on sky130 that put inverter and xor fall delays 10-25 % low.
+    let a = t.pin("g2/A").expect("g2/A");
+    let y = t.pin("g2/Y").expect("g2/Y");
+    let (rise_in, fall_in) = (t.slew_edge(a, true), t.slew_edge(a, false));
+    assert!(
+        (rise_in - fall_in).abs() > 1e-6,
+        "fixture must give g2/A different rise and fall slews, or this test cannot fail ({rise_in} vs {fall_in})"
+    );
+    let (r, f) = (
+        arc.cell_rise.lookup(fall_in, t.load_edge(y, true)),
+        arc.cell_fall.lookup(rise_in, t.load_edge(y, false)),
+    );
     let want = format!(
-        "(IOPATH {} {} ({:.6}:{:.6}:{:.6}) ({:.6}:{:.6}:{:.6}))",
-        arc.related_pin,
-        o.name,
-        arc.cell_rise.lookup(islew, load),
-        arc.cell_rise.lookup(islew, load),
-        arc.cell_rise.lookup(islew, load),
-        arc.cell_fall.lookup(islew, load),
-        arc.cell_fall.lookup(islew, load),
-        arc.cell_fall.lookup(islew, load),
+        "(IOPATH {} {} ({r:.6}:{r:.6}:{r:.6}) ({f:.6}:{f:.6}:{f:.6}))",
+        arc.related_pin, o.name,
     );
     assert!(out.contains(&want), "g2 IOPATH should be the timer's numbers.\nwant {want}\ngot:\n{out}");
+    let load = t.load(y);
 
     // and the load must actually carry the SPEF wire cap — otherwise the above could pass
     // against a pin-cap-only load and the regression would sail straight back in.

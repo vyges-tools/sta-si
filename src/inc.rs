@@ -665,6 +665,8 @@ impl IncGraph {
             &slew_min,
             &self.state.node_load.iter().map(|l| l[1][0].max(l[1][1])).collect::<Vec<f64>>(),
             &endpoint_req,
+            &late.slew,
+            &self.state.node_load.iter().map(|l| l[1]).collect::<Vec<[f64; 2]>>(),
         );
 
         // commit the recomputed state.

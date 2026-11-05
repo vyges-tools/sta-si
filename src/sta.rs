@@ -583,6 +583,11 @@ pub(crate) struct Timing {
     slew_min: Vec<f64>,
     node_load: Vec<f64>,    // driver-node capacitive load, pF
     endpoint_req: Vec<f64>, // required time (meaningful at setup endpoints)
+    // Per EDGE (lane 0 rise, 1 fall), setup corner: the slew at each pin and the load on each
+    // driver that the timer looked its delays up at. The collapsed `slew` / `node_load` above
+    // are one value per pin (the worst lane), which no single arc is computed from.
+    slew_rf: Vec<[f64; 2]>,
+    load_rf: Vec<[f64; 2]>,
 }
 
 impl Timing {
@@ -600,6 +605,8 @@ impl Timing {
         slew_min: &[f64],
         node_load: &[f64],
         endpoint_req: &[f64],
+        slew_rf: &[[f64; 2]],
+        load_rf: &[[f64; 2]],
     ) -> Timing {
         Timing {
             label2idx: labels
@@ -617,6 +624,8 @@ impl Timing {
             slew_min: slew_min.to_vec(),
             node_load: node_load.to_vec(),
             endpoint_req: endpoint_req.to_vec(),
+            slew_rf: slew_rf.to_vec(),
+            load_rf: load_rf.to_vec(),
         }
     }
 }
@@ -783,6 +792,18 @@ impl Timer {
     /// Capacitive load on `p` when it drives a net, pF (0 if `p` is not a net driver).
     pub fn load(&self, p: PinId) -> f64 {
         self.timing.node_load.get(p).copied().unwrap_or(0.0)
+    }
+    /// Setup-corner slew at `p` on ONE edge (`rise`, else fall), ns: the input slew of every
+    /// arc that edge drives. [`Timer::slew`] is the worst lane's, which is the right input slew
+    /// for only one of an arc's two output edges.
+    pub fn slew_edge(&self, p: PinId, rise: bool) -> f64 {
+        self.timing.slew_rf.get(p).map_or(0.0, |s| s[usize::from(!rise)])
+    }
+    /// Setup-corner load on driver `p` for ONE output edge (`rise`, else fall), pF: Liberty
+    /// pin caps may differ by edge (`rise_capacitance` / `fall_capacitance`), and each output
+    /// edge's delay is looked up at its own. [`Timer::load`] is the larger of the two.
+    pub fn load_edge(&self, p: PinId, rise: bool) -> f64 {
+        self.timing.load_rf.get(p).map_or(0.0, |l| l[usize::from(!rise)])
     }
     /// The arrival a setup check at `p` must meet: the later of the launch-edge-relative
     /// arrival and a clock-source-launched one. See [`Timing::clk_arrival`].
@@ -4377,6 +4398,8 @@ fn build_report(
         &slew_min,
         &node_load_max,
         &endpoint_req,
+        &late_slew,
+        &node_load.iter().map(|l| l[1]).collect::<Vec<[f64; 2]>>(),
     );
 
     // Capture the persistent incremental graph (simple context only). Built once here; the
