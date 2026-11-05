@@ -359,9 +359,17 @@ reachability are the depth passes (and partly the job of `vyges-cdc`).
 on sequential cells, and top-level **INTERCONNECT** net delays from the SPEF parasitics (Elmore).
 That is the standard hand-off a **gate-level / back-annotated simulator** consumes — produced
 from the same Liberty + SPEF the rest of the flow already has, with no Tcl and no external STA.
-Scope: single-corner today; IOPATH uses a nominal slew + the real net load (full
-timer-propagated slew is the planned accuracy upgrade), and INTERCONNECT needs a SPEF (omitted
-without one).
+Scope: one corner per run (min = typ = max: run once per corner Liberty for a multi-corner
+set); IOPATH delays are the timer's own (its propagated slew and its net load), and INTERCONNECT
+needs a SPEF (omitted without one).
+
+[`scripts/sdf-sim-gate.sh`](scripts/sdf-sim-gate.sh) checks the SDF in use: for sky130 samples at
+ss, tt and ff it simulates each netlist with the SDF written for that corner (Icarus Verilog) and
+requires the timer's slack sign and the simulation's result to agree — including a netlist that
+fails setup only at the slow corner and one that fails hold through clock skew. It needs a PDK
+and a simulator, so it is a box gate rather than part of `cargo test`; see
+[`tests/sdf_sim/README.md`](tests/sdf_sim/README.md) for what the simulator does and does not
+apply from an SDF.
 
 A job (`*.sta`) is a few `key: value` lines:
 
