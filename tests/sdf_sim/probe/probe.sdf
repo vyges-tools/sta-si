@@ -1,0 +1,17 @@
+(DELAYFILE
+  (SDFVERSION "3.0")
+  (DESIGN "probe")
+  (DIVIDER /)
+  (TIMESCALE 1ns)
+  (CELL (CELLTYPE "sky130_fd_sc_hd__buf_1") (INSTANCE u_buf)
+    (DELAY (ABSOLUTE (IOPATH A X (1.000:1.000:1.000) (1.100:1.100:1.100)))))
+  (CELL (CELLTYPE "sky130_fd_sc_hd__inv_1") (INSTANCE u_inv)
+    (DELAY (ABSOLUTE (IOPATH A Y (2.000:2.000:2.000) (2.200:2.200:2.200)))))
+  (CELL (CELLTYPE "sky130_fd_sc_hd__dfxtp_1") (INSTANCE u_ff)
+    (DELAY (ABSOLUTE (IOPATH CLK Q (3.000:3.000:3.000) (3.300:3.300:3.300))))
+    (TIMINGCHECK (SETUP D (posedge CLK) (0.500:0.500:0.500)) (HOLD D (posedge CLK) (0.100:0.100:0.100))))
+  (CELL (CELLTYPE "probe") (INSTANCE)
+    (DELAY (ABSOLUTE
+      (INTERCONNECT u_buf/X u_inv/A (0.500:0.500:0.500))
+      (INTERCONNECT u_inv/Y u_ff/D (0.250:0.250:0.250)))))
+)
