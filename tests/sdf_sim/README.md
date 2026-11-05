@@ -72,6 +72,21 @@ The gate pins the outcomes the samples are built for, so the agreement table has
 in it: `pipe` meets timing at every corner; `pipe_slow` fails setup at ss and meets it at ff
 (tt is asserted only to agree); `skew_ok` meets timing; `skew_bad` fails hold at every corner.
 
+## The SDF against a reference timer's
+
+Agreement of slack sign cannot see a delay that is wrong by less than a sample's margin. Where
+OpenSTA (`sta`, or `REF_STA`) is installed, the gate also has it write an SDF for every case, from
+the same netlist, Liberty and SDC, and compares every IOPATH and timing check with ours
+(`sdf_compare.py`, 1 ps tolerance). This is the stage that found the writer's per-edge errors:
+before the fixes it reported 44 differences over 48 entries on `pipe` at ss (inverter and xor
+fall delays 10-25 % low, one setup/hold value for both data edges, no RECOVERY/REMOVAL), and
+none after them. Without OpenSTA the stage prints `NOT RUN` and the final PASS line says so.
+
+Known gaps, listed rather than failed:
+- `WIDTH`: the shared Liberty reader does not keep `min_pulse_width`, so no WIDTH is written.
+- `IOPATH RESET_B Q`: the reference writes the clear arc with a 0 delay; ours omits it. Both
+  annotate the same 0.
+
 ## Teeth
 
 The agreement check must exit nonzero, for the expected reason, on a wrong SDF:

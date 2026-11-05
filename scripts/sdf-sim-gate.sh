@@ -10,6 +10,8 @@
 #      every register every cycle against a behavioural model;
 #   3. require that the timer and the simulation AGREE: slack >= 0 at setup and hold <=> the
 #      simulation matches the model.
+# Where OpenSTA is installed it also compares every IOPATH and timing check of those SDFs with the
+# reference timer's own write_sdf for the same inputs.
 # Then it checks the samples do what they are for (the modified netlist fails setup at ss and
 # meets it at ff, the skewed one fails hold), and that the agreement check has teeth: it must
 # exit nonzero for an SDF with its delays zeroed, an SDF from the wrong corner, an SDF that
@@ -278,6 +280,46 @@ neg "${STA[pipe_slow.ss_100C_1v60.wns]:-0}" || failmsg "pipe_slow should fail se
 pos "${STA[pipe_slow.ff_n40C_1v95.wns]:--1}" || failmsg "pipe_slow should meet setup at ff"
 [ "$fail" = 0 ] && echo "pipe all met; pipe_slow fails setup at ss, meets it at ff (tt: ${STA[pipe_slow.tt_025C_1v80]:-?}); skew_ok met; skew_bad fails hold at every corner"
 
+# ---- stage 2b: the SDF itself against a reference timer's -------------------------------------
+# Agreement of slack SIGN cannot see a delay that is wrong by less than the samples' margins.
+# Where OpenSTA is installed, every IOPATH and timing check of every case is compared with the
+# SDF it writes for the same netlist, Liberty and SDC (tests/sdf_sim/sdf_compare.py). WIDTH is
+# a known gap: the shared Liberty reader does not keep min_pulse_width, so it is listed, not
+# failed.
+echo
+echo "== SDF vs reference timer's SDF =="
+REF_STA="${REF_STA:-$(command -v sta || true)}"
+ref_ran=0
+if [ -z "$REF_STA" ] || ! command -v python3 >/dev/null 2>&1; then
+  echo "NOT RUN: no OpenSTA (set REF_STA) or no python3 -- the delays are checked only through the simulation"
+else
+  ref_ran=1
+  for d in pipe pipe_slow skew_ok skew_bad; do
+    s="pipe"; case "$d" in skew*) s=skew ;; esac
+    for c in $CORNERS; do
+      dir="$WORK/$d.$c"
+      cat > "$dir/ref.tcl" <<EOT
+read_liberty $LIBDIR/sky130_fd_sc_hd__$c.lib
+read_verilog $T/$d.v
+link_design $d
+read_sdc $T/$s.sdc
+set_input_transition 0.05 [all_inputs]
+set_load 0.005 [all_outputs]
+write_sdf -digits 6 $dir/ref.sdf
+exit
+EOT
+      if ! "$REF_STA" -no_init -exit "$dir/ref.tcl" > "$dir/ref.log" 2>&1 || [ ! -s "$dir/ref.sdf" ]; then
+        failmsg "$d $c: reference timer wrote no SDF ($dir/ref.log)"
+        continue
+      fi
+      cmp="$(python3 -I "$T/sdf_compare.py" "$dir/sta.sdf" "$dir/ref.sdf" --known WIDTH)"; rc=$?
+      printf '%s\n' "$cmp" > "$dir/ref.compare"
+      printf '%-9s %-13s %s\n' "$d" "$c" "$(tail -1 <<<"$cmp")"
+      [ "$rc" = 0 ] || { failmsg "$d $c: SDF differs from the reference's ($dir/ref.compare)"; grep '^DIFF' <<<"$cmp" | head -5 | sed 's/^/    /'; }
+    done
+  done
+fi
+
 # ---- stage 3: teeth -- the agreement check must FAIL on a wrong SDF ----------------------------
 echo
 echo "== teeth (each must exit nonzero) =="
@@ -303,7 +345,11 @@ teeth "SDF does not annotate (instance names wrong)" NOT-ANNOTATED pipe ss_100C_
 
 echo
 if [ "$fail" = 0 ]; then
-  echo "PASS: sdf-sim gate (timer and SDF-annotated simulation agree at every corner; teeth bite)"
+  if [ "$ref_ran" = 1 ]; then
+    echo "PASS: sdf-sim gate (timer and SDF-annotated simulation agree at every corner; SDF matches the reference timer's; teeth bite)"
+  else
+    echo "PASS: sdf-sim gate (timer and SDF-annotated simulation agree at every corner; teeth bite) -- reference SDF comparison NOT run"
+  fi
   exit 0
 fi
 echo "FAIL: sdf-sim gate (see above; work dir $WORK)"
