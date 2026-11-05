@@ -421,12 +421,16 @@ Supported SDC (a Tcl-subset reader — `set var`, `$var`, `[get_ports …]`,
 | `set_disable_timing` / `unset_disable_timing` | arcs and pins taken out of timing, by the kind of object named (cell arcs `-from`/`-to`, an instance, a pin, a port); later commands in file order take earlier ones back |
 | `set_data_check` / `unset_data_check` | a setup or hold check between two data pins (`-from`/`-to`, the edge forms, `-setup`/`-hold`); a later command overwrites, `unset` removes |
 
-Anything not modelled (`set_driving_cell`, `set_max_fanout`, …) is **never
+Anything not modelled (`set_max_fanout`, `set_max_delay`, …) is **never
 silently dropped** — `run -v` lists every ignored command so you know exactly
 what was and wasn't applied. Every command that can move a slack and is not applied (refused,
 not modelled, or kept for a consumer, as a clock sense or `group_path` is) is a warning on
 every run, once per kind with its count (`STA-SDC-NOT-APPLIED`), for example
-`` sdc: `set_sense` (2 commands): kept and written back; not applied by this timer``.
+`` sdc: `set_sense` (2 commands): kept and written back; not applied by this timer``. So is
+what the SDC reader models and this timer does not apply: `set_max_delay` / `set_min_delay`
+(`` sdc: `set_max_delay` (2 commands): read; not applied by this timer (no path delay is timed
+here)``), a `set_timing_derate` scoped to objects, a delay kind or an edge, a
+`set_clock_uncertainty` between clocks, a `set_load` on a net, and the design-rule limits.
 
 For **MCMM**, a job instead lists scenario files and the engine reports the worst
 setup/hold across them:

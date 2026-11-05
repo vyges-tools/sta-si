@@ -293,7 +293,7 @@ pub fn adapt(script_path: &str) -> Result<Adapted, TclError> {
         // what can move a slack and is not applied: a warning each, with its count
         sdc_warnings = crate::job::not_applied_warnings(&sdc);
         // the rest the reader lists as not modelled (no slack moves with it): noted
-        let timing: Vec<String> = sdc.not_applied().into_iter().filter(|n| n.affects_timing).map(|n| n.command).chain(sdc.kept_not_applied().into_iter().filter(|k| k.affects_timing).map(|k| k.command)).collect();
+        let timing: Vec<String> = sdc.not_applied().into_iter().filter(|n| n.affects_timing).map(|n| n.command).chain(sdc.kept_not_applied().into_iter().filter(|k| k.affects_timing).map(|k| k.command)).chain(crate::job::modelled_not_applied(&sdc).into_iter().map(|(c, _, _)| c.to_string())).collect();
         for ig in sdc.ignored.iter().filter(|c| !crate::job::MODELLED_HERE.contains(&c.as_str()) && !timing.contains(c)) {
             ignored.push(format!("(sdc) {ig}"));
         }

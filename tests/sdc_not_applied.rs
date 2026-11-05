@@ -49,3 +49,47 @@ fn a_job_files_sdc_warns_the_same() {
     assert_eq!(warns.len(), 1, "{text}");
     assert!(warns[0].contains("sdc: `group_path`: kept and written back; not applied by this timer"), "{}", warns[0]);
 }
+
+/// A path delay the reader models and this timer does not apply warns as well, with its count,
+/// as the README says.
+#[test]
+fn a_path_delay_warns_with_its_count() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("sdc_not_applied_path_delay");
+    std::fs::create_dir_all(&dir).unwrap();
+    for f in ["clk_edge.lib", "clk_edge.v"] {
+        std::fs::copy(format!("examples/clk_edge/{f}"), dir.join(f)).unwrap();
+    }
+    std::fs::write(dir.join("t.sdc"), "create_clock -name clk_i -period 4 [get_ports clk_i]\nset_max_delay 1 -to [get_ports *]\nset_max_delay 2 -from [get_ports *]\n").unwrap();
+    std::fs::write(dir.join("t.sta"), "design: clk_edge\nnetlist: clk_edge.v\nlib: clk_edge.lib\nsdc: t.sdc\n").unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_vyges-sta-si")).arg("run").arg(dir.join("t.sta")).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    let warns: Vec<&str> = text.lines().filter(|l| l.contains("\"code\":\"STA-SDC-NOT-APPLIED\"")).collect();
+    assert_eq!(warns.len(), 1, "{text}");
+    let want = "sdc: `set_max_delay` (2 commands): read; not applied by this timer (no path delay is timed here)";
+    assert!(warns[0].contains(want), "{}", warns[0]);
+    let readme = std::fs::read_to_string("README.md").unwrap().split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(readme.contains(&format!("`` {want}``")), "README");
+}
+
+/// In a Tcl script too: a path delay is a warning, not noted with the commands that move no slack.
+#[test]
+fn a_path_delay_in_a_script_is_a_warning_not_a_note() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("sdc_not_applied_tcl_path_delay");
+    std::fs::create_dir_all(&dir).unwrap();
+    for f in ["one_edge.lib", "one_edge.v"] {
+        std::fs::copy(format!("examples/one_edge_check/{f}"), dir.join(f)).unwrap();
+    }
+    std::fs::write(
+        dir.join("t.tcl"),
+        "read_liberty one_edge.lib\nread_verilog one_edge.v\nlink_design one_edge\n\
+         create_clock -name clk -period 2.0 [get_ports clk]\nset_min_delay 0.1 -from [get_ports rst_n]\n\
+         report_checks -path_delay max -digits 4\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_vyges-sta-si")).arg("tcl").arg("t.tcl").current_dir(&dir).output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    let warns: Vec<&str> = text.lines().filter(|l| l.contains("\"code\":\"STA-SDC-NOT-APPLIED\"")).collect();
+    assert_eq!(warns.len(), 1, "{text}");
+    assert!(warns[0].contains("sdc: `set_min_delay`: read; not applied by this timer"), "{}", warns[0]);
+    assert!(!text.contains("(sdc) set_min_delay"), "{text}");
+}

@@ -886,6 +886,59 @@ pub fn not_applied_warnings(sdc: &crate::sdc::Sdc) -> Vec<String> {
     for k in sdc.kept_not_applied().into_iter().filter(|k| k.affects_timing && !here(&k.command)) {
         out.push(format!("`{}`{}: kept and written back; not applied by this timer", k.command, times(k.count)));
     }
+    for (cmd, n, why) in modelled_not_applied(sdc) {
+        out.push(format!("`{cmd}`{}: {why}", times(n)));
+    }
+    out
+}
+
+/// What the reader MODELS that this timer does not apply: carried in its own record, so neither
+/// [`Sdc::not_applied`] nor [`Sdc::kept_not_applied`] lists it, and read here only in part or not
+/// at all. `(command, count, why)`, each kind once, when there is one:
+///
+/// - `set_max_delay` / `set_min_delay` (`Sdc::path_delays`): no path delay is timed here;
+/// - `set_timing_derate` scoped to objects, a delay or check kind, clock or data paths, or an edge
+///   (`Sdc::derates`): only a design-wide derate is applied (one with `-min` / `-max` is a kept
+///   option, already reported);
+/// - `set_clock_uncertainty` between clocks (`-from` / `-to`, `Sdc::uncertainties`): only the
+///   uncertainty on clocks and pins is applied;
+/// - `set_load` on a net, `-min` only, or `-wire_load` (`Sdc::env`): only a port pin load is;
+/// - the design-rule limits (`set_max_transition`, `set_max_capacitance`, `set_max_fanout`): read,
+///   and not checked here.
+///
+/// [`Sdc::not_applied`]: crate::sdc::Sdc::not_applied
+/// [`Sdc::kept_not_applied`]: crate::sdc::Sdc::kept_not_applied
+pub(crate) fn modelled_not_applied(sdc: &crate::sdc::Sdc) -> Vec<(&'static str, usize, &'static str)> {
+    let mut out = Vec::new();
+    let mut add = |cmd: &'static str, n: usize, why: &'static str| {
+        if n > 0 {
+            out.push((cmd, n, why));
+        }
+    };
+    let max = sdc.path_delays.iter().filter(|d| d.max).count();
+    add("set_max_delay", max, "read; not applied by this timer (no path delay is timed here)");
+    add("set_min_delay", sdc.path_delays.len() - max, "read; not applied by this timer (no path delay is timed here)");
+    const SCOPES: [&str; 7] = ["-cell_delay", "-net_delay", "-cell_check", "-data", "-clock", "-rise", "-fall"];
+    let has = |flags: &[String], f: &str| flags.iter().any(|x| x == f);
+    let scoped = sdc
+        .derates
+        .iter()
+        .filter(|d| !has(&d.flags, "-min") && !has(&d.flags, "-max"))
+        .filter(|d| !d.objects.is_empty() || SCOPES.iter().any(|f| has(&d.flags, f)))
+        .count();
+    add("set_timing_derate", scoped, "scoped (objects, a delay or check kind, clock or data, an edge); not applied by this timer, which applies a design-wide derate only");
+    let between = sdc.uncertainties.iter().filter(|u| !u.from.is_empty() || !u.to.is_empty()).count();
+    add("set_clock_uncertainty", between, "between clocks (-from / -to); not applied by this timer, which applies the uncertainty on clocks only");
+    let loads = sdc
+        .env
+        .iter()
+        .filter(|e| e.cmd == "set_load")
+        .filter(|e| e.accessor == "get_nets" || (has(&e.flags, "-min") && !has(&e.flags, "-max")) || (has(&e.flags, "-wire_load") && !has(&e.flags, "-pin_load")))
+        .count();
+    add("set_load", loads, "on a net, -min only, or -wire_load; not applied by this timer, which applies a port pin load only");
+    add("set_max_transition", sdc.max_transition.is_some() as usize + sdc.max_transition_objects.len(), "a design-rule limit; read, not checked by this timer");
+    add("set_max_capacitance", sdc.max_capacitance.is_some() as usize + sdc.max_capacitance_objects.len(), "a design-rule limit; read, not checked by this timer");
+    add("set_max_fanout", sdc.max_fanout.is_some() as usize + sdc.max_fanout_objects.len(), "a design-rule limit; read, not checked by this timer");
     out
 }
 
@@ -977,6 +1030,45 @@ mod io_delay_rule {
                 "`set_sense` (2 commands): kept and written back; not applied by this timer",
                 "`set_clock_sense`: kept and written back; not applied by this timer",
                 "`group_path`: kept and written back; not applied by this timer",
+            ]
+        );
+    }
+
+    /// What the reader models in a record of its own and this timer does not apply is a warning
+    /// too, with its count: path delays, a scoped derate, an inter-clock uncertainty, a net load,
+    /// the design-rule limits. What it applies (a design-wide derate, a clock's uncertainty, a
+    /// port load) is not.
+    #[test]
+    fn what_the_reader_models_and_this_timer_does_not_apply_is_a_warning() {
+        let sdc = crate::sdc::Sdc::parse(
+            "create_clock -name c -period 2 [get_ports clk]
+create_clock -name d -period 3 [get_ports clk2]
+             set_max_delay 1 -to [get_ports y]
+set_max_delay 1 -to [get_ports z]
+set_min_delay 0.1 -to [get_ports y]
+             set_timing_derate -late 1.05
+set_timing_derate -late -cell_delay 1.1
+             set_clock_uncertainty 0.1 [get_clocks c]
+set_clock_uncertainty -from c -to d 0.2
+             set_load 0.1 [get_ports y]
+set_load 0.2 [get_nets n1]
+             set_max_transition 0.5 [current_design]
+set_max_fanout 8 [current_design]
+set_max_capacitance 0.2 [get_ports y]
+",
+        )
+        .unwrap();
+        assert_eq!(
+            not_applied_warnings(&sdc),
+            [
+                "`set_max_delay` (2 commands): read; not applied by this timer (no path delay is timed here)",
+                "`set_min_delay`: read; not applied by this timer (no path delay is timed here)",
+                "`set_timing_derate`: scoped (objects, a delay or check kind, clock or data, an edge); not applied by this timer, which applies a design-wide derate only",
+                "`set_clock_uncertainty`: between clocks (-from / -to); not applied by this timer, which applies the uncertainty on clocks only",
+                "`set_load`: on a net, -min only, or -wire_load; not applied by this timer, which applies a port pin load only",
+                "`set_max_transition`: a design-rule limit; read, not checked by this timer",
+                "`set_max_capacitance`: a design-rule limit; read, not checked by this timer",
+                "`set_max_fanout`: a design-rule limit; read, not checked by this timer",
             ]
         );
     }
