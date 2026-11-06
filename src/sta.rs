@@ -3665,7 +3665,6 @@ fn build_report(
     // other case is refused, said, and not applied.
     let data_checks: Vec<(usize, usize, crate::data_check::Margins)> = {
         let mut w = Vec::new();
-        let dcs = crate::data_check::data_checks(&job.data_check_cmds, &mut w);
         // `[get_pins …]` is found as the reference's SDC network finds pins (loom `pins_matching`:
         // a `*` / `?` pattern, brackets escaped only when nothing matches as written); the key
         // names ONE pin (Error 128), so a pattern matching several, or none, is not applied.
@@ -3683,6 +3682,7 @@ fn build_report(
                 _ => port.or(pin),
             }
         };
+        let dcs = crate::data_check::data_checks(&job.data_check_cmds, &mut w, &node_of);
         let in_terms = runs.len() == 1 && job.clocks.len() <= 1 && job.exceptions.is_empty();
         let mut out = Vec::new();
         for d in dcs {
@@ -3690,10 +3690,7 @@ fn build_report(
                 w.push(format!("{} -> {}: a data check is timed here for one launching edge of one clock and no exceptions; not applied", d.from.1, d.to.1));
                 continue;
             }
-            match (node_of(&d.from), node_of(&d.to)) {
-                (Some(f), Some(t)) => out.push((f, t, d.margins)),
-                _ => w.push(format!("{} -> {}: pin not found, or not one pin; not applied", d.from.1, d.to.1)),
-            }
+            out.push((d.nodes.0, d.nodes.1, d.margins));
         }
         for m in &w {
             vyges_events::emit(

@@ -20,12 +20,15 @@ use crate::sdc::{KeptArg, KeptCmd};
 /// Margins of one from-pin → to-pin check: `[setup, hold][from edge][to edge]` (edge 0 rise).
 pub type Margins = [[[Option<f64>; 2]; 2]; 2];
 
-/// One data check: the from-pin (the reference) and the to-pin (the checked one), as written
-/// (`inst/pin` or a port name), with the accessor that named each.
+/// One data check: the from-pin (the reference) and the to-pin (the checked one), as first
+/// written (`inst/pin` or a port name) with the accessor that named each, and the pins they
+/// resolved to (`nodes`: from, to) — what the check is keyed on, as the reference keys a
+/// `DataCheck` on its `Pin*`s.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DataCheck {
     pub from: (String, String),
     pub to: (String, String),
+    pub nodes: (usize, usize),
     pub margins: Margins,
 }
 
@@ -66,7 +69,12 @@ fn pin_of(c: &KeptCmd, keys: [&'static str; 3]) -> Result<Option<End>, String> {
 
 /// The data checks `cmds` leave in force, in the order first set. A command that cannot be
 /// applied is said in `warnings` and skipped.
-pub fn data_checks(cmds: &[KeptCmd], warnings: &mut Vec<String>) -> Vec<DataCheck> {
+///
+/// `resolve` finds the ONE pin an end names (`(accessor, name)`), or none. A check is keyed on
+/// the pins (`Sdc::setDataCheck` / `unsetDataCheck` look the check up by its `Pin*`s), so a later
+/// command that names the same pin another way — `a/A` and `[get_pins a/?]` — overwrites or
+/// takes back the same check. An end that names no pin (or several) is said and not applied.
+pub fn data_checks(cmds: &[KeptCmd], warnings: &mut Vec<String>, resolve: &dyn Fn(&(String, String)) -> Option<usize>) -> Vec<DataCheck> {
     let mut out: Vec<DataCheck> = Vec::new();
     for c in cmds.iter().filter(|c| c.cmd == "set_data_check" || c.cmd == "unset_data_check") {
         let set = c.cmd == "set_data_check";
@@ -108,10 +116,17 @@ pub fn data_checks(cmds: &[KeptCmd], warnings: &mut Vec<String>) -> Vec<DataChec
         } else {
             None
         };
-        let at = match out.iter().position(|d| d.from == from && d.to == to) {
+        let nodes = match (resolve(&from), resolve(&to)) {
+            (Some(f), Some(t)) => (f, t),
+            _ => {
+                warnings.push(format!("{}: {} -> {}: pin not found, or not one pin; not applied", c.cmd, from.1, to.1));
+                continue;
+            }
+        };
+        let at = match out.iter().position(|d| d.nodes == nodes) {
             Some(i) => i,
             None if set => {
-                out.push(DataCheck { from: from.clone(), to: to.clone(), margins: Margins::default() });
+                out.push(DataCheck { from: from.clone(), to: to.clone(), nodes, margins: Margins::default() });
                 out.len() - 1
             }
             None => continue, // nothing to take back
@@ -133,10 +148,32 @@ mod tests {
     use super::*;
     use crate::sdc::Sdc;
 
+    /// Pins `a/A`, `a/B`, `a/C` (nodes 0, 1, 2); `[get_pins a/?X]` stands for a pattern that
+    /// resolves to the pin `a/X`, so a test can name one pin two ways.
+    fn resolve((_, name): &(String, String)) -> Option<usize> {
+        let name = name.replace('?', "");
+        ["a/A", "a/B", "a/C"].iter().position(|p| *p == name)
+    }
+
     fn checks(text: &str) -> (Vec<DataCheck>, Vec<String>) {
         let s = Sdc::parse(text).expect("reads");
         let mut w = Vec::new();
-        (data_checks(&s.kept, &mut w), w)
+        (data_checks(&s.kept, &mut w, &resolve), w)
+    }
+
+    /// Rule (`Sdc::setDataCheck` / `unsetDataCheck`, keyed on the `Pin*`s): a check is the
+    /// pins', not the spelling's — a later command naming the same pins another way overwrites
+    /// it or takes it back; an end naming no pin is said and not applied.
+    #[test]
+    fn a_check_is_keyed_on_its_pins_not_their_spelling() {
+        let (d, w) = checks("set_data_check -from [get_pins a/A] -to [get_pins a/B] 0.1\nset_data_check -from a/?A -to [get_pins a/?B] -setup 0.2\n");
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(d.len(), 1, "one check: {d:?}");
+        assert_eq!((d[0].margins[0][0][0], d[0].margins[1][0][0]), (Some(0.2), Some(0.1)), "the setup side overwritten");
+        let (d, _) = checks("set_data_check -from [get_pins a/A] -to [get_pins a/B] 0.1\nunset_data_check -from [get_pins a/?A] -to [get_pins a/?B]\n");
+        assert!(d.is_empty(), "taken back by another spelling: {d:?}");
+        let (d, w) = checks("set_data_check -from [get_pins a/A] -to [get_pins a/Z] 0.1\n");
+        assert!(d.is_empty() && w.len() == 1 && w[0].contains("pin not found"), "{d:?} {w:?}");
     }
 
     /// Rule (`set_data_check`, `DataCheck::setMargin`): a plain `-from`/`-to` sets both edges, a

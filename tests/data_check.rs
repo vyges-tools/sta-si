@@ -76,3 +76,12 @@ fn a_pin_pattern_names_the_pin_the_reference_finds() {
     let two = timer("set_data_check -from [get_pins g1/*] -to [get_pins g1/Y] -setup 5\n");
     assert_eq!(two.report().endpoints, base.report().endpoints, "a pattern naming two pins: not applied");
 }
+
+/// Rule (`Sdc::unsetDataCheck`, keyed on the `Pin*`s): `unset_data_check` takes back the check
+/// on the same pins however it spells them — set through a pattern, unset by name.
+#[test]
+fn unset_takes_back_the_check_on_the_same_pins_spelled_another_way() {
+    let base = timer("");
+    let u = timer("set_data_check -from [get_pins g?/A] -to [get_pins g1/Y] 0.1\nunset_data_check -from [get_pins g1/A] -to [get_pins g1/Y]\n");
+    assert_eq!(u.report().endpoints, base.report().endpoints);
+}
