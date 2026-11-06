@@ -62,3 +62,17 @@ fn unset_takes_it_back_and_a_clock_is_refused() {
     let c = timer(&format!("{CHECK} -clock clk 0.1\n"));
     assert_eq!(c.report().endpoints, base.report().endpoints);
 }
+
+/// Rule (`SdcNetwork::findPinsMatching`, `set_data_check` naming ONE pin, Error 128): a
+/// `[get_pins …]` pattern is found as the reference finds pins, so `g?/A` is the check on `g1/A`;
+/// a pattern naming two pins (`g1/*`) is not applied.
+#[test]
+fn a_pin_pattern_names_the_pin_the_reference_finds() {
+    let base = timer("");
+    let lit = timer(&format!("{CHECK} -setup 5\n"));
+    let pat = timer("set_data_check -from [get_pins g?/A] -to [get_pins g1/Y] -setup 5\n");
+    assert_eq!(pat.report().endpoints, base.report().endpoints + 1);
+    assert_eq!(pat.report().wns, lit.report().wns);
+    let two = timer("set_data_check -from [get_pins g1/*] -to [get_pins g1/Y] -setup 5\n");
+    assert_eq!(two.report().endpoints, base.report().endpoints, "a pattern naming two pins: not applied");
+}

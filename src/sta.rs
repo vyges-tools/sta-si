@@ -3666,12 +3666,20 @@ fn build_report(
     let data_checks: Vec<(usize, usize, crate::data_check::Margins)> = {
         let mut w = Vec::new();
         let dcs = crate::data_check::data_checks(&job.data_check_cmds, &mut w);
+        // `[get_pins …]` is found as the reference's SDC network finds pins (loom `pins_matching`:
+        // a `*` / `?` pattern, brackets escaped only when nothing matches as written); the key
+        // names ONE pin (Error 128), so a pattern matching several, or none, is not applied.
+        let inst_names: Vec<&str> = nl.insts.iter().map(|i| i.name.as_str()).collect();
+        let inst_pins: Vec<(usize, &str)> = nl.insts.iter().enumerate().flat_map(|(k, i)| i.conns.iter().map(move |(p, _)| (k, p.as_str()))).collect();
         let node_of = |(acc, name): &(String, String)| -> Option<usize> {
             let port = key2idx.get(&port_key(name)).copied();
             let pin = split_inst_pin(name).and_then(|(i, p)| key2idx.get(&pin_key(i, p)).copied());
             match acc.as_str() {
                 "get_ports" => port,
-                "get_pins" => pin,
+                "get_pins" => match vyges_loom::sdc::pins_matching(name, &inst_names, &inst_pins).as_slice() {
+                    &[j] => key2idx.get(&pin_key(inst_names[inst_pins[j].0], inst_pins[j].1)).copied(),
+                    _ => None,
+                },
                 _ => port.or(pin),
             }
         };
@@ -3684,7 +3692,7 @@ fn build_report(
             }
             match (node_of(&d.from), node_of(&d.to)) {
                 (Some(f), Some(t)) => out.push((f, t, d.margins)),
-                _ => w.push(format!("{} -> {}: pin not found; not applied", d.from.1, d.to.1)),
+                _ => w.push(format!("{} -> {}: pin not found, or not one pin; not applied", d.from.1, d.to.1)),
             }
         }
         for m in &w {
