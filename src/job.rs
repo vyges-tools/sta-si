@@ -538,17 +538,27 @@ impl StaJob {
 
     /// The job's constraints, read as the reference reads them after linking: a file whose
     /// object queries (`-filter`, `-of_objects`) need the design is read again against the
-    /// job's netlist and libraries. Read plainly otherwise, so a file without them costs nothing.
+    /// job's netlist and libraries, and each generated clock then takes its waveform from the
+    /// master the design gives it (`Sta::updateGeneratedClks`, after the read: a `-source` with
+    /// no clock defined on it is traced back through the netlist to one). Read plainly otherwise,
+    /// so a file with neither costs nothing.
     pub fn load_sdc(&self, sdc_path: &str) -> Result<crate::sdc::Sdc, String> {
         let resolved = self.resolve(sdc_path);
         let plain = crate::sdc::Sdc::load(&resolved).map_err(|e| e.to_string())?;
-        if plain.unevaluated_queries.is_empty() || self.netlist.is_empty() {
+        let has_generated = plain.clocks.iter().any(|c| c.generated.is_some());
+        if (plain.unevaluated_queries.is_empty() && !has_generated) || self.netlist.is_empty() {
             return Ok(plain);
         }
         let nl = crate::engine::load_netlist(&self.resolve(&self.netlist)).map_err(|e| e.to_string())?;
         let lib = if self.libs.is_empty() { crate::liberty::Lib::default() } else { crate::engine::load_libs(self, crate::liberty::LibOpts::default()).map_err(|e| e.to_string())? };
-        let design = crate::sdc::SdcDesign::from_netlist(&nl, Some(&lib));
-        crate::sdc::Sdc::load_with(&resolved, &design).map_err(|e| e.to_string())
+        let mut sdc = if plain.unevaluated_queries.is_empty() {
+            plain
+        } else {
+            let design = crate::sdc::SdcDesign::from_netlist(&nl, Some(&lib));
+            crate::sdc::Sdc::load_with(&resolved, &design).map_err(|e| e.to_string())?
+        };
+        vyges_loom::sdc_genclk::update_generated_clks(&mut sdc, &nl, &lib);
+        Ok(sdc)
     }
 
     pub fn resolve(&self, rel: &str) -> String {

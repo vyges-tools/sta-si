@@ -237,3 +237,25 @@ fn unset_disable_timing_takes_the_disable_back() {
     assert_ne!(set, back, "the unset changed nothing");
     assert_eq!(back, slacks(&timer(&base)));
 }
+
+/// A generated clock whose `-source` no clock is defined on takes its master from the design, after
+/// the read (`Sta::updateGeneratedClks`; `Genclks::ensureMaster` traces the source back through
+/// the netlist to the clock defined there): `rd/CK` is driven by the port `c` is on, so `g` is
+/// `c` divided by 2, period 4. Read without the design, `g` would have no master and period 0.
+#[test]
+fn a_generated_clock_takes_its_master_from_the_design() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("sdc_applied_genclk_master");
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    let sdc = dir.join("g.sdc");
+    std::fs::write(&sdc, format!("{CLOCK}create_generated_clock -name g -source [get_pins rd/CK] -divide_by 2 [get_pins rd/Q]\n"))
+        .expect("write sdc");
+    let sta = dir.join("g.sta");
+    std::fs::write(
+        &sta,
+        format!("design: app\nnetlist: {D}app.v\nlib: {D}../../examples/seq/seq.lib\nsdc: {}\n", sdc.display()),
+    )
+    .expect("write job");
+    let job = StaJob::load(&sta.to_string_lossy()).expect("job");
+    let g: Vec<f64> = job.clocks.iter().filter(|c| c.0 == "g").map(|c| c.2).collect();
+    assert_eq!(g, vec![4.0], "{:?}", job.clocks);
+}
