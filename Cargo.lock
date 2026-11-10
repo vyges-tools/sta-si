@@ -147,8 +147,8 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "vyges-events"
-version = "0.1.54"
-source = "git+https://github.com/vyges-tools/events?branch=main#a1cf6c92afceb947965bdf1144104049bc14aaa9"
+version = "0.1.55"
+source = "git+https://github.com/vyges-tools/events?branch=main#87cca49dfd0e7030b890a084472a00930bcfb45e"
 dependencies = [
  "serde",
  "serde_json",
@@ -156,8 +156,8 @@ dependencies = [
 
 [[package]]
 name = "vyges-loom"
-version = "0.1.54"
-source = "git+https://github.com/vyges-tools/loom?branch=main#8a38c94ac2c8816cb77e8e131b13ce10062149c0"
+version = "0.1.55"
+source = "git+https://github.com/vyges-tools/loom?branch=main#5a5b8993a293df2bc14c2c372edf71a5a8e136ca"
 dependencies = [
  "miniz_oxide",
  "regex",
@@ -165,7 +165,7 @@ dependencies = [
 
 [[package]]
 name = "vyges-sta-si"
-version = "0.1.54"
+version = "0.1.55"
 dependencies = [
  "vyges-events",
  "vyges-loom",
