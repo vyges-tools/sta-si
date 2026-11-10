@@ -1,7 +1,5 @@
 # vyges-sta-si
 
-**[Download Loom](https://vyges.com/products/vyges-cli/#install)** · install the free [Vyges CLI](https://vyges.com/products/vyges-cli/), then `vyges install loom`
-
 Sign-off **static timing analysis with signal integrity**: a gate-level netlist,
 timing libraries, and a clock in — a slack report out.
 
