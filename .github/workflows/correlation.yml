@@ -78,7 +78,7 @@ jobs:
           echo "PDK_LIB=$PWD/$lib" >> "$GITHUB_ENV"
           ls -lh "$lib"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.100.0
       - uses: Swatinem/rust-cache@v2
 
       # Captured once, not run twice: a second run would double the cost and, worse, could
