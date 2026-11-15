@@ -80,7 +80,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --features mimalloc --target ${{ matrix.target }}
       # Runner and glibc floor, one policy for every release: vyges-tools/actions.
       - name: glibc ceiling
         uses: vyges-tools/actions/glibc-ceiling@v1
