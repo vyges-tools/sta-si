@@ -126,10 +126,18 @@ fn job(period: f64) -> StaJob {
     }
 }
 
-fn build(nl: &str, j: &StaJob) -> Result<(), StaError> {
+fn build(nl: &str, j: &StaJob) -> Result<Timer, StaError> {
     let nl = vyges_sta_si::netlist::parse(nl).map_err(|e| StaError::Parse(e.to_string()))?;
     let lib = vyges_sta_si::liberty::Lib::parse(LIB).map_err(|e| StaError::Parse(e.to_string()))?;
-    Timer::build(&nl, &lib, j, None).map(|_| ())
+    Timer::build(&nl, &lib, j, None)
+}
+
+fn pin(t: &Timer, name: &str) -> usize {
+    t.pin(name).unwrap_or_else(|| panic!("no pin {name}"))
+}
+
+fn close(a: f64, b: f64) -> bool {
+    (a - b).abs() < 1e-6 // delays are stored in float, as the reference stores them
 }
 
 /// A loop the order cannot pass is refused BY NAME: the message lists the pins of one cycle, in
@@ -142,7 +150,7 @@ fn a_combinational_loop_is_refused_naming_its_pins() {
               INV g2 (.A(a), .Y(b));\n\
               INV g3 (.A(a), .Y(y));\n\
               endmodule";
-    let err = build(nl, &job(10.0)).expect_err("a ring of inverters is a loop");
+    let Err(err) = build(nl, &job(10.0)) else { panic!("a ring of inverters is a loop") };
     let StaError::CombinationalLoop(pins) = &err else { panic!("not a loop refusal: {err}") };
     let mut sorted = pins.clone();
     sorted.sort();
@@ -152,4 +160,35 @@ fn a_combinational_loop_is_refused_naming_its_pins() {
         assert!(msg.contains(p), "the message names {p}: {msg}");
     }
     assert!(!msg.contains("g3"), "a pin off the cycle is not named: {msg}");
+}
+
+/// The reference's levelization does not search through a latch D->Q arc
+/// (`Levelize::searchThru`): a latch output is ordered by its enable, so a loop closed only through
+/// a latch — the latch feeding its own data, as a latch-based clock gate's enable feeds back from
+/// the flops it clocks — is no loop.
+#[test]
+fn a_loop_closed_only_through_a_latch_is_no_loop() {
+    let nl = "module t (clk, y); input clk; output y; wire q, nq;\n\
+              DLH l1 (.G(clk), .D(nq), .Q(q));\n\
+              INV i1 (.A(q), .Y(nq));\n\
+              DFF r (.CK(clk), .D(q), .Q(y));\n\
+              endmodule";
+    let t = build(nl, &job(10.0)).expect("a loop through a latch D->Q arc is not refused");
+    // the latch output is timed from its enable: G->Q, 0.3 after the clock edge
+    assert!(close(t.arrival(pin(&t, "l1/Q")), 0.3), "l1/Q late {}", t.arrival(pin(&t, "l1/Q")));
+}
+
+/// On the min analysis nothing crosses a latch D->Q arc: the reference propagates it only for max
+/// (`Search` latch D->Q branch: `min_max == MinMax::max()`), so the earliest latch output is its
+/// enable path even when data through D would be earlier.
+#[test]
+fn the_earliest_latch_output_is_its_enable_path() {
+    // d arrives at 0, so D->Q (0.25) would beat G->Q (0.3) at l1/Q if it were searched
+    let nl = "module t (clk, d, y); input clk, d; output y; wire q;\n\
+              DLH l1 (.G(clk), .D(d), .Q(q));\n\
+              DFF r (.CK(clk), .D(q), .Q(y));\n\
+              endmodule";
+    let t = build(nl, &job(10.0)).unwrap();
+    let a = t.arrival_min(pin(&t, "r/D"));
+    assert!(close(a, 0.3), "r/D early arrival {a}, the G->Q path's 0.3");
 }

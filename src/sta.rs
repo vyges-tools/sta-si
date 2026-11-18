@@ -132,6 +132,18 @@ fn aocv_lookup(tbl: &[(f64, f64)], depth: f64) -> f64 {
     last.1
 }
 
+/// Is `arc` a latch's D->Q arc (`TimingRole::latchDtoQ`)? As the reference's Liberty builder makes
+/// one (`makeRegLatchArcs` -> `makeLatchDtoQArcs`): a combinational arc into a latch output from a
+/// pin the cell's `latch` group names in `data_in`. ⚠️ A cell with no `latch` group (or a bank) is
+/// not inferred here (`LibertyCell::inferLatchRoles`).
+fn is_latch_d_to_q(cell: &crate::liberty::Cell, arc: &Arc) -> bool {
+    if arc.clk_edge.is_some() {
+        return false;
+    }
+    let Some(g) = cell.seq_group.as_ref().filter(|g| g.latch) else { return false };
+    g.attrs.get("data_in").and_then(|d| vyges_loom::liberty_func::Func::parse_in(d.trim_matches('"'), |p| cell.pins.contains_key(p))).is_some_and(|f| f.ports().contains(&arc.related_pin.as_str()))
+}
+
 /// One cycle among the nodes a topological order left out (`done[v]` false), its nodes in edge
 /// order, or `None` when they hold none. A node a Kahn walk cannot reach sits on a cycle or
 /// downstream of one, so a depth-first walk over the left-out nodes, in index order, finds one.
@@ -576,6 +588,10 @@ struct Edge {
     /// arc's sense once the held pins are substituted, and a pin held rising or falling. All
     /// true without case analysis; a net arc reads the diagonal.
     lanes: [[bool; 2]; 2],
+    /// A latch's D->Q arc (`TimingRole::latchDtoQ`). The reference's levelization does not search
+    /// through it (`Levelize::searchThru`): a latch output is ordered by its enable alone, so a loop
+    /// closed only through a latch is no loop, and what reaches Q through D is found separately.
+    latch_dq: bool,
 }
 
 const ALL_LANES: [[bool; 2]; 2] = [[true; 2]; 2];
@@ -1794,12 +1810,17 @@ fn build_report(
                         *ok = sense.is_none_or(|s| s.pairs(il, ol)) && pass_lane(i_idx, il) && pass_lane(o_idx, ol);
                     }
                 }
+                let latch_dq = is_latch_d_to_q(cell, arc);
                 out_edges[i_idx].push(Edge {
                     to: o_idx,
                     kind: EdgeKind::Cell(Box::new(arc.clone())),
                     lanes,
+                    latch_dq,
                 });
-                indeg[o_idx] += 1;
+                // the order is the reference's levels: not through a latch D->Q arc
+                if !latch_dq {
+                    indeg[o_idx] += 1;
+                }
             }
         }
     }
@@ -2010,6 +2031,7 @@ fn build_report(
                         to: s,
                         kind: EdgeKind::Net(aid),
                         lanes,
+                        latch_dq: false,
                     });
                     indeg[s] += 1;
                 }
@@ -2074,8 +2096,10 @@ fn build_report(
         flop_d.iter().chain(&flop_hold).any(|(_, cons, _)| cons.windows(2).any(|w| w[0].clk_edge != w[1].clk_edge));
     // a data check's required time follows another pin's arrival, which the fast path does not
     // re-derive
+    // A latch D->Q arc is outside the order, so the incremental cone walk would not see it.
+    let has_latch_dq = out_edges.iter().flatten().any(|e| e.latch_dq);
     let simple_ctx = capture && spef.is_none() && !pocv && !aocv && !job.pba && !fall_launch && !mixed_capture && !sim_narrows
-        && job.data_check_cmds.is_empty();
+        && job.data_check_cmds.is_empty() && !has_latch_dq;
     let mut inc_setup: Vec<SetupRec> = Vec::new();
     let mut inc_hold: Vec<HoldRec> = Vec::new();
     let pocv_sigma = job.pocv_sigma;
@@ -2261,7 +2285,7 @@ fn build_report(
             if is_ck[u] {
                 continue; // the clock edge stops here; CK->Q is a new launch
             }
-            for e in out_edges[u].iter().filter(|e| e.searched()) {
+            for e in out_edges[u].iter().filter(|e| e.searched() && !e.latch_dq) {
                 if !clock_reached[e.to] {
                     clock_reached[e.to] = true;
                     stack.push(e.to);
@@ -2290,7 +2314,7 @@ fn build_report(
             if is_ck[u] {
                 continue;
             }
-            for e in out_edges[u].iter().filter(|e| e.searched()) {
+            for e in out_edges[u].iter().filter(|e| e.searched() && !e.latch_dq) {
                 if ideal_slew[e.to].is_none() {
                     ideal_slew[e.to] = ideal_slew[u];
                     stack.push(e.to);
@@ -2401,6 +2425,11 @@ fn build_report(
                 slew_only[u] = [true; 2];
             }
             for e in &out_edges[u] {
+                // Outside the order (see `Edge::latch_dq`), and nothing crosses it here: a latch
+                // output's arrivals come through its enable.
+                if e.latch_dq {
+                    continue;
+                }
                 let v = e.to;
                 if reached[u] {
                     reached[v] = true;
@@ -3046,7 +3075,7 @@ fn build_report(
                 for &v in &ord {
                     done[v] = true;
                 }
-                let adj: Vec<Vec<usize>> = out_edges.iter().map(|es| es.iter().map(|e| e.to).collect()).collect();
+                let adj: Vec<Vec<usize>> = out_edges.iter().map(|es| es.iter().filter(|e| !e.latch_dq).map(|e| e.to).collect()).collect();
                 let cycle = find_cycle(&adj, &done).unwrap_or_default();
                 return Err(StaError::CombinationalLoop(cycle.into_iter().map(|v| labels[v].clone()).collect()));
             }
@@ -3896,7 +3925,7 @@ fn build_report(
     let pba_wns = if job.pba {
         let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
         for (u, edges) in out_edges.iter().enumerate() {
-            for e in edges.iter().filter(|e| e.searched()) {
+            for e in edges.iter().filter(|e| e.searched() && !e.latch_dq) {
                 preds[e.to].push(u);
             }
         }
