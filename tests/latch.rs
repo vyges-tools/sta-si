@@ -42,8 +42,8 @@ library (latch) {
         related_pin : "B"; timing_sense : positive_unate;
         cell_rise (t)       { index_1 ("0.01, 0.1"); index_2 ("0.001, 0.01"); values ( "0.3, 0.3", "0.3, 0.3" ); }
         cell_fall (t)       { index_1 ("0.01, 0.1"); index_2 ("0.001, 0.01"); values ( "0.3, 0.3", "0.3, 0.3" ); }
-        rise_transition (t) { index_1 ("0.01, 0.1"); index_2 ("0.001, 0.01"); values ( "0.02, 0.02", "0.02, 0.02" ); }
-        fall_transition (t) { index_1 ("0.01, 0.1"); index_2 ("0.001, 0.01"); values ( "0.02, 0.02", "0.02, 0.02" ); }
+        rise_transition (t) { index_1 ("0.01, 0.1"); index_2 ("0.001, 0.01"); values ( "0.05, 0.05", "0.05, 0.05" ); }
+        fall_transition (t) { index_1 ("0.01, 0.1"); index_2 ("0.001, 0.01"); values ( "0.05, 0.05", "0.05, 0.05" ); }
       }
     }
   }
@@ -298,8 +298,8 @@ fn data_before_the_latch_opens_is_checked_against_the_opening() {
 /// A clock gate: a latch holding the enable, ANDed with the clock. The enable is a DATA path into
 /// the clock network, and the reference takes a register clock pin's arrival from the clock's own
 /// path alone (a data path on a clock pin launches nothing): the gated register's clock latency
-/// is the AND gate's clock arc (0.3 here: the INV-like table of AND2 below), not the later enable
-/// path through the latch (G->Q 0.3 + 0.3).
+/// is the AND gate's clock arc (0.3), not the later enable path through the latch (G->Q 0.3 +
+/// 0.3).
 #[test]
 fn a_clock_gate_enable_is_not_the_gated_clock() {
     let nl = "module t (clk, en, d, y); input clk, en, d; output y; wire en_q, gclk;\n\
@@ -313,4 +313,21 @@ fn a_clock_gate_enable_is_not_the_gated_clock() {
     assert!(close(t.arrival_min(ck), 0.3), "gated clock early arrival {}", t.arrival_min(ck));
     // the register launches from the clock path: CK->Q 0.2 after it
     assert!(close(t.arrival(pin(&t, "r/Q")), 0.5), "r/Q {}", t.arrival(pin(&t, "r/Q")));
+}
+
+/// The same clock gate's enable still sets the gated clock's SLEW: the reference's delay
+/// calculation merges every arc into a pin, whatever path it is on, so the AND gate's output slew
+/// is the slower of its two arcs' (0.05 from the enable arc, 0.02 from the clock's) on the late
+/// analysis and the faster on the early one.
+#[test]
+fn a_clock_gate_enable_sets_the_gated_clock_slew() {
+    let nl = "module t (clk, en, d, y); input clk, en, d; output y; wire en_q, gclk;\n\
+              DLL l1 (.G(clk), .D(en), .Q(en_q));\n\
+              AND2 g (.A(clk), .B(en_q), .Y(gclk));\n\
+              DFF r (.CK(gclk), .D(d), .Q(y));\n\
+              endmodule";
+    let t = build(nl, &job(10.0)).unwrap();
+    let ck = pin(&t, "r/CK");
+    assert!(close(t.slew(ck), 0.05), "gated clock late slew {}", t.slew(ck));
+    assert!(close(t.slew_min(ck), 0.02), "gated clock early slew {}", t.slew_min(ck));
 }

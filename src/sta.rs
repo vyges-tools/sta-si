@@ -2368,9 +2368,12 @@ fn build_report(
     // a data path, and a data path on a register's clock pin launches nothing (the CK->Q rule
     // above); only the clock's own path sets the clock pin's arrival and slew. Merged with it here,
     // the gate's enable path became the gated registers' clock latency: an ASAP7 latch clock gate
-    // put 46 ps on its registers' launch and on their hold requirement. Such an edge is therefore
-    // not taken (the clock gating check the reference infers at the gate is not made here).
+    // put 46 ps on its registers' launch and on their hold requirement. Such an edge sets the
+    // slews after it (the delay calculation merges every arc's, whatever its path) and no
+    // arrival. The incremental fast path has no slew-only arc, so a design with one leaves it off.
+    // (The clock gating check the reference infers at the gate is not made here.)
     let data_into_clock = |u: usize, v: usize| -> bool { clock_declared && !clock_reached[u] && clock_reached[v] };
+    let simple_ctx = simple_ctx && !out_edges.iter().enumerate().any(|(u, es)| es.iter().any(|e| data_into_clock(u, e.to)));
 
     #[allow(clippy::type_complexity)]
     // `launch` (lane 0 rise, 1 fall) times only the paths that clock edge launches — a
@@ -2469,14 +2472,6 @@ fn build_report(
                 // Outside the order (see `Edge::latch_dq`), and nothing crosses it here: a latch
                 // output's arrivals come through its enable.
                 if e.latch_dq {
-                    continue;
-                }
-                // in the order, but carrying nothing (see `data_into_clock`)
-                if data_into_clock(u, e.to) {
-                    indeg_work[e.to] -= 1;
-                    if indeg_work[e.to] == 0 {
-                        order.push(e.to);
-                    }
                     continue;
                 }
                 let v = e.to;
@@ -2604,7 +2599,10 @@ fn build_report(
                                 let a_in = arr[u][il];
                                 // the constants narrow the pairs an arrival takes
                                 // (`searchThruTimingSense`), not the slews (see `slew_only`)
-                                let only_slew = !e.lanes[il][ol] || !a_in.is_finite();
+                                // and a data path entering the clock network sets its slews
+                                // (the delay calculation merges every arc's) but not its
+                                // arrival (see `data_into_clock`)
+                                let only_slew = !e.lanes[il][ol] || !a_in.is_finite() || data_into_clock(u, v);
                                 if !a_in.is_finite() && !slew_only[u][il] {
                                     continue;
                                 }
@@ -4647,7 +4645,7 @@ fn build_report(
         let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut in_edges: Vec<Vec<InEdge>> = (0..n).map(|_| Vec::new()).collect();
         for (u, edges) in out_edges.iter().enumerate() {
-            for e in edges.iter().filter(|e| !data_into_clock(u, e.to)) {
+            for e in edges {
                 succ[u].push(e.to);
                 in_edges[e.to].push(match &e.kind {
                     EdgeKind::Net(_) => InEdge::Net { from: u },
