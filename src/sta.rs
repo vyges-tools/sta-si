@@ -306,6 +306,15 @@ pub(crate) fn cycle_accting(src_period: f64, src_time: f64, tgt_period: f64, tgt
     (setup_t, hold_t)
 }
 
+/// What reaches a latch output through its D->Q arc on one launching edge's pass, per Q edge:
+/// the arrival (measured from the latch's ENABLE edge, which launches it) and the predecessor
+/// it is reported through (the enable pin). See the latch D->Q iteration.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LatchSeed {
+    arr: [f64; 2],
+    from: [Pred; 2],
+}
+
 /// One launching clock edge's arrivals (lane 0 rise, 1 fall), timed alone; see `fall_launch`.
 struct EdgeRun {
     edge: usize,
@@ -2387,7 +2396,8 @@ fn build_report(
                  seed_l: &[[f64; 2]],
                  block_seq: bool,
                  launch: Option<usize>,
-                 fixed_slew: Option<&[[f64; 2]]>|
+                 fixed_slew: Option<&[[f64; 2]]>,
+                 latch_seed: Option<&HashMap<usize, LatchSeed>>|
      -> (
         Vec<f64>,
         Vec<f64>,
@@ -2404,7 +2414,7 @@ fn build_report(
         };
         // this pass re-evaluates every arc of its analysis; the clock-launched pass re-times the
         // same arcs and leaves the main pass's waveforms as they are
-        let records = !block_seq && launch.is_none();
+        let records = !block_seq && launch.is_none() && fixed_slew.is_none();
         if records {
             drvr_wave.borrow_mut()[late as usize].iter_mut().for_each(|w| w.iter_mut().for_each(Vec::clear));
         }
@@ -2467,6 +2477,19 @@ fn build_report(
             if !reached[u] && fixed_slew.is_none() {
                 slew[u] = [0.0; 2];
                 slew_only[u] = [true; 2];
+            }
+            // what reaches a latch output through its D (see `LatchSeed`): merged with what its
+            // fan-in brought before anything leaves it
+            if let Some(sd) = latch_seed.and_then(|m| m.get(&u)).filter(|_| late) {
+                for l in 0..2 {
+                    if sd.arr[l] > arr[u][l] {
+                        arr[u][l] = sd.arr[l];
+                        arr_nom[u][l] = sd.arr[l];
+                        var[u][l] = 0.0;
+                        depth[u][l] = 0;
+                        from[u][l] = sd.from[l];
+                    }
+                }
             }
             for e in &out_edges[u] {
                 // Outside the order (see `Edge::latch_dq`), and nothing crosses it here: a latch
@@ -3114,7 +3137,7 @@ fn build_report(
     let mut conv_net_slew = zero.clone();
     let mut cycle_checked = false;
     for _ in 0..MAX_SI_ITERS {
-        let (_a, _s, _f, ord, arr, slw, _fl) = relax(&arc_d, &arc_s, true, &seed_main, false, None, None);
+        let (_a, _s, _f, ord, arr, slw, _fl) = relax(&arc_d, &arc_s, true, &seed_main, false, None, None, None);
         if !cycle_checked {
             if ord.len() != n {
                 // name one cycle the order could not pass: its pins, in order
@@ -3287,7 +3310,7 @@ fn build_report(
     let (early_d, early_s) = {
         let (mut d, mut sl) = compute(&neg, &conv_net_slew, 0); // seeded from the late point
         for _ in 0..MAX_SI_ITERS {
-            let (_a, _s2, _f, _o, _ar, slw, _fl) = relax(&d, &sl, false, &seed_early, false, None, None);
+            let (_a, _s2, _f, _o, _ar, slw, _fl) = relax(&d, &sl, false, &seed_early, false, None, None, None);
             let e_net_slew: Vec<[f64; 2]> = (0..nn)
                 .map(|i| net_drv[i].map(|dv| slw[dv]).unwrap_or([0.0; 2]))
                 .collect();
@@ -3306,9 +3329,9 @@ fn build_report(
     // final late propagation consistent with the converged per-arc delays, and the
     // early (min-delay) propagation used for hold and for early clock arrivals.
     let (arrival, slew, from, order_late, late_arr, late_slew, late_from) =
-        relax(&arc_d, &arc_s, true, &seed_main, false, None, None);
+        relax(&arc_d, &arc_s, true, &seed_main, false, None, None, None);
     let (arr_min, slew_min, from_min, _ord_min, early_arr, early_slew, early_from) =
-        relax(&early_d, &early_s, false, &seed_early, false, None, None);
+        relax(&early_d, &early_s, false, &seed_early, false, None, None, None);
 
     // ---- per launching edge -----------------------------------------------
     // The reference keeps one arrival per clock EDGE that launched it (a tag per `ClockEdge`) and
@@ -3317,37 +3340,23 @@ fn build_report(
     // every register launches on the same edge. Where one launches on the fall, each edge is timed
     // alone — its own launches only (inputs launch on the rise), at the slews merged over all of
     // them — and every endpoint is checked once per launching edge.
+    // each edge's own launches: its input delays and, on both, the clock sources
+    let edge_seed = |e: usize, mm: usize| -> Vec<[f64; 2]> {
+        (0..n).map(|i| if clock_src.contains_key(&i) { [0.0; 2] } else { in_seed[e][mm][i] }).collect()
+    };
     let edge_runs: Vec<EdgeRun> = if fall_launch {
-        // each edge's own launches: its input delays and, on both, the clock sources
-        let edge_seed = |e: usize, mm: usize| -> Vec<[f64; 2]> {
-            (0..n).map(|i| if clock_src.contains_key(&i) { [0.0; 2] } else { in_seed[e][mm][i] }).collect()
-        };
         [0, 1]
             .into_iter()
             .map(|edge| {
                 let (sd, sd_early) = (edge_seed(edge, 1), edge_seed(edge, 0));
-                let (_, _, from, _, late_arr, _, late_from) = relax(&arc_d, &arc_s, true, &sd, false, Some(edge), Some(&late_slew));
+                let (_, _, from, _, late_arr, _, late_from) = relax(&arc_d, &arc_s, true, &sd, false, Some(edge), Some(&late_slew), None);
                 let (_, _, from_min, _, early_arr, _, early_from) =
-                    relax(&early_d, &early_s, false, &sd_early, false, Some(edge), Some(&early_slew));
+                    relax(&early_d, &early_s, false, &sd_early, false, Some(edge), Some(&early_slew), None);
                 EdgeRun { edge, late_arr, late_from, from, early_arr, early_from, from_min }
             })
             .collect()
     } else {
         Vec::new()
-    };
-    // every launching edge as a view: the one merged pass when all launch on the rise
-    let runs: Vec<EdgeView> = if edge_runs.is_empty() {
-        vec![EdgeView {
-            edge: 0,
-            late_arr: &late_arr,
-            late_from: &late_from,
-            from: &from,
-            early_arr: &early_arr,
-            early_from: &early_from,
-            from_min: &from_min,
-        }]
-    } else {
-        edge_runs.iter().map(EdgeRun::view).collect()
     };
 
     // Clock-launched arrivals: the same late propagation, but started at the clock
@@ -3357,7 +3366,7 @@ fn build_report(
     // arrival is that much later than a delay measured from the launch edge. On a block
     // with a forwarded clock this is routinely the critical path.
     let (clk_arr, clk_slew, clk_from, _clk_ord, _, _, _) = if have_clock_launch {
-        relax(&arc_d, &arc_s, true, &seed_clk, true, None, None)
+        relax(&arc_d, &arc_s, true, &seed_clk, true, None, None, None)
     } else {
         (
             vec![f64::NEG_INFINITY; n],
@@ -3685,6 +3694,232 @@ fn build_report(
     let launch_period = |lck: Option<usize>, v: usize, pred: &[Option<usize>], edge: usize, default: f64| {
         lck.map(clock_period_of).or_else(|| in_period(v, pred, edge)).unwrap_or(default)
     };
+    // The clock slew a check's margin is looked up at: the OTHER analysis's slew at the clock pin,
+    // the early one for a setup (recovery) check and the late one for hold (removal). The
+    // reference computes check arcs with the clock pin's slew of `Scene::checkClkSlewMinMax`,
+    // which under its default on-chip-variation analysis is the opposite of the check's own min /
+    // max; its report shows it, the setup check's capture clock path printing the min slews. Where
+    // the two analyses load a clock pin alike (no capacitance ranges, no derate) they agree.
+    let check_clk_slew = |cap: Option<usize>, cl: usize, setup: bool| -> f64 {
+        cap.map(|i| if setup { early_slew[i][cl] } else { late_slew[i][cl] }).unwrap_or(input_slew)
+    };
+    // A latch opens on the edge before the one its setup check is against (`cl`): the enable
+    // edge, a pulse width earlier (`CycleAccting`, latch setup role: the disable edge is the first
+    // after the launch, the enable the one before it). Its time as the check sees it carries the
+    // enable edge's own early latency and CRPR and the setup uncertainty (`Latches::latchRequired`
+    // / `latchBorrowInfo`). `rel_close`: the launch-to-disable relation, exceptions included.
+    // Returns (opening time, enable edge time from the launch, open latency, open CRPR).
+    let latch_opening = |cap: Option<usize>, lck: Option<usize>, cclk: Option<&str>, pc: f64, cl: usize, rel_close: f64| -> (f64, f64, f64, f64) {
+        let el = 1 - cl;
+        let high = clock_edge_time(job, cclk, 1, pc) - clock_edge_time(job, cclk, 0, pc);
+        let pulse_width = if el == 0 { high } else { pc - high };
+        let open_latency = cap.map(|i| early_arr[i][el]).filter(|a| a.is_finite()).unwrap_or(0.0);
+        let open_crpr = match (lck, cap) {
+            (Some(l), Some(c)) => crpr_credit(l, c, el, true),
+            _ => 0.0,
+        };
+        let rel_open = rel_close - pulse_width;
+        (open_latency + rel_open + open_crpr - job.setup_uncertainty, rel_open, open_latency, open_crpr)
+    };
+    // ---- latch D->Q: what passes through a transparent latch -------------------------------------
+    // The reference's arrival search postpones every latch output and, after each pass, takes
+    // its D->Q arc (`Search::findAllArrivals` -> `ArrivalVisitor` latch branch,
+    // `Latches::latchOutArrival`), re-pending a latch whose D moved, until nothing does. Only on
+    // the max analysis. The latch's enable state decides: data arriving while the latch is open
+    // (it borrows, `latchRequired`) passes to Q at the time it is required — its own arrival, or
+    // the opening plus the maximum borrow — plus the D->Q delay; it then carries the ENABLE
+    // clock edge's tag, so downstream it is launched by the latch's enable edge. Data that
+    // arrives before the opening borrows nothing and leaves Q at the enable's own G->Q time.
+    //
+    // Here: the latch window of each latch data pin on each launching edge's pass, the arrival
+    // that leaves its Q in the enable edge's frame, and the late passes again with those seeds,
+    // until no seed moves. The delays and slews are the converged ones (`fixed_slew`): the
+    // reference merges no D->Q slew into Q (`annotateDelaySlew` skips the latch D->Q role) and
+    // computes the D->Q delay at D's slew after the rest (`findLatchEdgeDelays`).
+    // Does the path to `v`'s edge `l` on `run` leave a latch through its D->Q arc (`seeds`: what
+    // its pass seeded the latch outputs with)? Its first launching pin is then the latch's enable
+    // and the latch output's arrival is the seed's.
+    //
+    // ⛔ SUCH A PATH HAS NO CRPR. The reference hands the data passing a latch the enable's clock
+    // information with the enable path as its CRPR clock path (`latchOutArrival`), and that
+    // enable path is the target clock's, the EARLY one; a setup check downstream compares it with
+    // its early capture path, and the pessimism between two early paths is nothing. Measured on
+    // an ASAP7 latch chain: open_crpr 3.386 ps on the enable's own launch, 0 through D->Q.
+    let via_latch = |run: &EdgeView, seeds: &[HashMap<usize, LatchSeed>], v: usize, l: usize| -> bool {
+        let Some(sd) = seeds.get(run.edge).filter(|m| !m.is_empty()) else { return false };
+        let (mut x, mut xl) = (v, l);
+        while let Some((u, ul)) = run.late_from[x][xl] {
+            if is_ck[u] {
+                return sd.get(&x).is_some_and(|s| s.from[xl] == Some((u, ul)) && s.arr[xl] == run.late_arr[x][xl]);
+            }
+            (x, xl) = (u, ul);
+        }
+        false
+    };
+    // (latch window per data edge, as the search clips a borrow: (opening, closing, enable edge
+    // time from the launch, enable lane))
+    let latch_window = |run: &EdgeView, seeds: &[HashMap<usize, LatchSeed>], idx: usize, setup: &[Constraint], ck: &Option<String>| -> [Option<(f64, f64, f64, usize)>; 2] {
+        let mut out = [None; 2];
+        let cap = ck_node(ck);
+        if unclocked_ck(cap) {
+            return out;
+        }
+        let pc = cap.map(clock_period_of).unwrap_or(period);
+        let lck = launch_ck(idx, run.from);
+        let pl = launch_period(lck, idx, run.from, run.edge, pc);
+        let (from_end, to_end) = (launch_end(lck, idx, run.from, run.edge), reg_end(cap, idx));
+        let Some(shift) = exc_shift(false, &from_end, &to_end, pl, pc) else {
+            return out;
+        };
+        let in_clk = lck.map_or_else(|| in_clock_at(start_port(idx, run.from), run.edge), |_| None);
+        if is_async(lck, cap) || is_async_named(in_clk, to_end.clock.as_deref()) {
+            return out;
+        }
+        for (l, o) in out.iter_mut().enumerate() {
+            let mut best = f64::INFINITY;
+            // the launching clock pin CRPR is taken against: none through a latch's D->Q
+            let crpr_lck = lck.filter(|_| !via_latch(run, seeds, idx, l));
+            for c in setup.iter().filter(|c| checks_edge(c, l == 0)) {
+                let cl = usize::from(c.clk_edge == ClkEdge::Fall);
+                let cap_early = cap.map(|i| early_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
+                let crpr = match (crpr_lck, cap) {
+                    (Some(a), Some(b)) => crpr_credit(a, b, cl, true),
+                    _ => 0.0,
+                };
+                let rel_close = edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), cl).0 + shift;
+                // ⛔ The setup time the SEARCH clips a latch's borrow with is not the one its check
+                // reports. The search takes the check arc's delay on the enable path's analysis
+                // (`Latches::latchSetupMargin`: the disable path's own delay-calculation point,
+                // the early one for a max path), so it is looked up at D's EARLY slew and that
+                // analysis's check clock slew, the late one; the check itself
+                // (`PathEndCheck::margin`) is at the data path's, D's late slew. 0.6 ps apart on
+                // an ASAP7 latch, and the downstream register's slack moves with it.
+                let margin = c.eval_edge(l == 0, check_clk_slew(cap, cl, false), early_slew[idx][l]);
+                let close = cap_early + rel_close + crpr - job.setup_uncertainty - margin;
+                if close < best {
+                    best = close;
+                    let (open, rel_open, _, _) = latch_opening(cap, crpr_lck, to_end.clock.as_deref(), pc, cl, rel_close);
+                    *o = Some((open, close, rel_open, 1 - cl));
+                }
+            }
+        }
+        out
+    };
+    // (data pin, its setup checks, its enable pin key, Q, the D->Q arc, the lanes it passes)
+    let latch_arcs: Vec<(usize, &[Constraint], &Option<String>, usize, &Arc, [[bool; 2]; 2])> = flop_d
+        .iter()
+        .filter(|(idx, _, _)| latch_d.contains(idx))
+        .flat_map(|(idx, setup, ck)| {
+            out_edges[*idx].iter().filter(|e| e.latch_dq).filter_map(move |e| match &e.kind {
+                EdgeKind::Cell(arc) => Some((*idx, setup.as_slice(), ck, e.to, arc.as_ref(), e.lanes)),
+                EdgeKind::Net(_) => None,
+            })
+        })
+        .collect();
+    // The D->Q delay (late) from data edge `il` to Q edge `ol`, at D's slew and Q's load.
+    // ⚠️ Lumped load, or the Ceff Q's own arcs were solved at under SPEF: the reference reduces
+    // the D->Q arc's load on its own.
+    let dq_delay = |d: usize, q: usize, arc: &Arc, il: usize, ol: usize| -> f64 {
+        let (dt, st) = if ol == 0 { (&arc.cell_rise, &arc.rise_transition) } else { (&arc.cell_fall, &arc.fall_transition) };
+        let sin = late_slew[d][il];
+        let load = if shield[q][1][ol].is_some() { ceff_used.borrow()[q][ol] } else { node_load[q][1][ol] };
+        let dly = if arc.ccs.is_empty() {
+            dt.lookup(sin, load)
+        } else {
+            arc.ccs.delay_slew(ol == 0, sin, load, 0.3, 0.7).map_or_else(|| dt.lookup(sin, load), |r| r.0)
+        };
+        let _ = st;
+        dly * cell_derate(true, 1)
+    };
+    // the seeds each launching edge's pass gives the latch outputs it launches, from every pass's
+    // data at their D pins
+    let latch_seeds = |views: &[EdgeView], prev: &[HashMap<usize, LatchSeed>]| -> Vec<HashMap<usize, LatchSeed>> {
+        let mut seeds: Vec<HashMap<usize, LatchSeed>> = vec![HashMap::new(); 2];
+        for run in views {
+            for &(d, setup, ck, q, arc, lanes) in &latch_arcs {
+                let Some(en) = ck_node(ck) else { continue };
+                for (il, w) in latch_window(run, prev, d, setup, ck).into_iter().enumerate() {
+                    let Some((open, close, rel_open, el)) = w else { continue };
+                    let a = run.late_arr[d][il];
+                    if !a.is_finite() || a <= open {
+                        continue; // closed when it arrives, or never: Q is its enable's
+                    }
+                    let required = open + (a - open).min(close - open);
+                    for ol in 0..2 {
+                        if !arc.out_edges.drives(ol == 0) || !arc.feeds(il == 0, ol == 0) || !lanes[il][ol] {
+                            continue;
+                        }
+                        let qa = required - rel_open + dq_delay(d, q, arc, il, ol);
+                        let sd = seeds[el].entry(q).or_insert(LatchSeed { arr: [f64::NEG_INFINITY; 2], from: [None; 2] });
+                        if qa > sd.arr[ol] {
+                            sd.arr[ol] = qa;
+                            sd.from[ol] = Some((en, el));
+                        }
+                    }
+                }
+            }
+        }
+        seeds
+    };
+    let mut latch_iters = 0usize;
+    let (arrival, from, order_late, late_arr, late_from, edge_runs, latch_seeds_final) = {
+        // the converged passes stay borrowed by the clock-path closures above (their clock pins are
+        // the same in every pass: nothing crosses into the clock network from a latch output)
+        let (mut arrival, mut from, mut order_late, mut late_arr, mut late_from, mut edge_runs) =
+            (arrival.clone(), from.clone(), order_late, late_arr.clone(), late_from.clone(), edge_runs);
+        let mut prev: Vec<HashMap<usize, LatchSeed>> = vec![HashMap::new(); 2];
+        const MAX_LATCH_PASSES: usize = 64;
+        while !latch_arcs.is_empty() && latch_iters < MAX_LATCH_PASSES {
+            let views: Vec<EdgeView> = if edge_runs.is_empty() {
+                vec![EdgeView { edge: 0, late_arr: &late_arr, late_from: &late_from, from: &from, early_arr: &early_arr, early_from: &early_from, from_min: &from_min }]
+            } else {
+                edge_runs.iter().map(EdgeRun::view).collect()
+            };
+            let seeds = latch_seeds(&views, &prev);
+            drop(views);
+            let same = seeds.iter().zip(&prev).all(|(a, b)| {
+                a.len() == b.len()
+                    && a.iter().all(|(k, x)| b.get(k).is_some_and(|y| x.from == y.from && (0..2).all(|l| x.arr[l] == y.arr[l] || (x.arr[l] - y.arr[l]).abs() < 1e-9)))
+            });
+            if same {
+                break;
+            }
+            latch_iters += 1;
+            // the merged pass: every edge's launches, each from its own edge
+            let mut merged = seeds[0].clone();
+            for (q, sd) in &seeds[1] {
+                let m = merged.entry(*q).or_insert(*sd);
+                for l in 0..2 {
+                    if sd.arr[l] > m.arr[l] {
+                        m.arr[l] = sd.arr[l];
+                        m.from[l] = sd.from[l];
+                    }
+                }
+            }
+            let (a, _s, f, o, la, _ls, lf) = relax(&arc_d, &arc_s, true, &seed_main, false, None, Some(&late_slew), Some(&merged));
+            (arrival, from, order_late, late_arr, late_from) = (a, f, o, la, lf);
+            for er in edge_runs.iter_mut() {
+                let sd = edge_seed(er.edge, 1);
+                let (_, _, f, _, la, _, lf) = relax(&arc_d, &arc_s, true, &sd, false, Some(er.edge), Some(&late_slew), Some(&seeds[er.edge]));
+                (er.from, er.late_arr, er.late_from) = (f, la, lf);
+            }
+            prev = seeds;
+        }
+        if latch_iters == MAX_LATCH_PASSES {
+            vyges_events::emit(&vyges_events::Event::new(
+                "vyges-sta-si",
+                vyges_events::Severity::Warn,
+                format!("latch arrivals did not settle in {MAX_LATCH_PASSES} passes; the last pass's are used"),
+            ).with_code("STA-LATCH-PASSES"));
+        }
+        (arrival, from, order_late, late_arr, late_from, edge_runs, prev)
+    };
+    // every launching edge as a view: the one merged pass when all launch on the rise
+    let runs: Vec<EdgeView> = if edge_runs.is_empty() {
+        vec![EdgeView { edge: 0, late_arr: &late_arr, late_from: &late_from, from: &from, early_arr: &early_arr, early_from: &early_from, from_min: &from_min }]
+    } else {
+        edge_runs.iter().map(EdgeRun::view).collect()
+    };
     // Required time PER LAUNCHING EDGE AND DATA EDGE: `req_run[r][v][l]` against `runs[r]`'s
     // arrivals; NaN = no check from that edge. `endpoint_req` keeps the tightest so the query API
     // still answers with one number; the scoring loop below uses them all.
@@ -3720,36 +3955,9 @@ fn build_report(
         }
     }
 
-    // The clock slew a check's margin is looked up at: the OTHER analysis's slew at the clock pin,
-    // the early one for a setup (recovery) check and the late one for hold (removal). The
-    // reference computes check arcs with the clock pin's slew of `Scene::checkClkSlewMinMax`,
-    // which under its default on-chip-variation analysis is the opposite of the check's own min /
-    // max; its report shows it, the setup check's capture clock path printing the min slews. Where
-    // the two analyses load a clock pin alike (no capacitance ranges, no derate) they agree.
-    let check_clk_slew = |cap: Option<usize>, cl: usize, setup: bool| -> f64 {
-        cap.map(|i| if setup { early_slew[i][cl] } else { late_slew[i][cl] }).unwrap_or(input_slew)
-    };
     // A latch data pin's check also needs the time the latch OPENS, per launching edge and data
     // edge (`latch_open[(r, v)][l]`, NaN = none): `req_run` holds the time it closes.
     let mut latch_open: HashMap<(usize, usize), [f64; 2]> = HashMap::new();
-    // A latch opens on the edge before the one its setup check is against (`cl`): the enable
-    // edge, a pulse width earlier (`CycleAccting`, latch setup role: the disable edge is the first
-    // after the launch, the enable the one before it). Its time as the check sees it carries the
-    // enable edge's own early latency and CRPR and the setup uncertainty (`Latches::latchRequired`
-    // / `latchBorrowInfo`). `rel_close`: the launch-to-disable relation, exceptions included.
-    // Returns (opening time, enable edge time from the launch, open latency, open CRPR).
-    let latch_opening = |cap: Option<usize>, lck: Option<usize>, cclk: Option<&str>, pc: f64, cl: usize, rel_close: f64| -> (f64, f64, f64, f64) {
-        let el = 1 - cl;
-        let high = clock_edge_time(job, cclk, 1, pc) - clock_edge_time(job, cclk, 0, pc);
-        let pulse_width = if el == 0 { high } else { pc - high };
-        let open_latency = cap.map(|i| early_arr[i][el]).filter(|a| a.is_finite()).unwrap_or(0.0);
-        let open_crpr = match (lck, cap) {
-            (Some(l), Some(c)) => crpr_credit(l, c, el, true),
-            _ => 0.0,
-        };
-        let rel_open = rel_close - pulse_width;
-        (open_latency + rel_open + open_crpr - job.setup_uncertainty, rel_open, open_latency, open_crpr)
-    };
     // setup capture uses the EARLY clock; CRPR adds back the shared-path pessimism;
     // the capture window is the launch→capture edge relation (one period intra-domain),
     // shifted out by a multicycle exception (false paths drop the endpoint).
@@ -3781,21 +3989,21 @@ fn build_report(
             checked = true;
             // Each check at ITS capture edge (`setup_rising` / `_falling`): that edge's clock
             // arrival and slew, and the relation from this run's launch edge to it.
-            let base_of = |c: &Constraint| -> (f64, f64) {
+            let base_of = |c: &Constraint, via: bool| -> (f64, f64) {
                 let cl = usize::from(c.clk_edge == ClkEdge::Fall);
                 let cap_early = cap.map(|i| early_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
                 let ck_slew = check_clk_slew(cap, cl, true);
-                let crpr = match (lck, cap) {
+                let crpr = match (lck.filter(|_| !via), cap) {
                     (Some(l), Some(c)) => crpr_credit(l, c, cl, true),
                     _ => 0.0,
                 };
                 (cap_early + edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), cl).0 + shift + crpr - job.setup_uncertainty, ck_slew)
             };
-            let open_of = |c: &Constraint| -> f64 {
+            let open_of = |c: &Constraint, via: bool| -> f64 {
                 let cl = usize::from(c.clk_edge == ClkEdge::Fall);
                 let cclk = to_end.clock.as_deref();
                 let rel_close = edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, cclk, cl).0 + shift;
-                latch_opening(cap, lck, cclk, pc, cl, rel_close).0
+                latch_opening(cap, lck.filter(|_| !via), cclk, pc, cl, rel_close).0
             };
             let is_latch = latch_d.contains(idx);
             // ⛔ PER DATA EDGE, for the same reason as hold: a check exists for one edge, so
@@ -3804,13 +4012,15 @@ fn build_report(
             let mut open = [f64::NAN; 2];
             for (l, req) in req_run[r][*idx].iter_mut().enumerate() {
                 *req = f64::INFINITY;
+                // a path through a latch's D->Q carries no CRPR (see `via_latch`)
+                let via = via_latch(run, &latch_seeds_final, *idx, l);
                 for c in setup.iter().filter(|c| checks_edge(c, l == 0)) {
-                    let (base, ck_slew) = base_of(c);
+                    let (base, ck_slew) = base_of(c, via);
                     let q = base - c.eval_edge(l == 0, ck_slew, late_slew[*idx][l]);
                     if q < *req {
                         *req = q;
                         if is_latch {
-                            open[l] = open_of(c);
+                            open[l] = open_of(c, via);
                         }
                     }
                 }
@@ -3821,7 +4031,7 @@ fn build_report(
             // capture the clock-side constants so the fast path can re-derive required time
             // from the (possibly changed) data slew without re-walking the clock network.
             if simple_ctx {
-                if let Some((base, ck_slew)) = setup.first().map(base_of) {
+                if let Some((base, ck_slew)) = setup.first().map(|c| base_of(c, false)) {
                     inc_setup.push(SetupRec {
                         idx: *idx,
                         base,
@@ -4492,9 +4702,11 @@ fn build_report(
             let shift = exc_shift(!max, &from_end, &to_end, pl, pc).unwrap_or(0.0);
             // (required, capture edge, capture clock arrival, relation) of each constraint;
             // the tightest one set the slack
+            // a path through a latch's D->Q carries no CRPR (see `via_latch`)
+            let crpr_lck = lck.filter(|_| !(max && via_latch(run, &latch_seeds_final, v, l)));
             let terms = cons.iter().filter(|c| checks_edge(c, l == 0)).map(|c| {
                 let cl = usize::from(c.clk_edge == ClkEdge::Fall);
-                let crpr = match (lck, cap) {
+                let crpr = match (crpr_lck, cap) {
                     (Some(a), Some(c)) => crpr_credit(a, c, cl, max),
                     _ => 0.0,
                 };
@@ -4522,7 +4734,7 @@ fn build_report(
             // opens the latch, with that edge's latency and CRPR, and the time borrowed in place
             // of the setup time; required is the opening plus the borrow.
             if max && latch_d.contains(&v) {
-                let (open, rel_open, open_latency, open_crpr) = latch_opening(cap, lck, to_end.clock.as_deref(), pc, cl, rel);
+                let (open, rel_open, open_latency, open_crpr) = latch_opening(cap, crpr_lck, to_end.clock.as_deref(), pc, cl, rel);
                 let (slack, borrow) = latch_setup(open, req, arrival - launch);
                 return Some(CheckPath {
                     max,

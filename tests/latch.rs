@@ -221,8 +221,11 @@ fn a_loop_closed_only_through_a_latch_is_no_loop() {
               DFF r (.CK(clk), .D(q), .Q(y));\n\
               endmodule";
     let t = build(nl, &job(10.0)).expect("a loop through a latch D->Q arc is not refused");
-    // the latch output is timed from its enable: G->Q, 0.3 after the clock edge
-    assert!(close(t.arrival(pin(&t, "l1/Q")), 0.3), "l1/Q late {}", t.arrival(pin(&t, "l1/Q")));
+    // the latch output is timed from its enable on the min analysis: G->Q, 0.3 after the edge
+    assert!(close(t.arrival_min(pin(&t, "l1/Q")), 0.3), "l1/Q early {}", t.arrival_min(pin(&t, "l1/Q")));
+    // and on the max analysis the loop borrows around until the window clips it: Q leaves at the
+    // closing (5 - 0.05) plus D->Q (0.25), the search passes settling there
+    assert!(close(t.arrival(pin(&t, "l1/Q")), 5.2), "l1/Q late {}", t.arrival(pin(&t, "l1/Q")));
 }
 
 /// On the min analysis nothing crosses a latch D->Q arc: the reference propagates it only for max
@@ -330,4 +333,38 @@ fn a_clock_gate_enable_sets_the_gated_clock_slew() {
     let ck = pin(&t, "r/CK");
     assert!(close(t.slew(ck), 0.05), "gated clock late slew {}", t.slew(ck));
     assert!(close(t.slew_min(ck), 0.02), "gated clock early slew {}", t.slew_min(ck));
+}
+
+/// Data that borrows passes the latch: the reference gives Q the time the data is required at D
+/// (its own arrival inside the window) plus the D->Q delay, as a path launched by the ENABLE
+/// edge (`Latches::latchOutArrival`; max analysis only). Data at 0.4 into a latch open from 0:
+/// Q at 0.4 + 0.25, later than its G->Q 0.3, and the register after it sees that.
+#[test]
+fn borrowed_data_passes_the_latch() {
+    let t = build(&BORROW_NL.replace("LATCH", "DLH"), &job(10.0)).unwrap();
+    let q = t.arrival(pin(&t, "l1/Q"));
+    assert!(close(q, 0.65), "l1/Q late {q}");
+    let s = t.slack(pin(&t, "r1/D")).unwrap();
+    assert!(close(s, 10.0 - 0.05 - 0.65), "r1/D slack {s}");
+    // the min analysis does not cross D->Q
+    let qm = t.arrival_min(pin(&t, "l1/Q"));
+    assert!(close(qm, 0.3), "l1/Q early {qm}");
+}
+
+/// Past the maximum borrow, what passes is clipped to it: Q leaves at the opening plus the
+/// maximum borrow (0.35, period 0.8), not at the data's own 0.4.
+#[test]
+fn what_passes_a_latch_is_clipped_to_the_window() {
+    let t = build(&BORROW_NL.replace("LATCH", "DLH"), &job(0.8)).unwrap();
+    let q = t.arrival(pin(&t, "l1/Q"));
+    assert!(close(q, 0.35 + 0.25), "l1/Q late {q}");
+}
+
+/// Data that arrives before the latch opens borrows nothing and does not pass: Q is its enable's
+/// G->Q alone (0.3 after the opening fall edge).
+#[test]
+fn data_before_the_opening_does_not_pass() {
+    let t = build(&BORROW_NL.replace("LATCH", "DLL"), &job(10.0)).unwrap();
+    let q = t.arrival(pin(&t, "l1/Q"));
+    assert!(close(q, 0.3), "l1/Q late {q}");
 }
