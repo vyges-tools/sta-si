@@ -2924,6 +2924,13 @@ fn build_report(
                 Some(map.into_iter().map(|(n, (d, s))| (n, (d * time_per_ns, s * time_per_ns))).collect())
             })
             .collect();
+        // Each net's reduced Elmore, per edge, made once and read by every load, as the
+        // reference reduces a driver's parasitic once (`ReduceToPiElmore`, one `setElmore` per
+        // load pin) and each load's arc reads its own (`findElmore`). Made on the first load
+        // that asks, from the same inputs every load of the net would give it: the driver node,
+        // this pass's coupling and the edge's receiver caps.
+        type NetElmore = Option<BTreeMap<String, f64>>;
+        let elmore_net: Vec<[std::cell::OnceCell<NetElmore>; 2]> = (0..nn).map(|_| Default::default()).collect();
         // each arc -> (net delay, degraded sink slew); slew 0 means "keep driver slew"
         arcs.iter()
             .enumerate()
@@ -2984,7 +2991,7 @@ fn build_report(
                         None => Some(labels[a.sink].as_str()),
                     };
                     if let (Some(dt), Some(st)) = (dnode, snode) {
-                        let taus = [0, 1].map(|l| rc.elmore(dt, xc[i], &net_pin_cap[i][mm][l]).and_then(|dl| dl.get(st).copied()));
+                        let taus = [0, 1].map(|l| elmore_net[i][l].get_or_init(|| rc.elmore(dt, xc[i], &net_pin_cap[i][mm][l])).as_ref().and_then(|dl| dl.get(st).copied()));
                         if let [Some(_), Some(_)] = taus {
                             {
                                 mark(RC_TREE_ELMORE);
