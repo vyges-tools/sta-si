@@ -4668,7 +4668,14 @@ fn build_report(
                 })
                 .unwrap_or_default();
             let e = edge.filter(|e| edges.contains(e)).or(edges.first().copied()).or(edge).unwrap_or(0);
-            if e == 1 { "falling edge-triggered flip-flop" } else { "rising edge-triggered flip-flop" }
+            // a latch is named by the level that opens it: the edge its enable launches on
+            let latch = inst_cell.get(inst).and_then(|c| lib.cell(c)).and_then(|c| c.seq_group.as_ref()).is_some_and(|g| g.latch);
+            match (latch, e == 1) {
+                (true, false) => "positive level-sensitive latch",
+                (true, true) => "negative level-sensitive latch",
+                (false, true) => "falling edge-triggered flip-flop",
+                (false, false) => "rising edge-triggered flip-flop",
+            }
         };
         let make = |max: bool, v: usize, r: usize, l: usize, group: &str| -> Option<CheckPath> {
             let run = &runs[r];

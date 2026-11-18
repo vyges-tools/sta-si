@@ -390,3 +390,23 @@ fn a_borrow_limit_closes_the_window() {
         assert!(close(q, 0.35), "{objects}: l1/Q late {q}");
     }
 }
+
+/// A path launched by a latch is reported from the latch, named as the reference names it: by
+/// the level that opens it (`negative level-sensitive latch` for one open while its enable is
+/// low), not as an edge-triggered register.
+#[test]
+fn a_latch_launch_is_reported_as_a_latch() {
+    // a negative latch (open from the fall at 5) fed early by a register, launching the
+    // register after it on its fall: that path (slack 5 - 0.05 - 0.3) is the worst setup end
+    let nl = "module t (clk, y); input clk; output y; wire a, q;\n\
+              DFF r0 (.CK(clk), .D(y), .Q(a));\n\
+              DLL l1 (.G(clk), .D(a), .Q(q));\n\
+              DFF r1 (.CK(clk), .D(q), .Q(y));\n\
+              endmodule";
+    let t = build(nl, &job(10.0)).unwrap();
+    let paths = &t.report().check_paths;
+    let p = paths.iter().find(|p| p.max).expect("a setup path");
+    assert_eq!((p.startpoint.as_str(), p.endpoint.as_str()), ("l1", "r1"));
+    assert!(p.start_reason.starts_with("negative level-sensitive latch"), "{}", p.start_reason);
+    assert!(close(p.slack, 4.65), "slack {}", p.slack);
+}
