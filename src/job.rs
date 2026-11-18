@@ -197,6 +197,9 @@ pub struct StaJob {
     /// `set_data_check` and `unset_data_check`, in file order, as the reader kept them: the
     /// checks [`crate::data_check`] makes between two data pins.
     pub data_check_cmds: Vec<crate::sdc::KeptCmd>,
+    /// `set_max_time_borrow`, in file order, as the reader kept them: the borrow limits of latch
+    /// data pins, enable pins, latch instances and clocks (`Sdc::latchBorrowLimit`).
+    pub max_time_borrow: Vec<crate::sdc::KeptCmd>,
     // clock uncertainty (SDC set_clock_uncertainty): tightens setup required time,
     // relaxes hold required time.
     pub setup_uncertainty: f64,
@@ -472,6 +475,7 @@ impl StaJob {
             case_values: Vec::new(),
             disabled_timing: Vec::new(),
             data_check_cmds: Vec::new(),
+            max_time_borrow: Vec::new(),
             setup_uncertainty: num("setup_uncertainty", 0.0),
             hold_uncertainty: num("hold_uncertainty", 0.0),
             late_derate: num("late_derate", 1.0),
@@ -750,6 +754,7 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
     }));
     job.disabled_timing.extend(sdc.disabled_timing.iter().cloned());
     job.data_check_cmds.extend(sdc.kept.iter().filter(|c| c.cmd.ends_with("_data_check")).cloned());
+    job.max_time_borrow.extend(sdc.kept.iter().filter(|c| c.cmd == "set_max_time_borrow").cloned());
 }
 
 /// The clock latency a constraint file states that this timer does not model, in words — `None`
@@ -989,6 +994,7 @@ pub const MODELLED_HERE: &[&str] = &[
     "unset_disable_timing",
     "set_data_check",
     "unset_data_check",
+    "set_max_time_borrow",
 ];
 
 /// The SDC's ideal clocks — every clock with a source that no `set_propagated_clock` names (by

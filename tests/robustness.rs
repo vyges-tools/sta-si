@@ -126,6 +126,7 @@ fn job() -> StaJob {
         case_values: Vec::new(),
         disabled_timing: Vec::new(),
         data_check_cmds: Vec::new(),
+        max_time_borrow: Vec::new(),
         setup_uncertainty: 0.0,
         hold_uncertainty: 0.0,
         sdc: None,

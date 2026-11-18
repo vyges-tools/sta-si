@@ -165,6 +165,7 @@ fn job(period: f64) -> StaJob {
         case_values: Vec::new(),
         disabled_timing: Vec::new(),
         data_check_cmds: Vec::new(),
+        max_time_borrow: Vec::new(),
         setup_uncertainty: 0.0,
         hold_uncertainty: 0.0,
         sdc: None,
@@ -367,4 +368,25 @@ fn data_before_the_opening_does_not_pass() {
     let t = build(&BORROW_NL.replace("LATCH", "DLL"), &job(10.0)).unwrap();
     let q = t.arrival(pin(&t, "l1/Q"));
     assert!(close(q, 0.3), "l1/Q late {q}");
+}
+
+/// `set_max_time_borrow` replaces the window's own maximum borrow (`Sdc::latchBorrowLimit`: the
+/// data pin's limit first, then the enable pin's, the instance's, the clock's). Data at 0.4 into
+/// a latch open from 0, limited to 0.1: it borrows 0.1, fails by 0.3, and leaves Q at 0.1 + 0.25.
+#[test]
+fn a_borrow_limit_closes_the_window() {
+    for objects in ["[get_pins l1/D]", "[get_pins l1/G]", "[get_cells l1]", "[get_clocks clk]"] {
+        let sdc = vyges_sta_si::sdc::Sdc::parse(&format!("set_max_time_borrow 0.1 {objects}\n")).unwrap();
+        let mut j = job(10.0);
+        j.max_time_borrow = sdc.kept.iter().filter(|c| c.cmd == "set_max_time_borrow").cloned().collect();
+        assert_eq!(j.max_time_borrow.len(), 1, "{objects}: the command is kept");
+        let t = build(&BORROW_NL.replace("LATCH", "DLH"), &j).unwrap();
+        let d = pin(&t, "l1/D");
+        let s = t.slack(d).unwrap();
+        assert!(close(s, -0.3), "{objects}: slack {s}");
+        let b = borrow_of(&t, d).unwrap();
+        assert!(close(b, 0.1), "{objects}: borrow {b}");
+        let q = t.arrival(pin(&t, "l1/Q"));
+        assert!(close(q, 0.35), "{objects}: l1/Q late {q}");
+    }
 }

@@ -3709,6 +3709,64 @@ fn build_report(
     // enable edge's own early latency and CRPR and the setup uncertainty (`Latches::latchRequired`
     // / `latchBorrowInfo`). `rel_close`: the launch-to-disable relation, exceptions included.
     // Returns (opening time, enable edge time from the launch, open latency, open CRPR).
+    // `set_max_time_borrow`: the borrow limit of a latch data pin, as the reference looks it up
+    // (`Sdc::latchBorrowLimit`): the data pin's, else the enable pin's, else the latch
+    // instance's, else the enable clock's; the last command naming an object wins. A limit
+    // replaces the window's own maximum (pulse width less latency, CRPR and setup differences),
+    // larger or smaller.
+    let (pin_borrow, inst_borrow, clk_borrow) = {
+        let mut pins: HashMap<usize, f64> = HashMap::new();
+        let mut insts: HashMap<String, f64> = HashMap::new();
+        // (clock name pattern, limit), matched against the enable's clock when looked up
+        let mut clks: Vec<(String, f64)> = Vec::new();
+        let inst_names: Vec<&str> = nl.insts.iter().map(|i| i.name.as_str()).collect();
+        let inst_pins: Vec<(usize, &str)> = nl.insts.iter().enumerate().flat_map(|(k, i)| i.conns.iter().map(move |(p, _)| (k, p.as_str()))).collect();
+        let mut warn = Vec::new();
+        for c in &job.max_time_borrow {
+            let Some(limit) = c.number(0) else {
+                warn.push("set_max_time_borrow: no limit; not applied".to_string());
+                continue;
+            };
+            let Some(crate::sdc::KeptArg::Objects(o)) = c.args.get(1) else {
+                warn.push(format!("set_max_time_borrow {limit}: objects not named by get_pins / get_cells / get_clocks; not applied"));
+                continue;
+            };
+            for name in &o.names {
+                match o.accessor.as_str() {
+                    "get_pins" => {
+                        for j in vyges_loom::sdc::pins_matching(name, &inst_names, &inst_pins) {
+                            if let Some(&i) = key2idx.get(&pin_key(inst_names[inst_pins[j].0], inst_pins[j].1)) {
+                                pins.insert(i, limit);
+                            }
+                        }
+                    }
+                    "get_cells" => {
+                        for i in inst_names.iter().filter(|i| vyges_loom::sdc::object_matches(name, i)) {
+                            insts.insert(i.to_string(), limit);
+                        }
+                    }
+                    "get_clocks" => clks.push((name.clone(), limit)),
+                    a => warn.push(format!("set_max_time_borrow {limit} [{a} {name}]: not applied")),
+                }
+            }
+        }
+        for m in &warn {
+            vyges_events::emit(&vyges_events::Event::new("vyges-sta-si", vyges_events::Severity::Warn, m.clone()).with_code("STA-SDC-NOT-APPLIED"));
+        }
+        (pins, insts, clks)
+    };
+    let borrow_limit = |d: usize, en: Option<usize>, clk: Option<&str>| -> Option<f64> {
+        pin_borrow
+            .get(&d)
+            .or_else(|| en.and_then(|e| pin_borrow.get(&e)))
+            .or_else(|| inst_borrow.get(instance_of(&labels[d])))
+            .copied()
+            // the enable's clock, named as its path group names it
+            .or_else(|| {
+                let c = clk.unwrap_or(primary_clock);
+                clk_borrow.iter().rev().find(|(p, _)| vyges_loom::sdc::object_matches(p, c)).map(|(_, l)| *l)
+            })
+    };
     let latch_opening = |cap: Option<usize>, lck: Option<usize>, cclk: Option<&str>, pc: f64, cl: usize, rel_close: f64| -> (f64, f64, f64, f64) {
         let el = 1 - cl;
         let high = clock_edge_time(job, cclk, 1, pc) - clock_edge_time(job, cclk, 0, pc);
@@ -3799,6 +3857,7 @@ fn build_report(
                 if close < best {
                     best = close;
                     let (open, rel_open, _, _) = latch_opening(cap, crpr_lck, to_end.clock.as_deref(), pc, cl, rel_close);
+                    let close = borrow_limit(idx, cap, to_end.clock.as_deref()).map_or(close, |lim| open + lim);
                     *o = Some((open, close, rel_open, 1 - cl));
                 }
             }
@@ -4026,6 +4085,14 @@ fn build_report(
                 }
             }
             if is_latch {
+                // a borrow limit closes the window at the opening plus the limit
+                if let Some(lim) = borrow_limit(*idx, cap, to_end.clock.as_deref()) {
+                    for (req, o) in req_run[r][*idx].iter_mut().zip(open) {
+                        if !o.is_nan() {
+                            *req = o + lim;
+                        }
+                    }
+                }
                 latch_open.insert((r, *idx), open);
             }
             // capture the clock-side constants so the fast path can re-derive required time
@@ -4735,6 +4802,7 @@ fn build_report(
             // of the setup time; required is the opening plus the borrow.
             if max && latch_d.contains(&v) {
                 let (open, rel_open, open_latency, open_crpr) = latch_opening(cap, crpr_lck, to_end.clock.as_deref(), pc, cl, rel);
+                let req = borrow_limit(v, cap, to_end.clock.as_deref()).map_or(req, |lim| open + lim);
                 let (slack, borrow) = latch_setup(open, req, arrival - launch);
                 return Some(CheckPath {
                     max,
