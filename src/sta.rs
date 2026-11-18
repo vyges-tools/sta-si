@@ -2865,6 +2865,14 @@ fn build_report(
         v
     };
     let rc_branch = std::cell::RefCell::new(vec![RC_NONE; n_arcs]);
+    // Each load's Elmore, kept across passes while its net's reduction inputs stand, as the
+    // reference keeps a driver's reduced parasitic until the parasitic or its load changes.
+    // Per arc and analysis: the two edges' time constants. Per net and analysis: the coupling
+    // the reduction was made with (bits), the one input that moves between passes; the driver
+    // node and the receiver caps are fixed for the run.
+    #[allow(clippy::type_complexity)]
+    let tau_kept: std::cell::RefCell<Vec<[Option<[Option<f64>; 2]>; 2]>> = std::cell::RefCell::new(vec![[None; 2]; n_arcs]);
+    let xc_kept: std::cell::RefCell<Vec<[Option<u64>; 2]>> = std::cell::RefCell::new(vec![[None; 2]; nn]);
     // `rc_model: transient` in the job asks for our waveform model in front of the
     // reference one. Default is the reference.
     let transient_first = job.rc_model.eq_ignore_ascii_case("transient");
@@ -2931,6 +2939,24 @@ fn build_report(
         // this pass's coupling and the edge's receiver caps.
         type NetElmore = Option<BTreeMap<String, f64>>;
         let elmore_net: Vec<[std::cell::OnceCell<NetElmore>; 2]> = (0..nn).map(|_| Default::default()).collect();
+        // a net whose coupling moved since its loads' Elmore was kept: reduce it again
+        {
+            let mut xk = xc_kept.borrow_mut();
+            let mut tk = tau_kept.borrow_mut();
+            let stale: Vec<bool> = (0..nn)
+                .map(|i| {
+                    let b = xc[i].to_bits();
+                    let st = xk[i][mm] != Some(b);
+                    xk[i][mm] = Some(b);
+                    st
+                })
+                .collect();
+            for (k, a) in arcs.iter().enumerate() {
+                if stale[a.net_idx] {
+                    tk[k][mm] = None;
+                }
+            }
+        }
         // each arc -> (net delay, degraded sink slew); slew 0 means "keep driver slew"
         arcs.iter()
             .enumerate()
@@ -2991,7 +3017,12 @@ fn build_report(
                         None => Some(labels[a.sink].as_str()),
                     };
                     if let (Some(dt), Some(st)) = (dnode, snode) {
-                        let taus = [0, 1].map(|l| elmore_net[i][l].get_or_init(|| rc.elmore(dt, xc[i], &net_pin_cap[i][mm][l])).as_ref().and_then(|dl| dl.get(st).copied()));
+                        let kept = tau_kept.borrow()[k][mm];
+                        let taus = kept.unwrap_or_else(|| {
+                            let t = [0, 1].map(|l| elmore_net[i][l].get_or_init(|| rc.elmore(dt, xc[i], &net_pin_cap[i][mm][l])).as_ref().and_then(|dl| dl.get(st).copied()));
+                            tau_kept.borrow_mut()[k][mm] = Some(t);
+                            t
+                        });
                         if let [Some(_), Some(_)] = taus {
                             {
                                 mark(RC_TREE_ELMORE);
