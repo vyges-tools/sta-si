@@ -5,7 +5,7 @@
 use vyges_sta_si::job::StaJob;
 use vyges_sta_si::sta::{StaError, Timer};
 
-/// INV, a rising-edge DFF and two level-sensitive latches: DLH open while G is high, DLL open
+/// INV, AND2, a rising-edge DFF and two level-sensitive latches: DLH open while G is high, DLL open
 /// while G is low. Constant tables, so every delay below can be read off them.
 const LIB: &str = r#"
 library (latch) {
@@ -21,6 +21,27 @@ library (latch) {
         related_pin : "A"; timing_sense : negative_unate;
         cell_rise (t)       { index_1 ("0.01, 0.1"); index_2 ("0.001, 0.01"); values ( "0.1, 0.1", "0.1, 0.1" ); }
         cell_fall (t)       { index_1 ("0.01, 0.1"); index_2 ("0.001, 0.01"); values ( "0.1, 0.1", "0.1, 0.1" ); }
+        rise_transition (t) { index_1 ("0.01, 0.1"); index_2 ("0.001, 0.01"); values ( "0.02, 0.02", "0.02, 0.02" ); }
+        fall_transition (t) { index_1 ("0.01, 0.1"); index_2 ("0.001, 0.01"); values ( "0.02, 0.02", "0.02, 0.02" ); }
+      }
+    }
+  }
+  cell (AND2) {
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (B) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output; function : "A & B";
+      timing () {
+        related_pin : "A"; timing_sense : positive_unate;
+        cell_rise (t)       { index_1 ("0.01, 0.1"); index_2 ("0.001, 0.01"); values ( "0.3, 0.3", "0.3, 0.3" ); }
+        cell_fall (t)       { index_1 ("0.01, 0.1"); index_2 ("0.001, 0.01"); values ( "0.3, 0.3", "0.3, 0.3" ); }
+        rise_transition (t) { index_1 ("0.01, 0.1"); index_2 ("0.001, 0.01"); values ( "0.02, 0.02", "0.02, 0.02" ); }
+        fall_transition (t) { index_1 ("0.01, 0.1"); index_2 ("0.001, 0.01"); values ( "0.02, 0.02", "0.02, 0.02" ); }
+      }
+      timing () {
+        related_pin : "B"; timing_sense : positive_unate;
+        cell_rise (t)       { index_1 ("0.01, 0.1"); index_2 ("0.001, 0.01"); values ( "0.3, 0.3", "0.3, 0.3" ); }
+        cell_fall (t)       { index_1 ("0.01, 0.1"); index_2 ("0.001, 0.01"); values ( "0.3, 0.3", "0.3, 0.3" ); }
         rise_transition (t) { index_1 ("0.01, 0.1"); index_2 ("0.001, 0.01"); values ( "0.02, 0.02", "0.02, 0.02" ); }
         fall_transition (t) { index_1 ("0.01, 0.1"); index_2 ("0.001, 0.01"); values ( "0.02, 0.02", "0.02, 0.02" ); }
       }
@@ -272,4 +293,24 @@ fn data_before_the_latch_opens_is_checked_against_the_opening() {
     assert!(close(s, 4.6), "slack {s}");
     let b = borrow_of(&t, d).unwrap();
     assert!(close(b, 0.0), "borrow {b}");
+}
+
+/// A clock gate: a latch holding the enable, ANDed with the clock. The enable is a DATA path into
+/// the clock network, and the reference takes a register clock pin's arrival from the clock's own
+/// path alone (a data path on a clock pin launches nothing): the gated register's clock latency
+/// is the AND gate's clock arc (0.3 here: the INV-like table of AND2 below), not the later enable
+/// path through the latch (G->Q 0.3 + 0.3).
+#[test]
+fn a_clock_gate_enable_is_not_the_gated_clock() {
+    let nl = "module t (clk, en, d, y); input clk, en, d; output y; wire en_q, gclk;\n\
+              DLL l1 (.G(clk), .D(en), .Q(en_q));\n\
+              AND2 g (.A(clk), .B(en_q), .Y(gclk));\n\
+              DFF r (.CK(gclk), .D(d), .Q(y));\n\
+              endmodule";
+    let t = build(nl, &job(10.0)).unwrap();
+    let ck = pin(&t, "r/CK");
+    assert!(close(t.arrival(ck), 0.3), "gated clock late arrival {}", t.arrival(ck));
+    assert!(close(t.arrival_min(ck), 0.3), "gated clock early arrival {}", t.arrival_min(ck));
+    // the register launches from the clock path: CK->Q 0.2 after it
+    assert!(close(t.arrival(pin(&t, "r/Q")), 0.5), "r/Q {}", t.arrival(pin(&t, "r/Q")));
 }

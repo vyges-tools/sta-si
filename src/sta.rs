@@ -2363,6 +2363,14 @@ fn build_report(
     let unclocked_ck = |ck: Option<usize>| -> bool {
         clock_declared && ck.is_some_and(|c| !clock_reached[c])
     };
+    // A DATA arrival entering the clock network — a clock gate's enable, from a latch or a
+    // register, into its AND gate — is not a clock arrival there. The reference propagates it as
+    // a data path, and a data path on a register's clock pin launches nothing (the CK->Q rule
+    // above); only the clock's own path sets the clock pin's arrival and slew. Merged with it here,
+    // the gate's enable path became the gated registers' clock latency: an ASAP7 latch clock gate
+    // put 46 ps on its registers' launch and on their hold requirement. Such an edge is therefore
+    // not taken (the clock gating check the reference infers at the gate is not made here).
+    let data_into_clock = |u: usize, v: usize| -> bool { clock_declared && !clock_reached[u] && clock_reached[v] };
 
     #[allow(clippy::type_complexity)]
     // `launch` (lane 0 rise, 1 fall) times only the paths that clock edge launches — a
@@ -2461,6 +2469,14 @@ fn build_report(
                 // Outside the order (see `Edge::latch_dq`), and nothing crosses it here: a latch
                 // output's arrivals come through its enable.
                 if e.latch_dq {
+                    continue;
+                }
+                // in the order, but carrying nothing (see `data_into_clock`)
+                if data_into_clock(u, e.to) {
+                    indeg_work[e.to] -= 1;
+                    if indeg_work[e.to] == 0 {
+                        order.push(e.to);
+                    }
                     continue;
                 }
                 let v = e.to;
@@ -4023,7 +4039,7 @@ fn build_report(
     let pba_wns = if job.pba {
         let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
         for (u, edges) in out_edges.iter().enumerate() {
-            for e in edges.iter().filter(|e| e.searched() && !e.latch_dq) {
+            for e in edges.iter().filter(|e| e.searched() && !e.latch_dq && !data_into_clock(u, e.to)) {
                 preds[e.to].push(u);
             }
         }
@@ -4631,7 +4647,7 @@ fn build_report(
         let mut succ: Vec<Vec<usize>> = vec![Vec::new(); n];
         let mut in_edges: Vec<Vec<InEdge>> = (0..n).map(|_| Vec::new()).collect();
         for (u, edges) in out_edges.iter().enumerate() {
-            for e in edges {
+            for e in edges.iter().filter(|e| !data_into_clock(u, e.to)) {
                 succ[u].push(e.to);
                 in_edges[e.to].push(match &e.kind {
                     EdgeKind::Net(_) => InEdge::Net { from: u },
