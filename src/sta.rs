@@ -140,6 +140,48 @@ fn is_latch_d_to_q(cell: &crate::liberty::Cell, arc: &Arc) -> bool {
     arc.clk_edge.is_none() && is_latch_data_pin(cell, &arc.related_pin)
 }
 
+/// Is `func` (a gate output's function) a clock gate of `clk` by `enable`, and if so the logic
+/// value of the enable that lets the clock through: the reference's `GatedClk::isClkGatingFunc`.
+/// Outer negations are stripped; the gate must then be an AND (active value one) or an OR (zero).
+/// Its operands are the subexpressions under the top operator that are not that operator; the
+/// clock must be one of them, plain or negated (a negated clock flips the active value), and the
+/// enable must appear somewhere among them.
+fn clk_gating_active_one(func: &vyges_loom::liberty_func::Func, enable: &str, clk: &str) -> Option<bool> {
+    use vyges_loom::liberty_func::Func;
+    let mut f = func;
+    while let Func::Not(x) = f {
+        f = x;
+    }
+    let (mut one, and) = match f {
+        Func::And(..) => (true, true),
+        Func::Or(..) => (false, false),
+        _ => return None,
+    };
+    fn operands<'a>(and: bool, e: &'a Func, out: &mut Vec<&'a Func>) {
+        match (and, e) {
+            (true, Func::And(a, b)) | (false, Func::Or(a, b)) => {
+                operands(and, a, out);
+                operands(and, b, out);
+            }
+            _ => out.push(e),
+        }
+    }
+    let mut ops = Vec::new();
+    operands(and, f, &mut ops);
+    let mut need = false;
+    for e in &ops {
+        match e {
+            Func::Not(x) if matches!(&**x, Func::Port(p) if p == clk) => {
+                need = true;
+                one = !one;
+            }
+            Func::Port(p) if p == clk => need = true,
+            _ => {}
+        }
+    }
+    (need && ops.iter().any(|e| e.ports().contains(&enable))).then_some(one)
+}
+
 /// Is `pin` a latch's data input: named in the `data_in` of the cell's `latch` group. Its setup
 /// check is a latch check (`PathEndLatchCheck`, made where `isLatchData` holds), not a register's.
 fn is_latch_data_pin(cell: &crate::liberty::Cell, pin: &str) -> bool {
@@ -242,16 +284,27 @@ pub(crate) fn clock_edge_time(job: &StaJob, clk: Option<&str>, edge: usize, peri
 }
 
 pub(crate) fn cycle_accting(src_period: f64, src_time: f64, tgt_period: f64, tgt_time: f64) -> (f64, f64) {
+    let (setup, hold, _) = cycle_accting_gated(src_period, src_time, tgt_period, tgt_time, tgt_time);
+    (setup, hold)
+}
+
+/// [`cycle_accting`], with the clock gating hold relation as well (`tgt_opp_time`: the target
+/// clock's OTHER edge, which opens the gate). The reference makes a gated clock's hold check in
+/// the same cycle as its setup check (`CycleAccting::findDelays`, the gated clock hold role): of
+/// the target edges whose cycle's opposite edge is at or before the source edge, the one with the
+/// least `src - tgt`, which may be negative (an AND gate's enable launched on the rise is held
+/// against the fall after it). Returns (setup, hold, gated hold) as `src - tgt` for the holds.
+pub(crate) fn cycle_accting_gated(src_period: f64, src_time: f64, tgt_period: f64, tgt_time: f64, tgt_opp_time: f64) -> (f64, f64, f64) {
     let less = |a: f32, b: f32| a < b && !fuzzy_equal(a, b);
     let less_equal = |a: f32, b: f32| a < b || fuzzy_equal(a, b);
     let greater = |a: f32, b: f32| a > b && !fuzzy_equal(a, b);
     // `MinMax::min()->initValue()`: the delays start at INF and shrink. Compared in float as the
     // reference compares them; the edges chosen are returned as their f64 difference, the
     // arithmetic the rest of this timer is in (a same-clock setup relation is the period exactly).
-    let (mut setup, mut hold) = (1e30f32, 1e30f32);
-    let (mut setup_t, mut hold_t) = (tgt_period, 0.0);
+    let (mut setup, mut hold, mut gclk) = (1e30f32, 1e30f32, 1e30f32);
+    let (mut setup_t, mut hold_t, mut gclk_t) = (tgt_period, 0.0, 0.0);
     if !(tgt_period > 0.0 && src_period > 0.0) {
-        return (tgt_period, 0.0);
+        return (tgt_period, 0.0, 0.0);
     }
     let first_cycle = |time: f64, period: f64| -> i64 {
         if time < 0.0 {
@@ -269,13 +322,14 @@ pub(crate) fn cycle_accting(src_period: f64, src_time: f64, tgt_period: f64, tgt
     while tgt_cycle <= tgt_max_cycle {
         let tgt_cycle_start = tgt_cycle as f64 * tgt_period;
         let tgt_t = tgt_cycle_start + tgt_time;
+        let tgt_opp_t = tgt_cycle_start + tgt_opp_time;
         let mut src_cycle = first_cycle(src_time, src_period);
         loop {
             let src_cycle_start = src_cycle as f64 * src_period;
             let src_t = src_cycle_start + src_time;
             // both found, and the two clocks back in step
             if tgt_past_src && src_past_tgt && fuzzy_equal(src_cycle_start as f32, tgt_cycle_start as f32) {
-                return (setup_t, hold_t);
+                return (setup_t, hold_t, gclk_t);
             }
             if greater(src_cycle_start as f32, (tgt_cycle_start + tgt_period) as f32) && src_past_tgt {
                 break;
@@ -298,12 +352,20 @@ pub(crate) fn cycle_accting(src_period: f64, src_time: f64, tgt_period: f64, tgt
                     hold_t = src_t - tgt_t;
                 }
             }
+            // gated clock hold: the same cycle as the setup check
+            if less_equal(tgt_opp_t as f32, src_t as f32) {
+                let d = (src_t - tgt_t) as f32;
+                if less(d, gclk) {
+                    gclk = d;
+                    gclk_t = src_t - tgt_t;
+                }
+            }
             src_cycle += 1;
         }
         tgt_cycle += 1;
     }
     // no common period within the cycle limit: what was found
-    (setup_t, hold_t)
+    (setup_t, hold_t, gclk_t)
 }
 
 /// What reaches a latch output through its D->Q arc on one launching edge's pass, per Q edge:
@@ -2384,6 +2446,74 @@ fn build_report(
     let data_into_clock = |u: usize, v: usize| -> bool { clock_declared && !clock_reached[u] && clock_reached[v] };
     let simple_ctx = simple_ctx && !out_edges.iter().enumerate().any(|(u, es)| es.iter().any(|e| data_into_clock(u, e.to)));
 
+    // ---- inferred clock gating checks ----------------------------------------------------------
+    // The reference infers a setup and a hold check at a gate's enable input wherever a data
+    // path gates a clock (`GatedClk::isGatedClkEnable`, `VisitPathEnds::visitGatedClkEnd`, on by
+    // default): an input that is not a clock, with a combinational arc to an output that is in
+    // the clock network, whose function is an AND or an OR gating a clock input of the same
+    // instance by it (`clk_gating_active_one`), that clock input carrying the clock to a register
+    // clock pin downstream. The check is made against the clock at that clock input: an AND's
+    // enable (active value one) must settle before the clock rises there (setup) and hold until
+    // it falls (hold); an OR's the opposite edges. Margin zero (`set_clock_gating_check` is not
+    // applied here); the reference reports these in their own path group, `gated clock`.
+    // Made here as a register check of zero margin, against the clock pin's arrival at that edge.
+    let mut gating_end: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    if clock_declared {
+        // a clock pin that carries the clock on to a register clock pin
+        let reaches_ck = |c: usize| -> bool {
+            let mut seen = std::collections::HashSet::new();
+            let mut stack = vec![c];
+            while let Some(u) = stack.pop() {
+                if is_ck[u] {
+                    return true;
+                }
+                for e in out_edges[u].iter().filter(|e| e.searched() && !e.latch_dq && clock_reached[e.to]) {
+                    if seen.insert(e.to) {
+                        stack.push(e.to);
+                    }
+                }
+            }
+            false
+        };
+        let zero = |edge: ClkEdge, clk: &str| Constraint {
+            rise: crate::liberty::Table { values: vec![vec![0.0]], ..Default::default() },
+            fall: crate::liberty::Table { values: vec![vec![0.0]], ..Default::default() },
+            clk_edge: edge,
+            related_pin: clk.to_string(),
+            ..Default::default()
+        };
+        for inst in &nl.insts {
+            let Some(cell) = lib.cell(&inst.cell) else { continue };
+            for (en, _) in &inst.conns {
+                let Some(&ei) = key2idx.get(&pin_key(&inst.name, en)) else { continue };
+                if clock_reached[ei] || const_driver.get(ei).copied().unwrap_or(false) || cell.pins.get(en).map(|p| p.direction) != Some(Dir::In) {
+                    continue;
+                }
+                // the enable's combinational arcs, to an output in the clock network
+                let found = cell.pins.iter().filter(|(_, p)| p.direction == Dir::Out).find_map(|(out, p)| {
+                    let oi = *key2idx.get(&pin_key(&inst.name, out))?;
+                    if !clock_reached[oi] || !p.arcs.iter().any(|a| a.related_pin == *en && a.clk_edge.is_none()) {
+                        return None;
+                    }
+                    let func = vyges_loom::liberty_func::Func::parse_in(p.function.as_deref()?.trim_matches('"'), |q| cell.pins.contains_key(q))?;
+                    func.ports().into_iter().filter(|c| c != en).find_map(|c| {
+                        let one = clk_gating_active_one(&func, en, c)?;
+                        let ci = *key2idx.get(&pin_key(&inst.name, c))?;
+                        (clock_reached[ci] && reaches_ck(ci)).then(|| (c.to_string(), one))
+                    })
+                });
+                if let Some((clk, one)) = found {
+                    let (setup_edge, hold_edge) = if one { (ClkEdge::Rise, ClkEdge::Fall) } else { (ClkEdge::Fall, ClkEdge::Rise) };
+                    let ck_key = Some(pin_key(&inst.name, &clk));
+                    is_endpoint[ei] = true;
+                    flop_d.push((ei, vec![zero(setup_edge, &clk)], ck_key.clone()));
+                    flop_hold.push((ei, vec![zero(hold_edge, &clk)], ck_key));
+                    gating_end.insert(ei);
+                }
+            }
+        }
+    }
+
     #[allow(clippy::type_complexity)]
     // `launch` (lane 0 rise, 1 fall) times only the paths that clock edge launches — a
     // register's CK->Q fires only if its edge is that one — for the reference's per-edge arrivals
@@ -3604,6 +3734,8 @@ fn build_report(
     let path_group = |v: usize, cap: Option<usize>| -> String {
         if async_end.contains(&v) {
             "asynchronous".to_string()
+        } else if gating_end.contains(&v) {
+            "gated clock".to_string()
         } else {
             cap.and_then(clock_name_of).unwrap_or(primary_clock).to_string()
         }
@@ -3621,6 +3753,16 @@ fn build_report(
     let edge_relation = |pl: f64, lclk: Option<&str>, ll: usize, pc: f64, cclk: Option<&str>, cl: usize| -> (f64, f64) {
         let (setup, hold) = cycle_accting(pl, clock_edge_time(job, lclk, ll, pl), pc, clock_edge_time(job, cclk, cl, pc));
         (setup, -hold)
+    };
+    // The hold relation of check end `v`: a clock gating hold is in its setup check's cycle
+    // (`cycle_accting_gated`), every other hold `edge_relation`'s.
+    let hold_relation = |v: usize, pl: f64, lclk: Option<&str>, ll: usize, pc: f64, cclk: Option<&str>, cl: usize| -> f64 {
+        if gating_end.contains(&v) {
+            let ct = |e: usize| clock_edge_time(job, cclk, e, pc);
+            -cycle_accting_gated(pl, clock_edge_time(job, lclk, ll, pl), pc, ct(cl), ct(1 - cl)).2
+        } else {
+            edge_relation(pl, lclk, ll, pc, cclk, cl).1
+        }
     };
 
     // worst (max) constraint over a pin's groups, interpolated at the operating
@@ -4512,7 +4654,7 @@ fn build_report(
                 };
                 let cap_late = cap.map(|i| late_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
                 let ck_slew = check_clk_slew(cap, cl, false);
-                let hold_rel = edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), cl).1 + shift;
+                let hold_rel = hold_relation(idx, pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), cl) + shift;
                 (crpr - cap_late - hold_rel - job.hold_uncertainty, ck_slew)
             };
             let mut reached = false;
@@ -4831,7 +4973,7 @@ fn build_report(
                 } else {
                     let cap_late = cap.map(|i| late_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
                     let ck_slew = check_clk_slew(cap, cl, false);
-                    let rel = edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), cl).1 + shift;
+                    let rel = hold_relation(v, pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), cl) + shift;
                     let req = cap_late + rel + job.hold_uncertainty - crpr + c.eval_edge(l == 0, ck_slew, early_slew[v][l]);
                     (req, cl, cap_late, rel, crpr)
                 }
@@ -5165,3 +5307,44 @@ mod loop_naming {
         assert!(m.contains("through 4 pin(s): g1/A -> g1/Y -> g2/A -> g2/Y -> g1/A"), "{m}");
     }
 }
+
+/// The reference's clock gating function rule (`GatedClk::isClkGatingFunc`) and its gated clock
+/// hold cycle (`CycleAccting::findDelays`).
+#[cfg(test)]
+mod clock_gating {
+    use super::{clk_gating_active_one, cycle_accting_gated};
+    use vyges_loom::liberty_func::Func;
+
+    fn f(s: &str) -> Func {
+        Func::parse_in(s, |_| true).unwrap()
+    }
+
+    /// AND gates with the enable at one, OR at zero; outer negations are stripped (a NAND is an
+    /// AND, a NOR an OR); a negated clock operand flips the value; a function that is neither,
+    /// or an enable the operands do not name, is no clock gate.
+    #[test]
+    fn gate_function() {
+        assert_eq!(clk_gating_active_one(&f("A & B"), "B", "A"), Some(true));
+        assert_eq!(clk_gating_active_one(&f("A | B"), "B", "A"), Some(false));
+        assert_eq!(clk_gating_active_one(&f("!(A & B)"), "A", "B"), Some(true));
+        assert_eq!(clk_gating_active_one(&f("!(A | B)"), "B", "A"), Some(false));
+        assert_eq!(clk_gating_active_one(&f("!A & B"), "B", "A"), Some(false));
+        assert_eq!(clk_gating_active_one(&f("A & B & C"), "C", "A"), Some(true));
+        assert_eq!(clk_gating_active_one(&f("A ^ B"), "B", "A"), None);
+        assert_eq!(clk_gating_active_one(&f("(A & B) | C"), "B", "A"), None);
+        assert_eq!(clk_gating_active_one(&f("A & B"), "C", "A"), None);
+    }
+
+    /// The gated clock hold check is in the setup check's cycle: launched on the rise (0, period
+    /// 10) against the fall (5), opened by the rise at 0: `src - tgt` = -5 (an ordinary hold
+    /// pairs it with the fall before, +5). Launched on the fall (5) against the fall: 0. An OR's
+    /// hold edge is the rise, opened by the fall after it: no rise at or after 0 has its fall at
+    /// or before a launch at 0, so the search pairs the next launch (10) with the rise at 0: 10.
+    #[test]
+    fn gated_hold_cycle() {
+        assert_eq!(cycle_accting_gated(10.0, 0.0, 10.0, 5.0, 0.0), (5.0, 5.0, -5.0));
+        assert_eq!(cycle_accting_gated(10.0, 5.0, 10.0, 5.0, 0.0).2, 0.0);
+        assert_eq!(cycle_accting_gated(10.0, 0.0, 10.0, 0.0, 5.0).2, 10.0);
+    }
+}
+

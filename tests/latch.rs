@@ -410,3 +410,26 @@ fn a_latch_launch_is_reported_as_a_latch() {
     assert!(p.start_reason.starts_with("negative level-sensitive latch"), "{}", p.start_reason);
     assert!(close(p.slack, 4.65), "slack {}", p.slack);
 }
+
+/// The reference infers a clock gating check at a gate's enable (`GatedClk::isGatedClkEnable`,
+/// `VisitPathEnds::visitGatedClkEnd`): an AND gating the clock by a register's output must see
+/// the enable settle before the clock rises at the gate (setup, 10 - 0.2) and hold until it falls
+/// in the SAME cycle (hold, 0.2 - 5: the gated clock hold cycle, not the fall before), margin 0,
+/// in the `gated clock` path group.
+#[test]
+fn a_clock_gate_enable_is_checked() {
+    let nl = "module t (clk, x, y); input clk, x; output y; wire en, gclk;\n\
+              DFF r0 (.CK(clk), .D(x), .Q(en));\n\
+              AND2 g (.A(clk), .B(en), .Y(gclk));\n\
+              DFF r1 (.CK(gclk), .D(x), .Q(y));\n\
+              endmodule";
+    let t = build(nl, &job(10.0)).unwrap();
+    let b = pin(&t, "g/B");
+    let s = t.slack(b).expect("a setup check at the enable");
+    assert!(close(s, 9.8), "setup {s}");
+    let h = t.hold_endpoint_slacks().into_iter().find(|(p, _)| *p == b).map(|(_, h)| h).expect("a hold check at the enable");
+    assert!(close(h, -4.8), "hold {h}");
+    let r = t.report();
+    let g: Vec<&str> = r.check_paths.iter().filter(|p| p.endpoint == "g").map(|p| p.group.as_str()).collect();
+    assert!(!g.is_empty() && g.iter().all(|g| *g == "gated clock"), "{g:?}");
+}
