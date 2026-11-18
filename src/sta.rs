@@ -41,7 +41,9 @@ pub enum StaError {
     Parse(String),
     Io(String),
     UnknownCell(String),
-    CombinationalLoop,
+    /// A loop the topological order cannot pass, as the pins of one cycle in it, in order (the
+    /// first pin is not repeated at the end).
+    CombinationalLoop(Vec<String>),
     /// Reserved: SI/crosstalk analysis was requested but isn't modeled in v0.
     SiNotModeled,
 }
@@ -52,10 +54,24 @@ impl std::fmt::Display for StaError {
             StaError::Parse(m) => write!(f, "parse error: {m}"),
             StaError::Io(m) => write!(f, "io error: {m}"),
             StaError::UnknownCell(c) => write!(f, "cell not in any .lib: {c}"),
-            StaError::CombinationalLoop => {
+            StaError::CombinationalLoop(pins) => {
+                // the whole cycle when it is short; a long one by its two ends
+                const SHOW: usize = 24;
+                let mut path: Vec<&str> = pins.iter().map(String::as_str).collect();
+                let more = path.len().saturating_sub(SHOW);
+                if more > 0 {
+                    path.truncate(SHOW / 2);
+                    path.push("\u{2026}");
+                    path.extend(pins[pins.len() - SHOW / 2..].iter().map(String::as_str));
+                }
+                if let Some(first) = pins.first() {
+                    path.push(first);
+                }
                 write!(
                     f,
-                    "combinational loop (sequential timing not modeled in v0)"
+                    "combinational loop through {} pin(s): {} (timing loops are not broken here; cut one with set_disable_timing)",
+                    pins.len(),
+                    path.join(" -> ")
                 )
             }
             StaError::SiNotModeled => write!(f, "SI/crosstalk not modeled in v0"),
@@ -114,6 +130,44 @@ fn aocv_lookup(tbl: &[(f64, f64)], depth: f64) -> f64 {
         }
     }
     last.1
+}
+
+/// One cycle among the nodes a topological order left out (`done[v]` false), its nodes in edge
+/// order, or `None` when they hold none. A node a Kahn walk cannot reach sits on a cycle or
+/// downstream of one, so a depth-first walk over the left-out nodes, in index order, finds one.
+fn find_cycle(adj: &[Vec<usize>], done: &[bool]) -> Option<Vec<usize>> {
+    // 0 unvisited, 1 on the current path, 2 finished
+    let mut state = vec![0u8; adj.len()];
+    for root in (0..adj.len()).filter(|&v| !done[v]) {
+        if state[root] != 0 {
+            continue;
+        }
+        let mut stack: Vec<(usize, usize)> = vec![(root, 0)];
+        state[root] = 1;
+        while let Some(&mut (u, ref mut next)) = stack.last_mut() {
+            if let Some(&w) = adj[u].get(*next) {
+                *next += 1;
+                if done[w] {
+                    continue;
+                }
+                match state[w] {
+                    0 => {
+                        state[w] = 1;
+                        stack.push((w, 0));
+                    }
+                    1 => {
+                        let at = stack.iter().position(|&(x, _)| x == w).expect("on the path");
+                        return Some(stack[at..].iter().map(|&(x, _)| x).collect());
+                    }
+                    _ => {}
+                }
+            } else {
+                state[u] = 2;
+                stack.pop();
+            }
+        }
+    }
+    None
 }
 
 /// The reference's comparison tolerance (`Fuzzy.cc`), in its `float` arithmetic.
@@ -2987,7 +3041,14 @@ fn build_report(
         let (_a, _s, _f, ord, arr, slw, _fl) = relax(&arc_d, &arc_s, true, &seed_main, false, None, None);
         if !cycle_checked {
             if ord.len() != n {
-                return Err(StaError::CombinationalLoop);
+                // name one cycle the order could not pass: its pins, in order
+                let mut done = vec![false; n];
+                for &v in &ord {
+                    done[v] = true;
+                }
+                let adj: Vec<Vec<usize>> = out_edges.iter().map(|es| es.iter().map(|e| e.to).collect()).collect();
+                let cycle = find_cycle(&adj, &done).unwrap_or_default();
+                return Err(StaError::CombinationalLoop(cycle.into_iter().map(|v| labels[v].clone()).collect()));
             }
             cycle_checked = true;
         }
@@ -4564,5 +4625,30 @@ mod per_edge_load {
         let f = |v: f32| v as f64;
         assert_eq!(pin_load_caps(&c.pins["A"]), [[f(0.0016), f(0.0012)], [f(0.0022), f(0.0018)]]);
         assert_eq!(pin_load_caps(&c.pins["C"]), [[f(0.0030); 2]; 2]);
+    }
+}
+
+#[cfg(test)]
+mod loop_naming {
+    use super::*;
+
+    /// The cycle named is the cycle alone: a node leading into it, and one after it, are left
+    /// out, and the nodes the order DID pass are never entered.
+    #[test]
+    fn the_named_cycle_is_only_the_cycle() {
+        // 0 -> 1 -> 2 -> 1 (the cycle), 2 -> 3 (after it); 4 -> 0 passed by the order
+        let adj = vec![vec![1], vec![2], vec![1, 3], vec![], vec![0]];
+        let done = [false, false, false, false, true];
+        assert_eq!(find_cycle(&adj, &done), Some(vec![1, 2]));
+        // nothing left out, or nothing cyclic among what was: no cycle to name
+        assert_eq!(find_cycle(&adj, &[true; 5]), None);
+        assert_eq!(find_cycle(&[vec![1], vec![]], &[false, false]), None);
+    }
+
+    #[test]
+    fn the_refusal_lists_the_pins_and_closes_the_cycle() {
+        let e = StaError::CombinationalLoop(vec!["g1/A".into(), "g1/Y".into(), "g2/A".into(), "g2/Y".into()]);
+        let m = e.to_string();
+        assert!(m.contains("through 4 pin(s): g1/A -> g1/Y -> g2/A -> g2/Y -> g1/A"), "{m}");
     }
 }
