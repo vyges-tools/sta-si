@@ -3706,6 +3706,15 @@ fn build_report(
         }
     }
 
+    // The clock slew a check's margin is looked up at: the OTHER analysis's slew at the clock pin,
+    // the early one for a setup (recovery) check and the late one for hold (removal). The
+    // reference computes check arcs with the clock pin's slew of `Scene::checkClkSlewMinMax`,
+    // which under its default on-chip-variation analysis is the opposite of the check's own min /
+    // max; its report shows it, the setup check's capture clock path printing the min slews. Where
+    // the two analyses load a clock pin alike (no capacitance ranges, no derate) they agree.
+    let check_clk_slew = |cap: Option<usize>, cl: usize, setup: bool| -> f64 {
+        cap.map(|i| if setup { early_slew[i][cl] } else { late_slew[i][cl] }).unwrap_or(input_slew)
+    };
     // A latch data pin's check also needs the time the latch OPENS, per launching edge and data
     // edge (`latch_open[(r, v)][l]`, NaN = none): `req_run` holds the time it closes.
     let mut latch_open: HashMap<(usize, usize), [f64; 2]> = HashMap::new();
@@ -3761,7 +3770,7 @@ fn build_report(
             let base_of = |c: &Constraint| -> (f64, f64) {
                 let cl = usize::from(c.clk_edge == ClkEdge::Fall);
                 let cap_early = cap.map(|i| early_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
-                let ck_slew = cap.map(|i| late_slew[i][cl]).unwrap_or(input_slew);
+                let ck_slew = check_clk_slew(cap, cl, true);
                 let crpr = match (lck, cap) {
                     (Some(l), Some(c)) => crpr_credit(l, c, cl, true),
                     _ => 0.0,
@@ -4173,7 +4182,7 @@ fn build_report(
                     _ => 0.0,
                 };
                 let cap_late = cap.map(|i| late_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
-                let ck_slew = cap.map(|i| early_slew[i][cl]).unwrap_or(input_slew);
+                let ck_slew = check_clk_slew(cap, cl, false);
                 let hold_rel = edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), cl).1 + shift;
                 (crpr - cap_late - hold_rel - job.hold_uncertainty, ck_slew)
             };
@@ -4477,13 +4486,13 @@ fn build_report(
                 };
                 if max {
                     let cap_early = cap.map(|i| early_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
-                    let ck_slew = cap.map(|i| late_slew[i][cl]).unwrap_or(input_slew);
+                    let ck_slew = check_clk_slew(cap, cl, true);
                     let rel = edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), cl).0 + shift;
                     let req = cap_early + rel + crpr - job.setup_uncertainty - c.eval_edge(l == 0, ck_slew, late_slew[v][l]);
                     (req, cl, cap_early, rel, crpr)
                 } else {
                     let cap_late = cap.map(|i| late_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
-                    let ck_slew = cap.map(|i| early_slew[i][cl]).unwrap_or(input_slew);
+                    let ck_slew = check_clk_slew(cap, cl, false);
                     let rel = edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), cl).1 + shift;
                     let req = cap_late + rel + job.hold_uncertainty - crpr + c.eval_edge(l == 0, ck_slew, early_slew[v][l]);
                     (req, cl, cap_late, rel, crpr)
