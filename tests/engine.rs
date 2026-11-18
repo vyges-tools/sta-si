@@ -59,6 +59,7 @@ fn synthetic_report(wns: f64, hold_endpoints: usize, hold_critical: usize) -> Ti
         pba_wns: None,
         units: Default::default(),
         check_paths: Vec::new(),
+        latch_borrow: Vec::new(),
     }
 }
 

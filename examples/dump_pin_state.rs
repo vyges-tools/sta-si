@@ -32,12 +32,15 @@ fn main() {
     // hold slack is per-endpoint rather than per-pin, so index it up front
     let hold: std::collections::HashMap<usize, f64> =
         t.report().hold_slacks.iter().map(|&(i, s)| (i, s)).collect();
+    let borrow: std::collections::HashMap<usize, f64> = t.report().latch_borrow.iter().copied().collect();
 
-    println!("pin,slew,slew_min,load,arrival,arrival_min,setup_slack,hold_slack");
+    // `check_arrival`: the arrival a setup end's slack was taken against; `borrow`: a latch data
+    // pin's time borrowed (the reference's `actual time borrow`)
+    println!("pin,slew,slew_min,load,arrival,arrival_min,setup_slack,hold_slack,check_arrival,borrow");
     for p in 0..t.num_pins() {
         let f = |v: Option<f64>| v.map(|x| format!("{x:.6}")).unwrap_or_default();
         println!(
-            "{},{:.6},{:.6},{:.6},{:.6},{:.6},{},{}",
+            "{},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{},{}",
             t.pin_label(p),
             t.slew(p),
             t.slew_min(p),
@@ -45,7 +48,9 @@ fn main() {
             t.arrival(p),
             t.arrival_min(p),
             f(t.slack(p)),
-            f(hold.get(&p).copied())
+            f(hold.get(&p).copied()),
+            f(t.slack(p).map(|_| t.setup_arrival(p))),
+            f(borrow.get(&p).copied())
         );
     }
 }

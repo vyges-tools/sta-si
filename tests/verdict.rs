@@ -32,6 +32,7 @@ fn report(wns: f64, tns: f64, whs: f64, ths: f64) -> TimingReport {
         pba_wns: None,
         units: Default::default(),
         check_paths: Vec::new(),
+        latch_borrow: Vec::new(),
     }
 }
 

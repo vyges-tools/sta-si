@@ -137,11 +137,35 @@ fn aocv_lookup(tbl: &[(f64, f64)], depth: f64) -> f64 {
 /// pin the cell's `latch` group names in `data_in`. ⚠️ A cell with no `latch` group (or a bank) is
 /// not inferred here (`LibertyCell::inferLatchRoles`).
 fn is_latch_d_to_q(cell: &crate::liberty::Cell, arc: &Arc) -> bool {
-    if arc.clk_edge.is_some() {
-        return false;
-    }
+    arc.clk_edge.is_none() && is_latch_data_pin(cell, &arc.related_pin)
+}
+
+/// Is `pin` a latch's data input: named in the `data_in` of the cell's `latch` group. Its setup
+/// check is a latch check (`PathEndLatchCheck`, made where `isLatchData` holds), not a register's.
+fn is_latch_data_pin(cell: &crate::liberty::Cell, pin: &str) -> bool {
     let Some(g) = cell.seq_group.as_ref().filter(|g| g.latch) else { return false };
-    g.attrs.get("data_in").and_then(|d| vyges_loom::liberty_func::Func::parse_in(d.trim_matches('"'), |p| cell.pins.contains_key(p))).is_some_and(|f| f.ports().contains(&arc.related_pin.as_str()))
+    g.attrs.get("data_in").and_then(|d| vyges_loom::liberty_func::Func::parse_in(d.trim_matches('"'), |p| cell.pins.contains_key(p))).is_some_and(|f| f.ports().contains(&pin))
+}
+
+/// A latch D setup check, as the reference's `Latches::latchRequired` decides it, in this timer's
+/// frame (times from the launch edge). `open`: the time the latch opens, as the check sees it
+/// (the enable edge, its early clock latency and CRPR, less the setup uncertainty); `close`: the
+/// last time data may arrive, the disable edge's ordinary setup requirement, which is `open` plus
+/// the maximum borrow; `arrival`: the data. Returns `(slack, borrow)`:
+/// - data at or before the opening: required is the opening, nothing borrowed;
+/// - data while the latch is open: it borrows `arrival - open` and the check is met exactly
+///   (required is the data's own arrival, slack 0);
+/// - past the maximum borrow: borrow is that maximum and required is `close`.
+fn latch_setup(open: f64, close: f64, arrival: f64) -> (f64, f64) {
+    if arrival <= open {
+        return (open - arrival, 0.0);
+    }
+    let (borrow, max_borrow) = (arrival - open, close - open);
+    if borrow <= max_borrow {
+        (0.0, borrow)
+    } else {
+        (close - arrival, max_borrow)
+    }
 }
 
 /// One cycle among the nodes a topological order left out (`done[v]` false), its nodes in edge
@@ -513,6 +537,10 @@ pub struct TimingReport {
     /// report order (see [`CheckPath`]). Filled by a full analysis; empty after an incremental
     /// update.
     pub check_paths: Vec<CheckPath>,
+    /// Every latch data pin's setup check and the time it borrows from the latch's transparent
+    /// window (`actual time borrow` in the reference's report), node index and time. Empty after
+    /// an incremental update (a design with latches never takes that path).
+    pub latch_borrow: Vec<(PinId, f64)>,
 }
 
 /// A clock edge as a report line names it: `clock clk (rise edge)`, at `time`, with the
@@ -1449,6 +1477,8 @@ fn build_report(
     // the recovery / removal pins among them: the reference reports their checks in their own
     // path group, `asynchronous`
     let mut async_end: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    // the latch data pins among the setup ends: checked as the reference's latch checks
+    let mut latch_d: std::collections::HashSet<usize> = std::collections::HashSet::new();
     let mut flop_hold: Vec<(usize, Vec<Constraint>, Option<String>)> = Vec::new();
     // Nodes that drive a fixed logic level (tie cells: `function : "1"` / `"0"`). A net
     // driven by one can never switch, so it carries no timing — see the edge build below.
@@ -1547,6 +1577,9 @@ fn build_report(
                         if !setup.is_empty() {
                             is_endpoint[idx] = true; // data pin = setup capture endpoint
                             flop_d.push((idx, setup, ck_key.clone()));
+                            if is_latch_data_pin(cell, pin) {
+                                latch_d.insert(idx);
+                            }
                         }
                         let hold = enabled_checks(inst, pin, &cell.pins[pin].hold);
                         if !hold.is_empty() {
@@ -3673,6 +3706,27 @@ fn build_report(
         }
     }
 
+    // A latch data pin's check also needs the time the latch OPENS, per launching edge and data
+    // edge (`latch_open[(r, v)][l]`, NaN = none): `req_run` holds the time it closes.
+    let mut latch_open: HashMap<(usize, usize), [f64; 2]> = HashMap::new();
+    // A latch opens on the edge before the one its setup check is against (`cl`): the enable
+    // edge, a pulse width earlier (`CycleAccting`, latch setup role: the disable edge is the first
+    // after the launch, the enable the one before it). Its time as the check sees it carries the
+    // enable edge's own early latency and CRPR and the setup uncertainty (`Latches::latchRequired`
+    // / `latchBorrowInfo`). `rel_close`: the launch-to-disable relation, exceptions included.
+    // Returns (opening time, enable edge time from the launch, open latency, open CRPR).
+    let latch_opening = |cap: Option<usize>, lck: Option<usize>, cclk: Option<&str>, pc: f64, cl: usize, rel_close: f64| -> (f64, f64, f64, f64) {
+        let el = 1 - cl;
+        let high = clock_edge_time(job, cclk, 1, pc) - clock_edge_time(job, cclk, 0, pc);
+        let pulse_width = if el == 0 { high } else { pc - high };
+        let open_latency = cap.map(|i| early_arr[i][el]).filter(|a| a.is_finite()).unwrap_or(0.0);
+        let open_crpr = match (lck, cap) {
+            (Some(l), Some(c)) => crpr_credit(l, c, el, true),
+            _ => 0.0,
+        };
+        let rel_open = rel_close - pulse_width;
+        (open_latency + rel_open + open_crpr - job.setup_uncertainty, rel_open, open_latency, open_crpr)
+    };
     // setup capture uses the EARLY clock; CRPR adds back the shared-path pessimism;
     // the capture window is the launch→capture edge relation (one period intra-domain),
     // shifted out by a multicycle exception (false paths drop the endpoint).
@@ -3714,18 +3768,32 @@ fn build_report(
                 };
                 (cap_early + edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), cl).0 + shift + crpr - job.setup_uncertainty, ck_slew)
             };
+            let open_of = |c: &Constraint| -> f64 {
+                let cl = usize::from(c.clk_edge == ClkEdge::Fall);
+                let cclk = to_end.clock.as_deref();
+                let rel_close = edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, cclk, cl).0 + shift;
+                latch_opening(cap, lck, cclk, pc, cl, rel_close).0
+            };
+            let is_latch = latch_d.contains(idx);
             // ⛔ PER DATA EDGE, for the same reason as hold: a check exists for one edge, so
             // the latest arrival must meet THAT edge's setup constraint, not the worse of the
             // two.
+            let mut open = [f64::NAN; 2];
             for (l, req) in req_run[r][*idx].iter_mut().enumerate() {
-                *req = setup
-                    .iter()
-                    .filter(|c| checks_edge(c, l == 0))
-                    .map(|c| {
-                        let (base, ck_slew) = base_of(c);
-                        base - c.eval_edge(l == 0, ck_slew, late_slew[*idx][l])
-                    })
-                    .fold(f64::INFINITY, f64::min);
+                *req = f64::INFINITY;
+                for c in setup.iter().filter(|c| checks_edge(c, l == 0)) {
+                    let (base, ck_slew) = base_of(c);
+                    let q = base - c.eval_edge(l == 0, ck_slew, late_slew[*idx][l]);
+                    if q < *req {
+                        *req = q;
+                        if is_latch {
+                            open[l] = open_of(c);
+                        }
+                    }
+                }
+            }
+            if is_latch {
+                latch_open.insert((r, *idx), open);
             }
             // capture the clock-side constants so the fast path can re-derive required time
             // from the (possibly changed) data slew without re-walking the clock network.
@@ -3821,6 +3889,7 @@ fn build_report(
     // the launching edge's run and the data edge whose check set the worst slack
     let mut worst_at: Option<(usize, usize)> = None;
     let mut endpoints = 0;
+    let mut latch_borrow: Vec<(usize, f64)> = Vec::new();
     // each path group's worst setup end, for the report: (slack, endpoint, run, data edge)
     let setup_end: HashMap<usize, usize> = flop_d.iter().enumerate().map(|(e, (idx, _, _))| (*idx, e)).collect();
     let mut setup_group_worst: BTreeMap<String, (f64, usize, usize, usize)> = BTreeMap::new();
@@ -3845,23 +3914,43 @@ fn build_report(
         // edge time, not a per-lane delay), so it is scored against the tightest required.
         let mut slack = f64::INFINITY;
         let mut slack_at = None;
+        // a latch end's: its borrow, of the check that set the slack
+        let mut borrow = None;
         if !clk_launched {
             for (r, run) in runs.iter().enumerate() {
+                let open = latch_open.get(&(r, v));
                 for (l, (&q, &a)) in req_run[r][v].iter().zip(&run.late_arr[v]).enumerate() {
-                    if !q.is_nan() && a.is_finite() && q - a < slack {
-                        slack = q - a;
+                    if q.is_nan() || !a.is_finite() {
+                        continue;
+                    }
+                    let (s, b) = match open.map(|o| o[l]).filter(|o| !o.is_nan()) {
+                        Some(o) => {
+                            let (s, b) = latch_setup(o, q, a);
+                            (s, Some(b))
+                        }
+                        None => (q - a, None),
+                    };
+                    // equal slacks of two latch checks: the larger borrow is the worse end
+                    // (`PathEnd::cmpSlack`)
+                    if s < slack || (s == slack && b.is_some_and(|b| borrow.is_some_and(|w| b > w))) {
+                        slack = s;
                         slack_at = Some((r, l));
+                        borrow = b;
                     }
                 }
             }
+        }
+        if let Some(b) = borrow {
+            latch_borrow.push((v, b));
         }
         if !slack.is_finite() {
             slack = endpoint_req[v] - arr_v;
         }
         // Several launching edges: no one required time pairs with the merged arrival, so the
         // slack is folded back into it, as the incremental path folds its per-edge slack — the
-        // query API's `required − arrival` is then this endpoint's checked slack.
-        if runs.len() > 1 {
+        // query API's `required − arrival` is then this endpoint's checked slack. A latch end's
+        // required time depends on its arrival, so it is folded back the same way.
+        if runs.len() > 1 || borrow.is_some() {
             endpoint_req[v] = arr_v + slack;
         }
         if let Some((r, l)) = slack_at {
@@ -4406,6 +4495,35 @@ fn build_report(
                 terms.max_by(|a, b| a.0.total_cmp(&b.0))?
             };
             let tgt_name = cap.and_then(clock_name_of).unwrap_or(primary_clock);
+            // A latch data pin's setup check (`PathEndLatchCheck`): its target is the edge that
+            // opens the latch, with that edge's latency and CRPR, and the time borrowed in place
+            // of the setup time; required is the opening plus the borrow.
+            if max && latch_d.contains(&v) {
+                let (open, rel_open, open_latency, open_crpr) = latch_opening(cap, lck, to_end.clock.as_deref(), pc, cl, rel);
+                let (slack, borrow) = latch_setup(open, req, arrival - launch);
+                return Some(CheckPath {
+                    max,
+                    group: group.to_string(),
+                    startpoint,
+                    start_reason,
+                    endpoint: instance_of(&labels[v]).to_string(),
+                    // open on the rise: a positive latch
+                    end_reason: format!("{} level-sensitive latch clocked by {tgt_name}", if cl == 1 { "positive" } else { "negative" }),
+                    src_clock,
+                    src_network_delay,
+                    input_delay,
+                    lines,
+                    arrival,
+                    tgt_clock: clock_line(tgt_name, cl == 1, launch + rel_open),
+                    tgt_network_delay: open_latency,
+                    uncertainty: -job.setup_uncertainty,
+                    crpr: open_crpr,
+                    tgt_pin: cap.map(|c| (desc(c), cl == 1)),
+                    margin_what: "time borrowed from endpoint".to_string(),
+                    required: launch + open + borrow,
+                    slack,
+                });
+            }
             let is_async = async_end.contains(&v);
             let check = match (max, is_async) {
                 (true, false) => "setup",
@@ -4477,6 +4595,7 @@ fn build_report(
         pba_wns,
         units: lib.units,
         check_paths,
+        latch_borrow,
     };
     // Retain a per-pin snapshot for the Timer's query API (Phase 1). Cloned, not moved:
     // closures above still hold immutable borrows of these arrays through the return.
@@ -4654,6 +4773,23 @@ mod per_edge_load {
         let f = |v: f32| v as f64;
         assert_eq!(pin_load_caps(&c.pins["A"]), [[f(0.0016), f(0.0012)], [f(0.0022), f(0.0018)]]);
         assert_eq!(pin_load_caps(&c.pins["C"]), [[f(0.0030); 2]; 2]);
+    }
+}
+
+#[cfg(test)]
+mod latch_check {
+    use super::latch_setup;
+
+    /// `Latches::latchRequired`'s three cases, opening at 1 and closing at 3 (maximum borrow 2):
+    /// data before the opening meets it with nothing borrowed; data in the window borrows and
+    /// meets its check exactly; data past it borrows the maximum and fails by the rest.
+    #[test]
+    fn the_latch_check_borrows_within_the_window() {
+        assert_eq!(latch_setup(1.0, 3.0, 0.5), (0.5, 0.0));
+        assert_eq!(latch_setup(1.0, 3.0, 1.0), (0.0, 0.0));
+        assert_eq!(latch_setup(1.0, 3.0, 2.5), (0.0, 1.5));
+        assert_eq!(latch_setup(1.0, 3.0, 3.0), (0.0, 2.0));
+        assert_eq!(latch_setup(1.0, 3.0, 4.0), (-1.0, 2.0));
     }
 }
 

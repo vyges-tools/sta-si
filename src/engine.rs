@@ -106,6 +106,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         pba_wns: None,
         units: Default::default(),
         check_paths: Vec::new(),
+        latch_borrow: Vec::new(),
     });
     (job, rep)
 }
