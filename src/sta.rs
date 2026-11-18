@@ -1958,6 +1958,35 @@ fn build_report(
             }
         }
     }
+    // Each net's parasitic, and each of its pins' SPEF node, found once by name (`pin_node`'s
+    // answer: the net's first `*CONN` entry for the pin). Looked up per load and per pass by
+    // name, a net cost its fanout squared in string compares each pass.
+    let net_rc: Vec<Option<&crate::spef::NetRc>> = net_order.iter().map(|nm| spef.and_then(|s| s.nets.get(nm))).collect();
+    let mut node_of_pin: Vec<Option<&str>> = vec![None; labels.len()];
+    for (name, net) in &nets {
+        let Some(rc) = net_rc[net_idx[name.as_str()]] else { continue };
+        // a scan for a small net; an index for a large one, where the scans add up to its
+        // fanout squared
+        let by: Option<HashMap<(&str, &str), &str>> = (rc.pins.len() > 32).then(|| {
+            let mut by = HashMap::with_capacity(rc.pins.len());
+            for (pi, pp, nd) in &rc.pins {
+                by.entry((pi.as_str(), pp.as_str())).or_insert(nd.as_str());
+            }
+            by
+        });
+        for v in net.driver.into_iter().chain(net.sinks.iter().copied()) {
+            if let Some((a, b)) = split_inst_pin(&labels[v]) {
+                node_of_pin[v] = match &by {
+                    Some(by) => by.get(&(a, b)).copied(),
+                    None => rc.pin_node(a, b),
+                };
+            }
+        }
+    }
+    let mut is_out_port = vec![false; labels.len()];
+    for (o, _) in &output_ports {
+        is_out_port[*o] = true;
+    }
 
     // effective-capacitance shielding per driver node (CCS-into-RC): the driver
     // sees a near cap + a far cap shielded behind the wire resistance, so its cell
@@ -1975,20 +2004,20 @@ fn build_report(
         for (name, net) in &nets {
             if let Some(d) = net.driver {
                 let i = net_idx[name.as_str()];
-                if let (Some(rc), Some((di, dp))) = (s.nets.get(name), &net_drv_ip[i]) {
-                    if let Some(dnode) = rc.pin_node(di, dp) {
+                if let (Some(rc), Some(_)) = (s.nets.get(name), &net_drv_ip[i]) {
+                    if let Some(dnode) = node_of_pin[d] {
                         // the same capacitance content the reduction sees: coupling
                         // grounded at factor 1.0, plus Liberty receiver caps at the sinks
                         let cc: f64 = net_cpl[i].iter().map(|(_, c)| *c).sum();
                         for (mm, lane) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
                         let mut pcap: BTreeMap<String, f64> = BTreeMap::new();
                         for &sk in &net.sinks {
-                            if let Some((si, sp)) = ip_of(sk) {
-                                if let Some(nd) = rc.pin_node(&si, &sp) {
+                            if split_inst_pin(&labels[sk]).is_some() {
+                                if let Some(nd) = node_of_pin[sk] {
                                     *pcap.entry(nd.to_string()).or_default() +=
                                         pin_cap_node.get(&sk).map_or(0.0, |c| c[mm][lane]) * ff_per_cap;
                                 }
-                            } else if output_ports.iter().any(|(idx, _)| *idx == sk) {
+                            } else if is_out_port[sk] {
                                 // A top-level output port: its external load at its own node
                                 // (`ReduceToPi::pinCapacitance` → `Sdc::portExtCap`). Without
                                 // it the Pi of a net driving a port carries only the wire, and
@@ -2053,11 +2082,11 @@ fn build_report(
                     let cc: f64 = net_cpl[i].iter().map(|(_, c)| *c).sum();
                     let mut pcap: BTreeMap<String, f64> = BTreeMap::new();
                     for &sk in &net.sinks {
-                        if let Some((si, sp)) = ip_of(sk) {
-                            if let Some(nd) = rc.pin_node(&si, &sp) {
+                        if split_inst_pin(&labels[sk]).is_some() {
+                            if let Some(nd) = node_of_pin[sk] {
                                 *pcap.entry(nd.to_string()).or_default() += pin_cap_node.get(&sk).map_or(0.0, |c| c[mm][ol]) * ff_per_cap;
                             }
-                        } else if output_ports.iter().any(|(o, _)| *o == sk) {
+                        } else if is_out_port[sk] {
                             *pcap.entry(labels[sk].clone()).or_default() += job.output_load * ff_per_cap;
                         }
                     }
@@ -2965,13 +2994,13 @@ fn build_report(
     let net_pin_cap: Vec<[[BTreeMap<String, f64>; 2]; 2]> = {
         let e = || [BTreeMap::new(), BTreeMap::new()];
         let mut v: Vec<[[BTreeMap<String, f64>; 2]; 2]> = (0..nn).map(|_| [e(), e()]).collect();
-        if let Some(sp_all) = spef {
+        if spef.is_some() {
             for a in arcs.iter() {
-                let Some(rc) = sp_all.nets.get(&net_order[a.net_idx]) else {
+                if net_rc[a.net_idx].is_none() {
                     continue;
-                };
-                if let Some((si, spn)) = &a.sink_ip {
-                    if let Some(node) = rc.pin_node(si, spn) {
+                }
+                if a.sink_ip.is_some() {
+                    if let Some(node) = node_of_pin[a.sink] {
                         let c = pin_cap_node.get(&a.sink).copied().unwrap_or([[0.0; 2]; 2]);
                         for mm in 0..2 {
                             for l in 0..2 {
@@ -2979,7 +3008,7 @@ fn build_report(
                             }
                         }
                     }
-                } else if output_ports.iter().any(|(idx, _)| *idx == a.sink) {
+                } else if is_out_port[a.sink] {
                     // A top-level output port: its external load at its own node, as the Pi above
                     // takes it (`ReduceToPi::pinCapacitance` → `Sdc::portExtCap`) — the reduction
                     // that gives the Pi also gives each load's Elmore. Without it the wire delay to
@@ -3054,9 +3083,9 @@ fn build_report(
                 if !transient_first {
                     return None;
                 }
-                let rc = spef?.nets.get(&net_order[i])?;
-                let (di, dp) = net_drv_ip[i].as_ref()?;
-                let dn = rc.pin_node(di, dp)?;
+                let rc = net_rc[i]?;
+                net_drv_ip[i].as_ref()?;
+                let dn = node_of_pin[net_drv[i]?]?;
                 // the solve is in ns: the driver slew in, each delay and slew out
                 let map = rc.transient(dn, slw_of(net_slew[i]) * ns_per_time, xc[i], lib.thresholds)?;
                 Some(map.into_iter().map(|(n, (d, s))| (n, (d * time_per_ns, s * time_per_ns))).collect())
@@ -3093,7 +3122,7 @@ fn build_report(
             .map(|(k, a)| {
                 let i = a.net_idx;
                 let mark = |b: u8| rc_branch.borrow_mut()[k] = b;
-                let Some(rc) = spef.and_then(|s| s.nets.get(&net_order[i])) else {
+                let Some(rc) = net_rc[i] else {
                     mark(RC_NONE);
                     return ([0.0, 0.0], [0.0, 0.0]); // no parasitics -> ideal interconnect
                 };
@@ -3139,11 +3168,11 @@ fn build_report(
                 // a load with its own Elmore, as an instance pin is.
                 {
                     let dnode = match &net_drv_ip[i] {
-                        Some((di, dp)) => rc.pin_node(di, dp),
+                        Some(_) => net_drv[i].and_then(|d| node_of_pin[d]),
                         None => net_drv[i].map(|d| labels[d].as_str()),
                     };
                     let snode = match &a.sink_ip {
-                        Some((si, sp)) => rc.pin_node(si, sp),
+                        Some(_) => node_of_pin[a.sink],
                         None => Some(labels[a.sink].as_str()),
                     };
                     if let (Some(dt), Some(st)) = (dnode, snode) {
@@ -3253,8 +3282,8 @@ fn build_report(
                 // above, not a replacement, and it must not run unless requested — it took
                 // precedence silently and displaced the reference model entirely.
                 if transient_first {
-                    if let (Some(map), Some((si, sp))) = (&tr_net[i], &a.sink_ip) {
-                        if let Some(sn) = rc.pin_node(si, sp) {
+                    if let (Some(map), Some(_)) = (&tr_net[i], &a.sink_ip) {
+                        if let Some(sn) = node_of_pin[a.sink] {
                             if let Some(&(delay, slew)) = map.get(sn) {
                                 mark(RC_TRANSIENT);
                                 // one transient per net, so both edges share it
