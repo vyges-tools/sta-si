@@ -1518,6 +1518,27 @@ fn spef_scales(u: crate::liberty::LibUnits) -> (f64, f64, f64) {
     (pow10_exact(u.cap_f / 1e-15), pow10_exact(u.time_s / u.cap_f), pow10_exact(1e-15 / u.time_s))
 }
 
+/// A net's reduced Elmore as the walk lists it (`elmore_of`), held for lookup by node: sorted by
+/// node, a node the walk lists twice keeping its LATER value, which is what collecting the walk
+/// into a map gave (an insert replaces). Each pass reads it once per load, so it is searched,
+/// not hashed: no per-node hash and no table growth on every net of every pass.
+fn elmore_by_node(mut walk: Vec<(Name, f64)>) -> Vec<(Name, f64)> {
+    walk.sort_by_key(|e| e.0); // stable: a node's repeats stay in walk order
+    let mut by_node: Vec<(Name, f64)> = Vec::with_capacity(walk.len());
+    for e in walk {
+        match by_node.last_mut() {
+            Some(last) if last.0 == e.0 => *last = e,
+            _ => by_node.push(e),
+        }
+    }
+    by_node
+}
+
+/// The Elmore `elmore_by_node` holds for `node`.
+fn elmore_at(by_node: &[(Name, f64)], node: Name) -> Option<f64> {
+    by_node.binary_search_by_key(&node, |e| e.0).ok().map(|j| by_node[j].1)
+}
+
 /// `DelayCalcBase::thresholdAdjust`: a wire delay and load slew found at the DRIVER library's
 /// thresholds, re-expressed at the LOAD library's. The reference calls it only when the two
 /// libraries differ; with equal thresholds it is the identity. Its thresholds are floats, and so
@@ -3288,7 +3309,23 @@ fn build_report(
     // single driver waveform onto both edges, which was measured to take data-hold rms
     // from 0.0329 to 0.0537 when the per-sink crossing solve was wired against it.
     // `mm`: the analysis (0 early, 1 late), whose receiver caps the Elmore walks.
-    let compute_wires = |sw: &[[f64; 2]], net_slew: &[[f64; 2]], mm: usize| -> (Vec<[f64; 2]>, Vec<[f64; 2]>) {
+    // ⛔ PER NET, as the reference evaluates a driver: its gate, then the wires of the one net it
+    // drives at that gate's final slew (`GraphDelayCalc::findDriverArcDelays`, `gateDelay` then
+    // `loadDelaySlew` per load). `net_xc` and `wires_of_net` are that per-net step; `compute_wires`
+    // is only the loop over every net that the fixed point below calls.
+    // Each net's arcs (its driver to each load), in arc order.
+    let arcs_of_net: Vec<Vec<usize>> = {
+        let mut v = vec![Vec::new(); nn];
+        for (k, a) in arcs.iter().enumerate() {
+            v[a.net_idx].push(k);
+        }
+        v
+    };
+    let win = |x: [f64; 2]| if x[0] > x[1] { x[0] } else { x[1] };
+    let slw_of = |x: [f64; 2]| if x[0] > x[1] { x[0] } else { x[1] };
+    // Net `i`'s coupling capacitance seen by its RC network, in fF, from every net's driver
+    // arrival `sw` and slew `net_slew` (its aggressors' windows: NOT causal in level order).
+    let net_xc = |i: usize, sw: &[[f64; 2]], net_slew: &[[f64; 2]]| -> f64 {
         // Per-net coupling capacitance seen by the RC network, in fF.
         //
         // 🔑 BASE, and it was missing: a coupling capacitor is GROUNDED on the net at
@@ -3306,67 +3343,58 @@ fn build_report(
         // 560.7 fF of wire — 34.7 % of the net's capacitance simply absent.
         // Coupling stays a per-NET aggregate: our Miller term is one number for the net,
         // so the window is taken from the worst lane rather than split per edge.
-        let win = |x: [f64; 2]| if x[0] > x[1] { x[0] } else { x[1] };
-        let slw_of = |x: [f64; 2]| if x[0] > x[1] { x[0] } else { x[1] };
-        let xc: Vec<f64> = (0..nn)
-            .map(|i| {
-                let svi = win(sw[i]);
-                let mut x: f64 = net_cpl[i].iter().map(|(_, cc)| *cc).sum();
-                if svi.is_finite() {
-                    for &(ai, cc) in &net_cpl[i] {
-                        let window = (slw_of(net_slew[i]) + slw_of(net_slew[ai])) / 2.0 + guard;
-                        if win(sw[ai]).is_finite() && (win(sw[ai]) - svi).abs() <= window {
-                            x += (miller - 1.0).max(0.0) * cc;
-                        }
-                    }
+        let svi = win(sw[i]);
+        let mut x: f64 = net_cpl[i].iter().map(|(_, cc)| *cc).sum();
+        if svi.is_finite() {
+            for &(ai, cc) in &net_cpl[i] {
+                let window = (slw_of(net_slew[i]) + slw_of(net_slew[ai])) / 2.0 + guard;
+                if win(sw[ai]).is_finite() && (win(sw[ai]) - svi).abs() <= window {
+                    x += (miller - 1.0).max(0.0) * cc;
                 }
-                x
-            })
-            .collect();
+            }
+        }
+        x
+    };
+    // Net `i`'s wire edges for analysis `mm` (0 early, 1 late), from its coupling `xc_i`
+    // (`net_xc`) and its driver's slew `slew_i`, per lane: each of its arcs' (net delay,
+    // degraded sink slew) written to `out_d[k]` / `out_s[k]`; slew 0 means "keep driver slew".
+    // Reads the driver waveforms its gate arcs left in `drvr_wave`, so call it after them.
+    let wires_of_net = |i: usize, mm: usize, xc_i: f64, slew_i: [f64; 2], out_d: &mut [[f64; 2]], out_s: &mut [[f64; 2]]| {
         // waveform-into-RC: a transient response per net (driver-slew-aware), memoized
         // so each sink reads the same simulation. Only built when it is actually selected.
-        let tr_net: Vec<Option<HashMap<Name, (f64, f64)>>> = (0..nn)
-            .map(|i| {
-                if !transient_first {
-                    return None;
-                }
-                let rc = net_rc[i]?;
-                net_drv_ip[i].as_ref()?;
-                let dn = node_of_pin[net_drv[i]?]?;
-                // the solve is in ns: the driver slew in, each delay and slew out
-                let map = rc.transient(dn, slw_of(net_slew[i]) * ns_per_time, xc[i], lib.thresholds)?;
-                Some(map.into_iter().map(|(n, (d, s))| (n, (d * time_per_ns, s * time_per_ns))).collect())
-            })
-            .collect();
+        let tr_i: Option<HashMap<Name, (f64, f64)>> = (|| {
+            if !transient_first {
+                return None;
+            }
+            let rc = net_rc[i]?;
+            net_drv_ip[i].as_ref()?;
+            let dn = node_of_pin[net_drv[i]?]?;
+            // the solve is in ns: the driver slew in, each delay and slew out
+            let map = rc.transient(dn, slw_of(slew_i) * ns_per_time, xc_i, lib.thresholds)?;
+            Some(map.into_iter().map(|(n, (d, s))| (n, (d * time_per_ns, s * time_per_ns))).collect())
+        })();
         // Each net's reduced Elmore, per edge, made once and read by every load, as the
         // reference reduces a driver's parasitic once (`ReduceToPiElmore`, one `setElmore` per
         // load pin) and each load's arc reads its own (`findElmore`). Made on the first load
         // that asks, from the same inputs every load of the net would give it: the driver node,
-        // this pass's coupling and the edge's receiver caps.
-        type NetElmore = Option<HashMap<Name, f64>>;
-        let elmore_net: Vec<[std::cell::OnceCell<NetElmore>; 2]> = (0..nn).map(|_| Default::default()).collect();
+        // this pass's coupling and the edge's receiver caps. Held by node (`elmore_by_node`).
+        type NetElmore = Option<Vec<(Name, f64)>>;
+        let elmore_i: [std::cell::OnceCell<NetElmore>; 2] = Default::default();
         // a net whose coupling moved since its loads' Elmore was kept: reduce it again
         {
             let mut xk = xc_kept.borrow_mut();
-            let mut tk = tau_kept.borrow_mut();
-            let stale: Vec<bool> = (0..nn)
-                .map(|i| {
-                    let b = xc[i].to_bits();
-                    let st = xk[i][mm] != Some(b);
-                    xk[i][mm] = Some(b);
-                    st
-                })
-                .collect();
-            for (k, a) in arcs.iter().enumerate() {
-                if stale[a.net_idx] {
+            let b = xc_i.to_bits();
+            if xk[i][mm] != Some(b) {
+                let mut tk = tau_kept.borrow_mut();
+                for &k in &arcs_of_net[i] {
                     tk[k][mm] = None;
                 }
             }
+            xk[i][mm] = Some(b);
         }
-        // each arc -> (net delay, degraded sink slew); slew 0 means "keep driver slew"
-        arcs.iter()
-            .enumerate()
-            .map(|(k, a)| {
+        for &k in &arcs_of_net[i] {
+            let a = &arcs[k];
+            let (d, s) = (|| -> ([f64; 2], [f64; 2]) {
                 let i = a.net_idx;
                 let mark = |b: u8| rc_branch.borrow_mut()[k] = b;
                 let Some(rc) = net_rc[i] else {
@@ -3425,7 +3453,7 @@ fn build_report(
                     if let (Some(dt), Some(st)) = (dnode, snode) {
                         let kept = tau_kept.borrow()[k][mm];
                         let taus = kept.unwrap_or_else(|| {
-                            let t = [0, 1].map(|l| elmore_net[i][l].get_or_init(|| rc.elmore(dt, xc[i], |k| net_pin_cap[i][mm][l].get(&k).copied()).map(|v| v.into_iter().collect())).as_ref().and_then(|dl| dl.get(&st).copied()));
+                            let t = [0, 1].map(|l| elmore_i[l].get_or_init(|| rc.elmore(dt, xc_i, |k| net_pin_cap[i][mm][l].get(&k).copied()).map(elmore_by_node)).as_ref().and_then(|dl| elmore_at(dl, st)));
                             tau_kept.borrow_mut()[k][mm] = Some(t);
                             t
                         });
@@ -3485,7 +3513,7 @@ fn build_report(
                                         sl[l] = sv;
                                         continue;
                                     }
-                                    let drvr_slew = net_slew[i][l];
+                                    let drvr_slew = slew_i[l];
                                     // degenerate case, verbatim from
                                     // `DmpAlg::loadDelaySlew`: an Elmore small against the
                                     // driver slew IS the delay, and the slew is undegraded.
@@ -3529,7 +3557,7 @@ fn build_report(
                 // above, not a replacement, and it must not run unless requested — it took
                 // precedence silently and displaced the reference model entirely.
                 if transient_first {
-                    if let (Some(map), Some(_)) = (&tr_net[i], &a.sink_ip) {
+                    if let (Some(map), Some(_)) = (&tr_i, &a.sink_ip) {
                         if let Some(sn) = node_of_pin[a.sink] {
                             if let Some(&(delay, slew)) = map.get(&sn) {
                                 mark(RC_TRANSIENT);
@@ -3544,20 +3572,33 @@ fn build_report(
                 // that lands here degrades no slew at all, and every downstream delay is
                 // looked up at too sharp a transition.
                 mark(RC_LUMPED);
-                let d = net_res[i] * net_cap[i] * fs_to_time + net_res[i] * xc[i] * fs_to_time;
+                let d = net_res[i] * net_cap[i] * fs_to_time + net_res[i] * xc_i * fs_to_time;
                 ([d, d], [0.0, 0.0])
-            })
-            .unzip()
+            })();
+            out_d[k] = d;
+            out_s[k] = s;
+        }
+    };
+    let compute_wires = |sw: &[[f64; 2]], net_slew: &[[f64; 2]], mm: usize| -> (Vec<[f64; 2]>, Vec<[f64; 2]>) {
+        let mut d = vec![[0.0; 2]; n_arcs];
+        let mut s = vec![[0.0; 2]; n_arcs];
+        for i in 0..nn {
+            wires_of_net(i, mm, net_xc(i, sw, net_slew), net_slew[i], &mut d, &mut s);
+        }
+        (d, s)
     };
 
     // every wire edge from a port with a driving cell also carries the cell's load-dependent
     // delay, `gate - intrinsic` (`annotateLoadDelays`)
+    // net `i`'s share for analysis `mm`, per lane, added to each of its wire edges; None for a
+    // net no driving-cell port drives
+    let port_extra = |i: usize, mm: usize| -> Option<[f64; 2]> { net_drv[i].and_then(|dn| port_drive.get(&dn)).map(|pd| pd.extra[mm]) };
     let compute = |sw: &[[f64; 2]], net_slew: &[[f64; 2]], mm: usize| -> (Vec<[f64; 2]>, Vec<[f64; 2]>) {
         let (mut d, s) = compute_wires(sw, net_slew, mm);
         if !port_drive.is_empty() {
             for (dk, a) in d.iter_mut().zip(arcs.iter()) {
-                if let Some(pd) = net_drv[a.net_idx].and_then(|dn| port_drive.get(&dn)) {
-                    for (x, e) in dk.iter_mut().zip(pd.extra[mm]) {
+                if let Some(extra) = port_extra(a.net_idx, mm) {
+                    for (x, e) in dk.iter_mut().zip(extra) {
                         *x += e;
                     }
                 }
@@ -5873,3 +5914,25 @@ mod clock_gating {
     }
 }
 
+
+#[cfg(test)]
+mod elmore_by_node_rule {
+    use super::{elmore_at, elmore_by_node};
+    use std::collections::HashMap;
+
+    /// The rule: a net's Elmore is looked up by node exactly as collecting the walk into a map
+    /// gave it, so a node the walk lists twice reads its LATER value, and a node the walk never
+    /// reached reads none.
+    #[test]
+    fn a_node_listed_twice_reads_its_later_value_as_the_map_did() {
+        let walk = vec![(7, 0.5), (3, 0.25), (7, 0.75), (11, 1.0), (3, 0.125)];
+        let by_node = elmore_by_node(walk.clone());
+        let map: HashMap<u32, f64> = walk.into_iter().collect();
+        for n in [3, 7, 11] {
+            assert_eq!(elmore_at(&by_node, n), map.get(&n).copied(), "node {n}");
+        }
+        assert_eq!(elmore_at(&by_node, 7), Some(0.75));
+        assert_eq!(elmore_at(&by_node, 5), None);
+        assert_eq!(by_node.len(), 3);
+    }
+}
