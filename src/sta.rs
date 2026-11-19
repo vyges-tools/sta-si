@@ -34,7 +34,8 @@ use crate::job::StaJob;
 use crate::liberty::{Arc, ClkEdge, Constraint, Dir, Lib};
 use crate::names::{instance_of, split_inst_pin};
 use crate::netlist::Netlist;
-use crate::spef::Spef;
+use crate::spef::compact::{Name, NO_NAME};
+use crate::spef::{CompactNet, CompactSpef, Spef};
 
 #[derive(Debug)]
 pub enum StaError {
@@ -974,7 +975,8 @@ pub struct Timer {
     nl: Netlist,
     lib: Lib,
     job: StaJob,
-    spef: Option<Spef>,
+    // the analysis form of the SPEF, shared: a rebuild and a checkpoint read the same one
+    spef: Option<std::sync::Arc<CompactSpef>>,
     dirty: bool, // a mutation is staged but not yet folded into the cached report
     // incremental fast path (Some only in the simple timing context — see `inc`).
     inc: Option<IncGraph>,
@@ -990,20 +992,34 @@ pub struct Timer {
 
 impl Timer {
     /// Build the timing state, run the analysis once, and retain the inputs for mutation. `O(N)`.
+    ///
+    /// The SPEF is converted to its analysis form ([`CompactSpef`]) for the Timer to keep; a
+    /// caller that has no further use for the [`Spef`] saves that copy with
+    /// [`Timer::build_compact`].
     pub fn build(
         nl: &Netlist,
         lib: &Lib,
         job: &StaJob,
         spef: Option<&Spef>,
     ) -> Result<Timer, StaError> {
-        let (report, timing, inc) = build_report(nl, lib, job, spef, true)?;
+        Timer::build_compact(nl, lib, job, spef.map(|s| std::sync::Arc::new(CompactSpef::from_ref(s))))
+    }
+
+    /// [`Timer::build`] from the SPEF's analysis form, which the Timer keeps (shared, not copied).
+    pub fn build_compact(
+        nl: &Netlist,
+        lib: &Lib,
+        job: &StaJob,
+        spef: Option<std::sync::Arc<CompactSpef>>,
+    ) -> Result<Timer, StaError> {
+        let (report, timing, inc) = build_report(nl, lib, job, spef.as_deref(), true)?;
         Ok(Timer {
             report,
             timing,
             nl: nl.clone(),
             lib: lib.clone(),
             job: job.clone(),
-            spef: spef.cloned(),
+            spef,
             dirty: false,
             inc,
             pending: HashMap::new(),
@@ -1419,7 +1435,7 @@ impl Timer {
         }
         // full re-analysis (and re-capture the incremental graph when eligible).
         let (report, timing, inc) =
-            build_report(&self.nl, &self.lib, &self.job, self.spef.as_ref(), true)?;
+            build_report(&self.nl, &self.lib, &self.job, self.spef.as_deref(), true)?;
         self.report = report;
         self.timing = timing;
         self.inc = inc;
@@ -1476,6 +1492,16 @@ pub fn analyze(
     lib: &Lib,
     job: &StaJob,
     spef: Option<&Spef>,
+) -> Result<TimingReport, StaError> {
+    analyze_compact(nl, lib, job, spef.map(CompactSpef::from_ref).as_ref())
+}
+
+/// [`analyze`] from the SPEF's analysis form.
+pub fn analyze_compact(
+    nl: &Netlist,
+    lib: &Lib,
+    job: &StaJob,
+    spef: Option<&CompactSpef>,
 ) -> Result<TimingReport, StaError> {
     Ok(build_report(nl, lib, job, spef, false)?.0)
 }
@@ -1541,7 +1567,7 @@ fn build_report(
     nl: &Netlist,
     lib: &Lib,
     job: &StaJob,
-    spef: Option<&Spef>,
+    spef: Option<&CompactSpef>,
     capture: bool,
 ) -> Result<(TimingReport, Timing, Option<IncGraph>), StaError> {
     // A clock source written as a pattern (`create_clock … [get_ports *clk*]`) is every port it
@@ -1974,7 +2000,7 @@ fn build_report(
         if let Some(d) = net.driver {
             // driver load = receiver pin caps + wire cap from SPEF (fF -> the library's unit),
             // per output edge
-            let wire = spef.and_then(|s| s.nets.get(netname)).map_or(0.0, |rc| rc.cap_ff / ff_per_cap);
+            let wire = spef.and_then(|s| s.net(netname)).map_or(0.0, |rc| rc.cap_ff / ff_per_cap);
             node_load[d] = net.load.map(|e| e.map(|c| c + wire));
         }
     }
@@ -2090,12 +2116,12 @@ fn build_report(
         let i = net_idx[name.as_str()];
         net_drv[i] = net.driver;
         net_drv_ip[i] = net.driver.and_then(ip_of);
-        if let Some(rc) = spef.and_then(|s| s.nets.get(name)) {
+        if let Some((s, rc)) = spef.and_then(|s| s.net(name).map(|rc| (s, rc))) {
             net_res[i] = rc.res_ohm;
             net_cap[i] = rc.cap_ff;
-            for (agg, cc) in &rc.coupling {
-                if let Some(&ai) = net_idx.get(agg.as_str()) {
-                    net_cpl[i].push((ai, *cc));
+            for &(agg, cc) in &rc.coupling {
+                if let Some(&ai) = net_idx.get(s.name(agg)) {
+                    net_cpl[i].push((ai, cc));
                 }
             }
         }
@@ -2103,16 +2129,21 @@ fn build_report(
     // Each net's parasitic, and each of its pins' SPEF node, found once by name (`pin_node`'s
     // answer: the net's first `*CONN` entry for the pin). Looked up per load and per pass by
     // name, a net cost its fanout squared in string compares each pass.
-    let net_rc: Vec<Option<&crate::spef::NetRc>> = net_order.iter().map(|nm| spef.and_then(|s| s.nets.get(nm))).collect();
-    let mut node_of_pin: Vec<Option<&str>> = vec![None; labels.len()];
+    let net_rc: Vec<Option<&CompactNet>> = net_order.iter().map(|nm| spef.and_then(|s| s.net(nm))).collect();
+    // Nodes are the SPEF's interned ids. A top-level port is its own node, named by the port
+    // (`node_of_port`); a name the net does not hold is `NO_NAME`, which no walk finds — as an
+    // unknown node NAME found nothing when nodes were strings.
+    let mut node_of_pin: Vec<Option<Name>> = vec![None; labels.len()];
+    let mut node_of_port: Vec<Name> = vec![NO_NAME; labels.len()];
     for (name, net) in &nets {
         let Some(rc) = net_rc[net_idx[name.as_str()]] else { continue };
+        let s = spef.expect("a net's parasitic comes from the SPEF");
         // a scan for a small net; an index for a large one, where the scans add up to its
         // fanout squared
-        let by: Option<HashMap<(&str, &str), &str>> = (rc.pins.len() > 32).then(|| {
+        let by: Option<HashMap<(&str, &str), Name>> = (rc.pins.len() > 32).then(|| {
             let mut by = HashMap::with_capacity(rc.pins.len());
-            for (pi, pp, nd) in &rc.pins {
-                by.entry((pi.as_str(), pp.as_str())).or_insert(nd.as_str());
+            for &(pi, pp, nd) in &rc.pins {
+                by.entry((s.name(pi), s.name(pp))).or_insert(nd);
             }
             by
         });
@@ -2120,8 +2151,10 @@ fn build_report(
             if let Some((a, b)) = split_inst_pin(&labels[v]) {
                 node_of_pin[v] = match &by {
                     Some(by) => by.get(&(a, b)).copied(),
-                    None => rc.pin_node(a, b),
+                    None => s.pin_node(rc, a, b),
                 };
+            } else {
+                node_of_port[v] = s.node(rc, &labels[v]).unwrap_or(NO_NAME);
             }
         }
     }
@@ -2146,17 +2179,17 @@ fn build_report(
         for (name, net) in &nets {
             if let Some(d) = net.driver {
                 let i = net_idx[name.as_str()];
-                if let (Some(rc), Some(_)) = (s.nets.get(name), &net_drv_ip[i]) {
+                if let (Some(rc), Some(_)) = (s.net(name), &net_drv_ip[i]) {
                     if let Some(dnode) = node_of_pin[d] {
                         // the same capacitance content the reduction sees: coupling
                         // grounded at factor 1.0, plus Liberty receiver caps at the sinks
                         let cc: f64 = net_cpl[i].iter().map(|(_, c)| *c).sum();
                         for (mm, lane) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
-                        let mut pcap: BTreeMap<String, f64> = BTreeMap::new();
+                        let mut pcap: HashMap<Name, f64> = HashMap::new();
                         for &sk in &net.sinks {
                             if split_inst_pin(&labels[sk]).is_some() {
                                 if let Some(nd) = node_of_pin[sk] {
-                                    *pcap.entry(nd.to_string()).or_default() +=
+                                    *pcap.entry(nd).or_default() +=
                                         pin_cap_node.get(&sk).map_or(0.0, |c| c[mm][lane]) * ff_per_cap;
                                 }
                             } else if is_out_port[sk] {
@@ -2165,10 +2198,10 @@ fn build_report(
                                 // it the Pi of a net driving a port carries only the wire, and
                                 // the gate sees almost no load (fft_ctrl_tlul's sram_clk_o:
                                 // 0.0706 ns against sign-off's 0.2125 ns at output140).
-                                *pcap.entry(labels[sk].clone()).or_default() += job.output_load * ff_per_cap;
+                                *pcap.entry(node_of_port[sk]).or_default() += job.output_load * ff_per_cap;
                             }
                         }
-                        if let Some((c2_ff, rpi, c1_ff)) = rc.pi_reduce(dnode, cc, &pcap) {
+                        if let Some((c2_ff, rpi, c1_ff)) = rc.pi_reduce(dnode, cc, |k| pcap.get(&k).copied()) {
                             shield[d][mm][lane] = Some((c2_ff / ff_per_cap, rpi, c1_ff / ff_per_cap));
                         }
                         }
@@ -2220,19 +2253,21 @@ fn build_report(
         for mm in 0..2 {
             for ol in 0..2 {
                 // the port net's Pi, with the same capacitance content as a gate driver's
-                let pi = spef.and_then(|s| s.nets.get(name)).and_then(|rc| {
+                let pi = spef.and_then(|s| s.net(name).map(|rc| (s, rc))).and_then(|(s, rc)| {
                     let cc: f64 = net_cpl[i].iter().map(|(_, c)| *c).sum();
-                    let mut pcap: BTreeMap<String, f64> = BTreeMap::new();
+                    let mut pcap: HashMap<Name, f64> = HashMap::new();
                     for &sk in &net.sinks {
                         if split_inst_pin(&labels[sk]).is_some() {
                             if let Some(nd) = node_of_pin[sk] {
-                                *pcap.entry(nd.to_string()).or_default() += pin_cap_node.get(&sk).map_or(0.0, |c| c[mm][ol]) * ff_per_cap;
+                                *pcap.entry(nd).or_default() += pin_cap_node.get(&sk).map_or(0.0, |c| c[mm][ol]) * ff_per_cap;
                             }
                         } else if is_out_port[sk] {
-                            *pcap.entry(labels[sk].clone()).or_default() += job.output_load * ff_per_cap;
+                            *pcap.entry(node_of_port[sk]).or_default() += job.output_load * ff_per_cap;
                         }
                     }
-                    rc.pi_reduce(name, cc, &pcap).map(|(c2, rpi, c1)| (c2 / ff_per_cap, rpi, c1 / ff_per_cap))
+                    // the port net's driver is the node named by the net
+                    let dn = s.node(rc, name).unwrap_or(NO_NAME);
+                    rc.pi_reduce(dn, cc, |k| pcap.get(&k).copied()).map(|(c2, rpi, c1)| (c2 / ff_per_cap, rpi, c1 / ff_per_cap))
                 });
                 for arc in arcs.iter().filter(|a| a.out_edges.drives(ol == 0)) {
                     let (dt, st) = if ol == 0 { (&arc.cell_rise, &arc.rise_transition) } else { (&arc.cell_fall, &arc.fall_transition) };
@@ -3203,9 +3238,9 @@ fn build_report(
     // ⚠️ Liberty caps are pF and SPEF node caps are fF, so convert.
     // Per edge (lane 0 rise, 1 fall): each edge's Elmore walks that edge's receiver caps.
     // `[analysis][edge]` like the driver load.
-    let net_pin_cap: Vec<[[BTreeMap<String, f64>; 2]; 2]> = {
-        let e = || [BTreeMap::new(), BTreeMap::new()];
-        let mut v: Vec<[[BTreeMap<String, f64>; 2]; 2]> = (0..nn).map(|_| [e(), e()]).collect();
+    let net_pin_cap: Vec<[[HashMap<Name, f64>; 2]; 2]> = {
+        let e = || [HashMap::new(), HashMap::new()];
+        let mut v: Vec<[[HashMap<Name, f64>; 2]; 2]> = (0..nn).map(|_| [e(), e()]).collect();
         if spef.is_some() {
             for a in arcs.iter() {
                 if net_rc[a.net_idx].is_none() {
@@ -3216,7 +3251,7 @@ fn build_report(
                         let c = pin_cap_node.get(&a.sink).copied().unwrap_or([[0.0; 2]; 2]);
                         for mm in 0..2 {
                             for l in 0..2 {
-                                *v[a.net_idx][mm][l].entry(node.to_string()).or_default() += c[mm][l] * ff_per_cap;
+                                *v[a.net_idx][mm][l].entry(node).or_default() += c[mm][l] * ff_per_cap;
                             }
                         }
                     }
@@ -3227,7 +3262,7 @@ fn build_report(
                     // every other load of a net that drives a port missed the port's load.
                     for lanes in v[a.net_idx].iter_mut() {
                         for caps in lanes.iter_mut() {
-                            *caps.entry(labels[a.sink].clone()).or_default() += job.output_load * ff_per_cap;
+                            *caps.entry(node_of_port[a.sink]).or_default() += job.output_load * ff_per_cap;
                         }
                     }
                 }
@@ -3290,7 +3325,7 @@ fn build_report(
             .collect();
         // waveform-into-RC: a transient response per net (driver-slew-aware), memoized
         // so each sink reads the same simulation. Only built when it is actually selected.
-        let tr_net: Vec<Option<BTreeMap<String, (f64, f64)>>> = (0..nn)
+        let tr_net: Vec<Option<HashMap<Name, (f64, f64)>>> = (0..nn)
             .map(|i| {
                 if !transient_first {
                     return None;
@@ -3308,7 +3343,7 @@ fn build_report(
         // load pin) and each load's arc reads its own (`findElmore`). Made on the first load
         // that asks, from the same inputs every load of the net would give it: the driver node,
         // this pass's coupling and the edge's receiver caps.
-        type NetElmore = Option<BTreeMap<String, f64>>;
+        type NetElmore = Option<HashMap<Name, f64>>;
         let elmore_net: Vec<[std::cell::OnceCell<NetElmore>; 2]> = (0..nn).map(|_| Default::default()).collect();
         // a net whose coupling moved since its loads' Elmore was kept: reduce it again
         {
@@ -3381,16 +3416,16 @@ fn build_report(
                 {
                     let dnode = match &net_drv_ip[i] {
                         Some(_) => net_drv[i].and_then(|d| node_of_pin[d]),
-                        None => net_drv[i].map(|d| labels[d].as_str()),
+                        None => net_drv[i].map(|d| node_of_port[d]),
                     };
                     let snode = match &a.sink_ip {
                         Some(_) => node_of_pin[a.sink],
-                        None => Some(labels[a.sink].as_str()),
+                        None => Some(node_of_port[a.sink]),
                     };
                     if let (Some(dt), Some(st)) = (dnode, snode) {
                         let kept = tau_kept.borrow()[k][mm];
                         let taus = kept.unwrap_or_else(|| {
-                            let t = [0, 1].map(|l| elmore_net[i][l].get_or_init(|| rc.elmore(dt, xc[i], &net_pin_cap[i][mm][l])).as_ref().and_then(|dl| dl.get(st).copied()));
+                            let t = [0, 1].map(|l| elmore_net[i][l].get_or_init(|| rc.elmore(dt, xc[i], |k| net_pin_cap[i][mm][l].get(&k).copied()).map(|v| v.into_iter().collect())).as_ref().and_then(|dl| dl.get(&st).copied()));
                             tau_kept.borrow_mut()[k][mm] = Some(t);
                             t
                         });
@@ -3496,7 +3531,7 @@ fn build_report(
                 if transient_first {
                     if let (Some(map), Some(_)) = (&tr_net[i], &a.sink_ip) {
                         if let Some(sn) = node_of_pin[a.sink] {
-                            if let Some(&(delay, slew)) = map.get(sn) {
+                            if let Some(&(delay, slew)) = map.get(&sn) {
                                 mark(RC_TRANSIENT);
                                 // one transient per net, so both edges share it
                                 return ([delay, delay], [slew, slew]);

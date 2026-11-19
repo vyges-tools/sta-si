@@ -209,7 +209,19 @@ pub fn analyze_job_opts(
     if let Some(s) = spef.as_ref() {
         emit_spef_coverage(job, &nl, s);
     }
-    sta::analyze(&nl, &lib, job, spef.as_ref())
+    // the analysis form from here: the String form is freed as it is converted
+    let spef = spef.map(crate::spef::CompactSpef::from_spef);
+    sta::analyze_compact(&nl, &lib, job, spef.as_ref())
+}
+
+/// [`load_inputs`] with the SPEF in its analysis form, for a caller that only times it
+/// ([`Timer::build_compact`](crate::sta::Timer::build_compact)).
+pub fn load_inputs_compact(
+    job: &StaJob,
+    lib_opts: crate::liberty::LibOpts,
+) -> Result<(crate::netlist::Netlist, Lib, Option<crate::spef::CompactSpef>), StaError> {
+    let (nl, lib, spef) = load_inputs(job, lib_opts)?;
+    Ok((nl, lib, spef.map(crate::spef::CompactSpef::from_spef)))
 }
 
 /// The job's netlist, libraries (one, by [`load_libs`]) and SPEF (in the netlist's net names),
@@ -291,8 +303,9 @@ pub fn sdf_for_job_opts(
     };
     // Build the timer and emit from IT: the SDF must be a serialization of the analysis,
     // not a second derivation of delay. See the note in `sdf.rs`.
-    let t = sta::Timer::build(&nl, &lib, job, spef.as_ref())?;
-    Ok(crate::sdf::emit(&job.design, &nl, &lib, spef.as_ref(), &t))
+    let spef = spef.map(|s| std::sync::Arc::new(crate::spef::CompactSpef::from_spef(s)));
+    let t = sta::Timer::build_compact(&nl, &lib, job, spef.clone())?;
+    Ok(crate::sdf::emit_compact(&job.design, &nl, &lib, spef.as_deref(), &t))
 }
 
 /// Emit the shared Liberty IR (merged across the job's libs) as JSON — the

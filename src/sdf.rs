@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 
 use crate::liberty::{Dir, Lib};
 use crate::netlist::Netlist;
-use crate::spef::Spef;
+use crate::spef::{CompactSpef, Spef};
 use crate::sta::Timer;
 
 /// Fallback input slew, used **only** for a pin the timer does not carry (an
@@ -114,6 +114,11 @@ fn check_lines(
 /// Emit a complete SDF `DELAYFILE` for the design, using `t`'s propagated slews and
 /// loads so the file agrees with the timing report by construction.
 pub fn emit(design: &str, nl: &Netlist, lib: &Lib, spef: Option<&Spef>, t: &Timer) -> String {
+    emit_compact(design, nl, lib, spef.map(CompactSpef::from_ref).as_ref(), t)
+}
+
+/// [`emit`] from the SPEF's analysis form.
+pub fn emit_compact(design: &str, nl: &Netlist, lib: &Lib, spef: Option<&CompactSpef>, t: &Timer) -> String {
     // the timer's state at `inst/pin` on one edge, or None if it carries no such node: an
     // arc's delay to one output edge is looked up at the slew of the input edge that drives it
     // and at the load of that output edge, never at the worst lane's
@@ -256,17 +261,17 @@ pub fn emit(design: &str, nl: &Netlist, lib: &Lib, spef: Option<&Spef>, t: &Time
                     continue;
                 }
                 // per-sink Elmore from the net's RC (fall back to lumped net delay)
-                let netrc = sp.nets.get(net);
+                let netrc = sp.net(net);
                 let elmore = netrc
-                    .and_then(|rc| rc.pin_node(&inst.name, &out.name))
-                    .and_then(|d| netrc.unwrap().elmore(d, 0.0, &std::collections::BTreeMap::new()));
+                    .and_then(|rc| sp.pin_node(rc, &inst.name, &out.name))
+                    .and_then(|d| netrc.unwrap().elmore(d, 0.0, |_| None));
                 // the RC delays are in ns: the file is in the library's time unit
                 let time_per_ns = crate::sta::pow10_exact(1e-9 / lib.units.time_s);
-                let elmore = elmore.map(|m| m.into_iter().map(|(n, d)| (n, d * time_per_ns)).collect::<std::collections::BTreeMap<_, _>>());
+                let elmore = elmore.map(|m| m.into_iter().map(|(n, d)| (n, d * time_per_ns)).collect::<std::collections::HashMap<_, _>>());
                 let lumped = sp.net_delay_ns(net) * time_per_ns;
                 for (si, sp_pin) in sinks {
-                    let d = match (&elmore, netrc.and_then(|rc| rc.pin_node(si, sp_pin))) {
-                        (Some(m), Some(n)) => m.get(n).copied().unwrap_or(lumped),
+                    let d = match (&elmore, netrc.and_then(|rc| sp.pin_node(rc, si, sp_pin))) {
+                        (Some(m), Some(n)) => m.get(&n).copied().unwrap_or(lumped),
                         _ => lumped,
                     };
                     inter.push(format!(

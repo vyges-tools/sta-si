@@ -15,9 +15,10 @@ use vyges_sta_si::sta::Timer;
 fn main() {
     let p = std::env::args().nth(1).expect("usage: endpoint_slacks JOB.sta");
     let job = StaJob::load(&p).expect("load job");
+    // the SPEF in its analysis form, handed to the Timer: one copy, as the CLI holds it
     let (nl, lib, spef) =
-        vyges_sta_si::engine::load_inputs(&job, vyges_sta_si::liberty::LibOpts { skip_ccs: true }).expect("load inputs");
-    let t = Timer::build(&nl, &lib, &job, spef.as_ref()).expect("build timer");
+        vyges_sta_si::engine::load_inputs_compact(&job, vyges_sta_si::liberty::LibOpts { skip_ccs: true }).expect("load inputs");
+    let t = Timer::build_compact(&nl, &lib, &job, spef.map(std::sync::Arc::new)).expect("build timer");
     let r = t.report();
     eprintln!("WNS {} WHS {}", r.wns, r.whs);
     for (p, s) in &r.hold_slacks {
