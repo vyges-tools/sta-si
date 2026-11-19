@@ -433,3 +433,28 @@ fn a_clock_gate_enable_is_checked() {
     let g: Vec<&str> = r.check_paths.iter().filter(|p| p.endpoint == "g").map(|p| p.group.as_str()).collect();
     assert!(!g.is_empty() && g.iter().all(|g| *g == "gated clock"), "{g:?}");
 }
+
+/// Reference rule (`Search::thruClkTag` / `thruClkInfo`: a clock path keeps the clock edge it was
+/// seeded with through every combinational arc while the pin's transition follows the arc's
+/// sense): a rising-edge register clocked through an inverter is reached at its rising clock pin
+/// by the clock's FALLING edge, so it captures and launches on the fall. Period 10: r1 captures
+/// r0 (launched on the rise, 0.2) at the fall, 5 + 0.1 inverter - 0.05 setup (setup 4.85; on the
+/// rise it was 9.85), with hold against the fall before (0.2 + 5 - 0.1 - 0.02 = 5.08); r1
+/// launches on the fall into r2, captured on the next rise (10 - 0.05 - 5.3: 4.65; hold 5.28).
+#[test]
+fn a_register_behind_an_inverted_clock_takes_the_clock_fall() {
+    let nl = "module t (clk, x, y); input clk, x; output y; wire a, b, ckn;\n\
+              DFF r0 (.CK(clk), .D(x), .Q(a));\n\
+              INV i (.A(clk), .Y(ckn));\n\
+              DFF r1 (.CK(ckn), .D(a), .Q(b));\n\
+              DFF r2 (.CK(clk), .D(b), .Q(y));\n\
+              endmodule";
+    let t = build(nl, &job(10.0)).unwrap();
+    let hold = t.hold_endpoint_slacks();
+    let h = |p: usize| hold.iter().find(|(q, _)| *q == p).map(|(_, h)| *h).unwrap();
+    let (d1, d2) = (pin(&t, "r1/D"), pin(&t, "r2/D"));
+    assert!(close(t.slack(d1).unwrap(), 4.85), "r1 setup {:?}", t.slack(d1));
+    assert!(close(h(d1), 5.08), "r1 hold {}", h(d1));
+    assert!(close(t.slack(d2).unwrap(), 4.65), "r2 setup {:?}", t.slack(d2));
+    assert!(close(h(d2), 5.28), "r2 hold {}", h(d2));
+}

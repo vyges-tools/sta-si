@@ -2426,6 +2426,58 @@ fn build_report(
             }
         }
     }
+    // ---- the clock EDGE each clock-network pin's transition carries ------------------------------
+    // The reference's clock path keeps the clock edge it was seeded with (`ClkInfo::clkEdge`; a
+    // clock source's rising transition carries the rise edge, its falling the fall) through every
+    // wire and combinational arc (`Search::thruClkTag` / `thruClkInfo` leave it), while the pin's
+    // own transition follows each arc's sense: through an inverting gate a register's rising clock
+    // pin is reached by the clock's FALLING edge, so a rising-edge register there launches and
+    // captures on the fall. `src_mask[v][lane]`: the source edges (bit 0 rise, bit 1 fall) whose
+    // path reaches `v`'s transition `lane`, along the arcs the arrivals take (`feeds`, the
+    // constants' lanes), stopping at a register clock pin as `clock_reached` does.
+    let mut src_mask = vec![[0u8; 2]; n];
+    {
+        let mut stack: Vec<usize> = clock_src.keys().copied().filter(|&s| !const_driver[s]).collect();
+        for &s in &stack {
+            src_mask[s] = [1, 2];
+        }
+        while let Some(u) = stack.pop() {
+            if is_ck[u] {
+                continue;
+            }
+            for e in out_edges[u].iter().filter(|e| e.searched() && !e.latch_dq && clock_reached[e.to]) {
+                let mut m = src_mask[e.to];
+                for il in 0..2 {
+                    for ol in 0..2 {
+                        let thru = match &e.kind {
+                            EdgeKind::Net(_) => il == ol && e.lanes[il][ol],
+                            EdgeKind::Cell(arc) => {
+                                arc.clk_edge.is_none() && arc.out_edges.drives(ol == 0) && arc.feeds(il == 0, ol == 0) && e.lanes[il][ol]
+                            }
+                        };
+                        if thru {
+                            m[ol] |= src_mask[u][il];
+                        }
+                    }
+                }
+                if m != src_mask[e.to] {
+                    src_mask[e.to] = m;
+                    stack.push(e.to);
+                }
+            }
+        }
+    }
+    // The clock edge (0 rise, 1 fall) that pin `v`'s transition `lane` belongs to: the one source
+    // edge that reaches it, else (no clock, or both edges through a non-unate arc) the transition.
+    let src_edge = |v: Option<usize>, lane: usize| -> usize {
+        match v.map(|v| src_mask[v][lane]) {
+            Some(1) => 0,
+            Some(2) => 1,
+            _ => lane,
+        }
+    };
+    // A rising-edge register reached by the clock's fall launches on the fall (see `fall_launch`).
+    let fall_launch = fall_launch || ck_lane_list.iter().any(|&(i, l)| l.is_some_and(|l| src_edge(Some(i), l) == 1));
     // IDEAL clock networks (an SDC clock with no `set_propagated_clock`): every pin from the
     // source up to the register clock pins arrives at the source's own time — no network delay —
     // with the clock transition as its slew, so a register's CK->Q is looked up at that slew. The
@@ -2473,7 +2525,10 @@ fn build_report(
     // arrival. The incremental fast path has no slew-only arc, so a design with one leaves it off.
     // (The clock gating check the reference infers at the gate is not made here.)
     let data_into_clock = |u: usize, v: usize| -> bool { clock_declared && !clock_reached[u] && clock_reached[v] };
-    let simple_ctx = simple_ctx && !out_edges.iter().enumerate().any(|(u, es)| es.iter().any(|e| data_into_clock(u, e.to)));
+    // (and the fast path takes a register's clock edge from its library edge alone)
+    let simple_ctx = simple_ctx
+        && !fall_launch
+        && !out_edges.iter().enumerate().any(|(u, es)| es.iter().any(|e| data_into_clock(u, e.to)));
 
     // ---- inferred clock gating checks ----------------------------------------------------------
     // The reference infers a setup and a hold check at a gate's enable input wherever a data
@@ -2751,7 +2806,8 @@ fn build_report(
                                         continue;
                                     }
                                     // a per-edge pass: only its own edge launches
-                                    if launch.is_some_and(|le| le != il) {
+                                    // (the clock's edge, not the pin's: see `src_edge`)
+                                    if launch.is_some_and(|le| le != src_edge(Some(u), il)) {
                                         continue;
                                     }
                                     // ⛔ AND A DATA ARRIVAL AT A CLOCK PIN DOES NOT LAUNCH
@@ -3979,7 +4035,8 @@ fn build_report(
     let latch_opening = |cap: Option<usize>, lck: Option<usize>, cclk: Option<&str>, pc: f64, cl: usize, rel_close: f64| -> (f64, f64, f64, f64) {
         let el = 1 - cl;
         let high = clock_edge_time(job, cclk, 1, pc) - clock_edge_time(job, cclk, 0, pc);
-        let pulse_width = if el == 0 { high } else { pc - high };
+        // the opening's clock edge (`src_edge`); `el` is the enable pin's transition
+        let pulse_width = if src_edge(cap, el) == 0 { high } else { pc - high };
         let open_latency = cap.map(|i| early_arr[i][el]).filter(|a| a.is_finite()).unwrap_or(0.0);
         let open_crpr = match (lck, cap) {
             (Some(l), Some(c)) => crpr_credit(l, c, el, true),
@@ -4053,7 +4110,7 @@ fn build_report(
                     (Some(a), Some(b)) => crpr_credit(a, b, cl, true),
                     _ => 0.0,
                 };
-                let rel_close = edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), cl).0 + shift;
+                let rel_close = edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), src_edge(cap, cl)).0 + shift;
                 // ⛔ The setup time the SEARCH clips a latch's borrow with is not the one its check
                 // reports. The search takes the check arc's delay on the enable path's analysis
                 // (`Latches::latchSetupMargin`: the disable path's own delay-calculation point,
@@ -4067,7 +4124,7 @@ fn build_report(
                     best = close;
                     let (open, rel_open, _, _) = latch_opening(cap, crpr_lck, to_end.clock.as_deref(), pc, cl, rel_close);
                     let close = borrow_limit(idx, cap, to_end.clock.as_deref()).map_or(close, |lim| open + lim);
-                    *o = Some((open, close, rel_open, 1 - cl));
+                    *o = Some((open, close, rel_open, src_edge(cap, 1 - cl)));
                 }
             }
         }
@@ -4265,12 +4322,12 @@ fn build_report(
                     (Some(l), Some(c)) => crpr_credit(l, c, cl, true),
                     _ => 0.0,
                 };
-                (cap_early + edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), cl).0 + shift + crpr - job.setup_uncertainty, ck_slew)
+                (cap_early + edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), src_edge(cap, cl)).0 + shift + crpr - job.setup_uncertainty, ck_slew)
             };
             let open_of = |c: &Constraint, via: bool| -> f64 {
                 let cl = usize::from(c.clk_edge == ClkEdge::Fall);
                 let cclk = to_end.clock.as_deref();
-                let rel_close = edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, cclk, cl).0 + shift;
+                let rel_close = edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, cclk, src_edge(cap, cl)).0 + shift;
                 latch_opening(cap, lck.filter(|_| !via), cclk, pc, cl, rel_close).0
             };
             let is_latch = latch_d.contains(idx);
@@ -4683,7 +4740,7 @@ fn build_report(
                 };
                 let cap_late = cap.map(|i| late_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
                 let ck_slew = check_clk_slew(cap, cl, false);
-                let hold_rel = hold_relation(idx, pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), cl) + shift;
+                let hold_rel = hold_relation(idx, pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), src_edge(cap, cl)) + shift;
                 (crpr - cap_late - hold_rel - job.hold_uncertainty, ck_slew)
             };
             let mut reached = false;
@@ -4916,7 +4973,7 @@ fn build_report(
             // job's for an output
             let pl_or = |default: f64| launch_period(lck, v, pred, run.edge, default);
             let pl = pl_or(period);
-            let launch_edge = if k.is_some() { s0l } else { run.edge };
+            let launch_edge = if k.is_some() { src_edge(Some(s0), s0l) } else { run.edge };
             let launch = clock_edge_time(job, Some(src_name), launch_edge, pl);
             let src_clock = clock_line(src_name, launch_edge == 0, launch);
             let (startpoint, start_reason) = match k {
@@ -4996,13 +5053,13 @@ fn build_report(
                 if max {
                     let cap_early = cap.map(|i| early_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
                     let ck_slew = check_clk_slew(cap, cl, true);
-                    let rel = edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), cl).0 + shift;
+                    let rel = edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), src_edge(cap, cl)).0 + shift;
                     let req = cap_early + rel + crpr - job.setup_uncertainty - c.eval_edge(l == 0, ck_slew, late_slew[v][l]);
                     (req, cl, cap_early, rel, crpr)
                 } else {
                     let cap_late = cap.map(|i| late_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
                     let ck_slew = check_clk_slew(cap, cl, false);
-                    let rel = hold_relation(v, pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), cl) + shift;
+                    let rel = hold_relation(v, pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), src_edge(cap, cl)) + shift;
                     let req = cap_late + rel + job.hold_uncertainty - crpr + c.eval_edge(l == 0, ck_slew, early_slew[v][l]);
                     (req, cl, cap_late, rel, crpr)
                 }
@@ -5033,7 +5090,7 @@ fn build_report(
                     input_delay,
                     lines,
                     arrival,
-                    tgt_clock: clock_line(tgt_name, cl == 1, launch + rel_open),
+                    tgt_clock: clock_line(tgt_name, src_edge(cap, 1 - cl) == 0, launch + rel_open),
                     tgt_network_delay: open_latency,
                     uncertainty: -job.setup_uncertainty,
                     crpr: open_crpr,
@@ -5067,7 +5124,7 @@ fn build_report(
                 input_delay,
                 lines,
                 arrival,
-                tgt_clock: clock_line(tgt_name, cl == 0, launch + rel),
+                tgt_clock: clock_line(tgt_name, src_edge(cap, cl) == 0, launch + rel),
                 tgt_network_delay: cap_arr,
                 uncertainty: if max { -job.setup_uncertainty } else { job.hold_uncertainty },
                 crpr: if max { crpr } else { -crpr },
