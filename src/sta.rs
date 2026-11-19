@@ -4509,6 +4509,15 @@ fn build_report(
         if let Some(b) = borrow {
             latch_borrow.push((v, b));
         }
+        // ⛔ No launching edge's check reached it: every path into it on the edge that carries
+        // its arrival is cut (a false path), and no other edge's launch arrives. The reference has
+        // no path end here (`VisitPathEnds`: no tag survives); scored with the merged arrival it
+        // brought the cut path back as the worst slack.
+        if !clk_launched && !slack.is_finite() {
+            excluded_setup[v] = true;
+            endpoints -= 1;
+            continue;
+        }
         if !slack.is_finite() {
             slack = endpoint_req[v] - arr_v;
         }

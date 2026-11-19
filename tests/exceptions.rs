@@ -364,3 +364,35 @@ fn io_delays_keep_their_clock_and_edge() {
     let ddr = run("set_output_delay 0.6 -clock a [get_ports dout]\nset_output_delay 0.2 -clock a -clock_fall -add_delay [get_ports dout]\n").unwrap();
     assert!((base.1 - ddr.1 - 0.1).abs() < 1e-9, "the falling edge's 0.5 - 0.2 is the tighter: {ddr:?}");
 }
+
+/// Reference rule (a false path drops the path, `Search` tags it out; an endpoint no other path
+/// reaches has no check, `VisitPathEnds`): with a launch on each clock edge (here an input delay
+/// on the clock's fall) every endpoint is checked once per launching edge. An end whose only path
+/// is false-pathed on the rise and which no fall launch reaches is no end at all. It used to be
+/// scored with the merged arrival against the merged required time: the cut path came back as
+/// the design's worst slack (measured on CoralNPU: -270 ps from a false-pathed input, where the
+/// reference's worst is -136 ps).
+#[test]
+fn a_false_path_end_no_other_launch_reaches_is_no_end() {
+    let nl = "module ex ( ca, din, dfall, y, z ); input ca, din, dfall; output y, z; wire n1, n2;\n\
+              INV g1 ( .A(din), .Y(n1) );\n\
+              DFF r1 ( .CK(ca), .D(n1), .Q(y) );\n\
+              INV g2 ( .A(dfall), .Y(n2) );\n\
+              DFF r2 ( .CK(ca), .D(n2), .Q(z) );\n\
+              endmodule";
+    let rep = |cmds: &str| {
+        let sdc = vyges_sta_si::sdc::Sdc::parse(&format!(
+            "create_clock -name a -period 0.5 [get_ports ca]\n\
+             set_input_delay 0.45 -clock a [get_ports din]\nset_input_delay 0.1 -clock a -clock_fall [get_ports dfall]\n{cmds}"
+        ))
+        .unwrap();
+        let mut j = job(vec![]);
+        vyges_sta_si::job::merge_sdc_into(&sdc, &mut j);
+        analyze_inputs(nl, LIB, &j).unwrap()
+    };
+    let base = rep("");
+    assert!(base.wns < 0.0, "din's path violates: {}", base.wns);
+    let cut = rep("set_false_path -from [get_ports din]\n");
+    assert_eq!(cut.endpoints, base.endpoints - 1, "r1/D's only path is from din");
+    assert!(cut.wns > 0.0, "the cut path is not the worst slack: {}", cut.wns);
+}
