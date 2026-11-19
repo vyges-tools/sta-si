@@ -1664,10 +1664,8 @@ fn build_report(
         ensure_net(&mut nets, p);
         let net = nets.get_mut(p).unwrap();
         net.sinks.push(idx);
-        for mm in 0..2 {
-            for l in 0..2 {
-                net.load[mm][l] += job.output_load;
-            }
+        for v in net.load.iter_mut().flatten() {
+            *v += job.output_load;
         }
         output_ports.push((idx, p.clone()));
     }
@@ -2271,12 +2269,11 @@ fn build_report(
                 });
                 for arc in arcs.iter().filter(|a| a.out_edges.drives(ol == 0)) {
                     let (dt, st) = if ol == 0 { (&arc.cell_rise, &arc.rise_transition) } else { (&arc.cell_fall, &arc.fall_transition) };
-                    for il in 0..2 {
+                    for (il, &sin) in spec.input_transition.iter().enumerate() {
                         let feeds = arc.feeds(il == 0, ol == 0); // the reference's edge pairs (latch D->Q, tri-state by kind)
                         if !feeds {
                             continue;
                         }
-                        let sin = spec.input_transition[il];
                         let intrinsic = dt.lookup(sin, 0.0);
                         let vth = crate::dmp::Vth {
                             vth: if ol == 0 { th.output_rise } else { th.output_fall },
@@ -4354,7 +4351,8 @@ fn build_report(
         out
     };
     // (data pin, its setup checks, its enable pin key, Q, the D->Q arc, the lanes it passes)
-    let latch_arcs: Vec<(usize, &[Constraint], &Option<String>, usize, &Arc, [[bool; 2]; 2])> = flop_d
+    type LatchArc<'a> = (usize, &'a [Constraint], &'a Option<String>, usize, &'a Arc, [[bool; 2]; 2]);
+    let latch_arcs: Vec<LatchArc<'_>> = flop_d
         .iter()
         .filter(|(idx, _, _)| latch_d.contains(idx))
         .flat_map(|(idx, setup, ck)| {
