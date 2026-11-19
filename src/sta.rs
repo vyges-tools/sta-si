@@ -4688,11 +4688,14 @@ fn build_report(
         if !slack.is_finite() {
             slack = endpoint_req[v] - arr_v;
         }
-        // Several launching edges: no one required time pairs with the merged arrival, so the
-        // slack is folded back into it, as the incremental path folds its per-edge slack — the
-        // query API's `required − arrival` is then this endpoint's checked slack. A latch end's
-        // required time depends on its arrival, so it is folded back the same way.
-        if runs.len() > 1 || borrow.is_some() {
+        // ⛔ The checked slack is per launching edge AND data edge; no one required time pairs
+        // with the merged arrival (the latest over edges and launches), so the slack is folded
+        // back into it, as the incremental path folds its per-edge slack — the query API's
+        // `required − arrival` is then this endpoint's checked slack, the one the report and WNS
+        // read. Folded only for several launching edges or a latch end, the query answered the
+        // tightest required (one data edge) less the latest arrival (the other): an ECO consumer
+        // ranked a pessimistic slack the report never showed.
+        if slack_at.is_some() {
             endpoint_req[v] = arr_v + slack;
         }
         if let Some((r, l)) = slack_at {

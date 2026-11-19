@@ -426,3 +426,31 @@ fn timer_checkpoint_restore_round_trips() {
     );
     assert!(!t.is_dirty());
 }
+
+/// The query API's slack is the CHECKED one: per data edge, each edge's arrival against that
+/// edge's own requirement (`VisitPathEnds::visitCheckEnd` matches the check arc's data edge), the
+/// worst of them — what WNS and the reported path read. Taken as the tightest required (the
+/// falling data edge's, its setup 0.25 larger) less the latest arrival (the rising edge's), it
+/// paired two edges no check pairs, and an ECO consumer ranked a slack the report never showed.
+#[test]
+fn query_slack_pairs_each_data_edge_with_its_own_check() {
+    // the setup check on a falling D needs 0.30, on a rising one 0.05
+    let lib_src = SEQ_LIB.replacen(
+        "fall_constraint (s) { index_1 (\"0.01\"); index_2 (\"0.01\"); values ( \"0.05\" ); } }",
+        "fall_constraint (s) { index_1 (\"0.01\"); index_2 (\"0.01\"); values ( \"0.30\" ); } }",
+        1,
+    );
+    assert_ne!(lib_src, SEQ_LIB, "the setup fall constraint was not replaced");
+    let lib = Lib::parse(&lib_src).unwrap();
+    let nl = netlist::parse(SEQ_NL).unwrap();
+    let t = Timer::build(&nl, &lib, &seq_job(2.0), None).unwrap();
+    let r = t.report();
+    let ends = t.endpoint_slacks();
+    assert_eq!(ends[0].1, r.wns, "the worst queried slack is WNS");
+    for (p, s) in &ends {
+        assert_eq!(t.slack(*p), Some(*s), "{}", t.pin_label(*p));
+    }
+    let p = r.check_paths.iter().find(|c| c.max && c.endpoint == "r2").expect("setup path to r2");
+    let r2d = ends.iter().find(|(p, _)| t.pin_label(*p) == "r2/D").expect("r2/D is an endpoint").1;
+    assert!((p.slack - r2d).abs() < 1e-12, "reported {} queried {r2d}", p.slack);
+}
