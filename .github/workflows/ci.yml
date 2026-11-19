@@ -17,7 +17,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.100.0
+        with:
+          components: clippy
       - name: Build
         run: cargo build --locked --features mimalloc --verbose
       - name: Test
         run: cargo test --locked --verbose
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
