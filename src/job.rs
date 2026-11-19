@@ -85,9 +85,9 @@ pub struct IoDelaySpec {
     pub rf: [bool; 2],
     pub mm: [bool; 2],
     pub add: bool,
-    /// The delay per `[min, max][rise, fall]`, with any clock latency the command says it already
-    /// includes taken out (an input) or put in (an output) — this timer leaves a latency that is
-    /// the same on both sides of a path out of both.
+    /// The delay per `[min, max][rise, fall]`, with its clock's latency less the registers' put in
+    /// (an input) or taken out (an output) — this timer leaves a latency that is the same on both
+    /// sides of a path out of both (see `register_latency`).
     pub value: [[f64; 2]; 2],
 }
 
@@ -644,20 +644,51 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
     // side of a path, so on a path launched and captured by one clock it cancels. Measured on a
     // two-flop design with an input and an output delay: every slack in the reference is the same
     // with 0, 0.5 network, 0.4 source and both; folding it in moved the worst slack by exactly
-    // the latency. Where latency does not cancel (clocks with different latencies, latency on a
-    // pin, a delay that says it includes latency) see `latency_not_modelled`.
+    // the latency. What is added is the DIFFERENCE between the I/O delay clock's latency and the
+    // registers' (`register_latency`): zero on one ideal clock, the whole latency of a virtual
+    // clock against a propagated register clock. Where latency does not cancel otherwise
+    // (register clocks with different latencies, latency on a pin) see `latency_not_modelled`.
     // ⛔ An every-input-but delay names the ports it LEAVES OUT: read as named ports, the delay
     // went onto the one port it excluded and off every other.
     // Each command keeps its clock, edge (`-clock_fall`), analyses and data edges, `-add_delay`
     // and the latency it says it includes (`IoDelaySpec`); before, every delay was one number
     // relative to the primary clock.
     let ideal = ideal_clocks(sdc);
+    // The latency the registers' clocks leave out of every arrival here, when it is one value
+    // (see `register_latency`): an I/O delay's clock latency is put in relative to it.
+    let baseline = register_latency(sdc);
     let spec = |d: &vyges_loom::sdc::IoDelay, input: bool| -> IoDelaySpec {
         let has = |f: &str| d.flags.iter().any(|x| x == f);
         let pick = |a: &str, b: &str| if has(a) || has(b) { [has(a), has(b)] } else { [true, true] };
         let mut value = [[d.value; 2]; 2];
-        if let Some(c) = &d.clock {
-            let is_ideal = sdc.clocks.iter().find(|k| &k.name == c).is_some_and(|k| k.sources.iter().any(|s| ideal.contains_key(s)) || k.is_virtual());
+        if let (Some(c), Some(b)) = (&d.clock, baseline) {
+            // The reference's clock edge for an I/O delay (`Search::inputDelayClkArrival`; an output
+            // delay's target clock, `PathEnd::checkTgtClkDelay` on an ideal clock): the edge plus
+            // the clock's source latency unless `-source_latency_included`, plus its network
+            // latency when the clock is ideal (a virtual clock is) unless
+            // `-network_latency_included`; at the clock's own edge, an input's at the analysis's
+            // latency, an output's at the target clock's (the other analysis). Put in less the
+            // registers' own (`b`), which this timer leaves out of both sides of a path: a
+            // virtual clock's latency moves every I/O path against a propagated register clock,
+            // and cancels against an ideal one of the same latency.
+            let ce = usize::from(has("-clock_fall"));
+            let lat = |mm: usize| -> f64 {
+                let mut v = 0.0;
+                if !has("-source_latency_included") {
+                    v += clock_latency(sdc, c, true, mm, ce);
+                }
+                if !has("-network_latency_included") && clock_is_ideal(sdc, &ideal, c) {
+                    v += clock_latency(sdc, c, false, mm, ce);
+                }
+                v
+            };
+            for (mm, row) in value.iter_mut().enumerate() {
+                for v in row.iter_mut() {
+                    *v += if input { lat(mm) - b } else { b - lat(1 - mm) };
+                }
+            }
+        } else if let Some(c) = &d.clock {
+            let is_ideal = clock_is_ideal(sdc, &ideal, c);
             for (mm, row) in value.iter_mut().enumerate() {
                 for (rf, v) in row.iter_mut().enumerate() {
                     // `inputDelayClkArrival`: source latency unless `-source_latency_included`,
@@ -789,6 +820,31 @@ fn clock_latency(sdc: &crate::sdc::Sdc, clock: &str, source: bool, mm: usize, rf
     v
 }
 
+/// Is clock `c` ideal: not propagated, or virtual.
+fn clock_is_ideal(sdc: &crate::sdc::Sdc, ideal: &std::collections::BTreeMap<String, [f64; 2]>, c: &str) -> bool {
+    sdc.clocks.iter().find(|k| k.name == c).is_some_and(|k| k.sources.iter().any(|s| ideal.contains_key(s)) || k.is_virtual())
+}
+
+/// The clock latency the reference puts on a register's clock edge and this timer leaves out,
+/// when every register clock (every clock with a source) has the same one on every edge and in
+/// both analyses: its source latency, plus its network latency on an ideal clock (a propagated
+/// clock's network delay is timed through the network). `Some(0.0)` with no register clock;
+/// `None` when they differ (then nothing cancels and `latency_not_modelled` says so).
+pub fn register_latency(sdc: &crate::sdc::Sdc) -> Option<f64> {
+    let ideal = ideal_clocks(sdc);
+    let mut vals = Vec::new();
+    for c in sdc.clocks.iter().filter(|c| !c.is_virtual()) {
+        for mm in 0..2 {
+            for rf in 0..2 {
+                let net = if clock_is_ideal(sdc, &ideal, &c.name) { clock_latency(sdc, &c.name, false, mm, rf) } else { 0.0 };
+                vals.push(clock_latency(sdc, &c.name, true, mm, rf) + net);
+            }
+        }
+    }
+    let first = vals.first().copied().unwrap_or(0.0);
+    vals.iter().all(|v| *v == first).then_some(first)
+}
+
 pub fn latency_not_modelled(sdc: &crate::sdc::Sdc) -> Option<String> {
     if sdc.clock_latencies.is_empty() {
         return None;
@@ -805,9 +861,16 @@ pub fn latency_not_modelled(sdc: &crate::sdc::Sdc) -> Option<String> {
             per.entry((source, c.clone())).or_default().push(l.value);
         }
     }
-    let clocks: std::collections::BTreeSet<&String> = sdc.clocks.iter().map(|c| &c.name).collect();
+    // a virtual clock's latency is put on the I/O delays (relative to the registers'), and a
+    // propagated clock's network latency is its network: only the register clocks' must agree
+    let ideal = ideal_clocks(sdc);
+    let clocks: std::collections::BTreeSet<&String> = sdc.clocks.iter().filter(|c| !c.is_virtual()).map(|c| &c.name).collect();
     for source in [false, true] {
-        let vals: Vec<Vec<f64>> = clocks.iter().map(|c| per.get(&(source, c.to_string())).cloned().unwrap_or_default()).collect();
+        let vals: Vec<Vec<f64>> = clocks
+            .iter()
+            .filter(|c| source || clock_is_ideal(sdc, &ideal, c))
+            .map(|c| per.get(&(source, c.to_string())).cloned().unwrap_or_default())
+            .collect();
         let first = vals.first().cloned().unwrap_or_default();
         if vals.iter().any(|v| v != &first) || first.windows(2).any(|w| w[0] != w[1]) {
             why.push(format!("{} latency differs between clocks or edges", if source { "source" } else { "network" }));
@@ -875,6 +938,40 @@ mod clock_latency_rule {
         assert!(latency_not_modelled(&same).is_none());
         let pin = crate::sdc::Sdc::parse(&format!("{two}set_clock_latency 0.5 [get_pins r1/CK]\n")).unwrap();
         assert!(latency_not_modelled(&pin).unwrap().contains("pin or port"));
+    }
+
+    /// Reference rule (`Search::inputDelayClkArrival`; `PathEnd::checkTgtClkDelay` on an ideal
+    /// target clock): an I/O delay's clock edge carries that clock's source latency, and its network
+    /// latency when the clock is ideal, as a virtual clock is. Against a propagated register clock
+    /// with no latency it does not cancel: an input arrives 1.05 later and an output is required
+    /// 1.05 later. An input reads its analysis's latency (min 0.3 / max 0.5), an output its target
+    /// clock's, the other analysis's (setup: min). Measured on CoralNPU: the reference's input hold
+    /// arrival is exactly the latency later than this timer's was.
+    #[test]
+    fn a_virtual_clock_latency_moves_its_io_delays() {
+        let sdc = crate::sdc::Sdc::parse(
+            "create_clock -name clk -period 5 [get_ports clk]\n\
+             set_propagated_clock [get_clocks clk]\n\
+             create_clock -name vclk -period 5\n\
+             set_clock_latency 1.05 [get_clocks vclk]\n\
+             set_input_delay 0.25 -clock vclk [get_ports a]\n\
+             set_output_delay 0.5 -clock vclk [get_ports y]\n\
+             create_clock -name v2 -period 5\n\
+             set_clock_latency -min 0.3 [get_clocks v2]\n\
+             set_clock_latency -max 0.5 [get_clocks v2]\n\
+             set_input_delay 0.25 -clock v2 [get_ports b]\n\
+             set_output_delay 0.5 -clock v2 [get_ports z]\n",
+        )
+        .unwrap();
+        assert_eq!(register_latency(&sdc), Some(0.0));
+        let mut job = StaJob::parse("design: t\nnetlist: t.v\nlib: t.lib\nclock: clk 5.0\n", ".").unwrap();
+        merge_sdc_into(&sdc, &mut job);
+        let v = |list: &[IoDelaySpec], clk: &str| list.iter().find(|d| d.clock.as_deref() == Some(clk)).unwrap().value;
+        assert_eq!(v(&job.io_input_delays, "vclk"), [[0.25 + 1.05; 2]; 2]);
+        assert_eq!(v(&job.io_output_delays, "vclk"), [[0.5 + (0.0 - 1.05); 2]; 2]);
+        assert_eq!(v(&job.io_input_delays, "v2"), [[0.25 + 0.3; 2], [0.25 + 0.5; 2]]);
+        assert_eq!(v(&job.io_output_delays, "v2"), [[0.5 + (0.0 - 0.5); 2], [0.5 + (0.0 - 0.3); 2]]);
+        assert!(latency_not_modelled(&sdc).is_none());
     }
 }
 
