@@ -7,7 +7,7 @@
 //! netlist:     top.v               # gate-level structural Verilog
 //! lib:         sky130_hd.lib        # one or more (comma-separated)
 //! clock:       clk 5.0              # clock port + period (ns)
-//! input_slew:  0.05                 # ns, default input transition
+//! input_slew:  0.05                 # input transition, LIBRARY time units (default 0)
 //! output_load: 0.005                # pF, load at primary outputs
 //! late_derate: 1.05                 # OCV late derate on cell delays (default 1.0)
 //! early_derate: 0.95                # OCV early derate (hold/min path; default 1.0)
@@ -151,6 +151,9 @@ pub struct StaJob {
     // synthesized from clock_port/period_ns. A generated/divided clock is just an
     // entry whose source is an internal pin and period the divided value.
     pub clocks: Vec<(String, String, f64)>,
+    /// Transition at every input port, in the LIBRARY's time unit (ns for a ns library, ps for
+    /// a ps one: it is applied as read, not scaled). Unset, it is 0, as the reference applies no
+    /// input transition until a `set_input_transition` gives one.
     pub input_slew: f64,
     /// per-port `set_input_transition`s over `input_slew` — see [`PortSlew`]
     pub input_slews: Vec<PortSlew>,
@@ -498,7 +501,10 @@ impl StaJob {
             clock_port,
             period_ns,
             clocks,
-            input_slew: num("input_slew", 0.05),
+            // Unset: 0, as the reference (an input port has no transition until
+            // `set_input_transition` sets one). Was 0.05, which moved every register clock
+            // arrival on a job that left it out.
+            input_slew: num("input_slew", 0.0),
             input_slews: Vec::new(),
             output_load: num("output_load", 0.005),
             input_delay: num("input_delay", 0.0),
@@ -1309,5 +1315,20 @@ set_max_capacitance 0.2 [get_ports y]
         assert!((j.input_delay_for("d").unwrap() - -0.1).abs() < 1e-12);
         assert!((j.input_delay_for("e").unwrap() - -0.05).abs() < 1e-12);
         assert!((j.output_delay_for("y") - 0.6).abs() < 1e-12);
+    }
+}
+
+#[cfg(test)]
+mod input_slew_default_rule {
+    /// Rule (the reference): an input port carries no transition until `set_input_transition`
+    /// gives one, so its slew is 0. A `.sta` job that leaves `input_slew` out must time the same:
+    /// a 0.05 default once moved every register clock arrival of a CoralNPU job by about 0.02 ps.
+    #[test]
+    fn an_unset_input_slew_is_zero_as_in_the_reference() {
+        let job = super::StaJob::parse("design: d\nnetlist: d.v\nlib: d.lib\nclock: clk 1.0\n", ".").unwrap();
+        assert_eq!(job.input_slew, 0.0);
+        assert_eq!(job.input_slew_for("clk", true), [[0.0; 2]; 2]);
+        let set = super::StaJob::parse("design: d\nnetlist: d.v\nlib: d.lib\nclock: clk 1.0\ninput_slew: 0.05\n", ".").unwrap();
+        assert_eq!(set.input_slew, 0.05);
     }
 }

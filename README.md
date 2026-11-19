@@ -385,7 +385,7 @@ clock:       clk 1.0        # clock port + period (ns); repeat for multiple cloc
 #multicycle:  mac_a    mac_acc  3     # N-cycle path (from to cycles)
 miller:      2.0            # crosstalk Miller factor (1.0 disables SI)
 xtalk_window: 0.0           # ns — guard band added to the slew-derived window
-input_slew:  0.02           # ns
+input_slew:  0.02           # library time unit (ns here); default 0
 output_load: 0.005          # pF at primary outputs
 late_derate: 1.0            # flat OCV late derate on cell delays (setup / max path)
 early_derate: 1.0           # flat OCV early derate on cell delays (hold / min path)
