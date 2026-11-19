@@ -259,3 +259,18 @@ fn a_generated_clock_takes_its_master_from_the_design() {
     let g: Vec<f64> = job.clocks.iter().filter(|c| c.0 == "g").map(|c| c.2).collect();
     assert_eq!(g, vec![4.0], "{:?}", job.clocks);
 }
+
+/// `set_clock_uncertainty`, per clock: a check takes its TARGET clock's own uncertainty
+/// (`PathEnd::checkTgtClkUncertainty`: the capture clock path's, else the target clock edge's
+/// clock's). A register takes its capture clock's; an output its delay's clock's, here a virtual
+/// clock with less uncertainty than the register clock that launches the path. One design-wide
+/// value (the largest) charged every check the register clock's 0.3.
+#[test]
+fn set_clock_uncertainty_is_the_target_clocks_own() {
+    let base = format!("{CLOCK}create_clock -name v -period 2\nset_input_delay 0.1 -clock c [get_ports a]\nset_output_delay 0.1 -clock v [get_ports y]\n");
+    let unc = "set_clock_uncertainty -setup 0.3 [get_clocks c]\nset_clock_uncertainty -setup 0.1 [get_clocks v]\n";
+    let (without, with) = (timer(&base), timer(&format!("{base}{unc}")));
+    let d = |pin: &str| setup(&without, pin).unwrap() - setup(&with, pin).unwrap();
+    assert!(close(d("r2/D"), 0.3), "register: its capture clock's 0.3, moved {}", d("r2/D"));
+    assert!(close(d("y"), 0.1), "output: its delay clock's 0.1, moved {}", d("y"));
+}

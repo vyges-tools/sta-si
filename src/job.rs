@@ -204,6 +204,12 @@ pub struct StaJob {
     // relaxes hold required time.
     pub setup_uncertainty: f64,
     pub hold_uncertainty: f64,
+    /// Each clock's own uncertainty, `(clock, setup, hold)`: a check takes its TARGET clock's
+    /// (`PathEnd::checkTgtClkUncertainty`: the capture clock path's, else the target clock
+    /// edge's clock's — an output delay's own clock), 0 for a clock with none. Empty: every
+    /// check takes [`StaJob::setup_uncertainty`] / [`StaJob::hold_uncertainty`] (a job built by
+    /// hand, or an uncertainty on pins, which this timer does not tell apart per clock).
+    pub clock_uncertainty: Vec<(String, f64, f64)>,
     pub late_derate: f64,
     pub early_derate: f64, // OCV early derate on cell delays for the hold (min) path
     // OCV mode (resolved at analysis time): POCV if pocv_sigma > 0, else AOCV if an
@@ -350,6 +356,38 @@ fn strip_comment(line: &str) -> &str {
     }
 }
 
+/// Each clock's final `set_clock_uncertainty` per side, `(clock, setup, hold)`: each command sets
+/// the sides it names (both without `-setup` / `-hold`) on each clock, the last one winning
+/// (`ClockUncertainties::setValue`). Between clocks (`-from` / `-to`) is not applied here. Empty
+/// when no clock has one, or when one is on pins: those are kept design-wide (see
+/// [`StaJob::clock_uncertainty`]).
+pub(crate) fn clock_uncertainty(sdc: &crate::sdc::Sdc) -> Vec<(String, f64, f64)> {
+    let on_clocks: Vec<&crate::sdc::ClockUncertainty> = sdc.uncertainties.iter().filter(|u| u.from.is_empty() && u.to.is_empty()).collect();
+    let is_clock = |o: &str| sdc.clocks.iter().any(|c| c.name == o);
+    if on_clocks.iter().any(|u| u.objects.iter().any(|o| !is_clock(o))) {
+        return Vec::new();
+    }
+    let mut out: Vec<(String, f64, f64)> = Vec::new();
+    for u in on_clocks {
+        for o in &u.objects {
+            let i = match out.iter().position(|e| &e.0 == o) {
+                Some(i) => i,
+                None => {
+                    out.push((o.clone(), 0.0, 0.0));
+                    out.len() - 1
+                }
+            };
+            if u.setup {
+                out[i].1 = u.value;
+            }
+            if u.hold {
+                out[i].2 = u.value;
+            }
+        }
+    }
+    out
+}
+
 /// Parse `depth:derate` pairs, e.g. `1:1.10, 2:1.07, 4:1.04` -> [(1,1.10),...].
 fn pairs(s: &str) -> Vec<(f64, f64)> {
     let mut v: Vec<(f64, f64)> = s
@@ -478,6 +516,7 @@ impl StaJob {
             max_time_borrow: Vec::new(),
             setup_uncertainty: num("setup_uncertainty", 0.0),
             hold_uncertainty: num("hold_uncertainty", 0.0),
+            clock_uncertainty: Vec::new(),
             late_derate: num("late_derate", 1.0),
             early_derate: num("early_derate", 1.0),
             pocv_sigma: num("pocv_sigma", 0.0),
@@ -732,6 +771,7 @@ pub fn merge_sdc_into(sdc: &crate::sdc::Sdc, job: &mut StaJob) {
     }
     job.setup_uncertainty = sdc.setup_uncertainty;
     job.hold_uncertainty = sdc.hold_uncertainty;
+    job.clock_uncertainty = clock_uncertainty(sdc);
     // Each command on the ports it names, per edge and analysis (the reference's
     // `Sdc::setInputSlew`); one design-wide value let the last command set every input's slew.
     for e in sdc.env.iter().filter(|e| e.cmd == "set_input_transition") {

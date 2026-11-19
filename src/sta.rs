@@ -1940,8 +1940,21 @@ fn build_report(
         );
     }
 
+    // The uncertainty a check takes: its TARGET clock's own (`PathEnd::checkTgtClkUncertainty`:
+    // the capture clock path's, else the target clock edge's clock's), so an output's is its
+    // delay's clock's, not the launching register's; 0 for a clock with none. Without per-clock
+    // values (see `StaJob::clock_uncertainty`), the design-wide one.
+    let primary_name = job.clocks.first().map_or(job.clock_port.as_str(), |c| c.0.as_str());
+    let unc = |clk: Option<&str>, setup: bool| -> f64 {
+        if job.clock_uncertainty.is_empty() {
+            return if setup { job.setup_uncertainty } else { job.hold_uncertainty };
+        }
+        let c = clk.unwrap_or(primary_name);
+        job.clock_uncertainty.iter().find(|u| u.0 == c).map_or(0.0, |u| if setup { u.1 } else { u.2 })
+    };
     for (idx, name) in &output_ports {
-        endpoint_req[*idx] = period - job.output_delay_for(name) - job.setup_uncertainty;
+        let clk = job.output_delays_for(name).first().and_then(|d| d.clock.clone());
+        endpoint_req[*idx] = period - job.output_delay_for(name) - unc(clk.as_deref(), true);
     }
     let mut node_load = vec![[[0.0f64; 2]; 2]; n];
     for (netname, net) in &nets {
@@ -4095,7 +4108,7 @@ fn build_report(
             let rel = if max { setup_rel } else { hold_rel } + shift;
             for (l, slot) in best.iter_mut().enumerate() {
                 let Some(od) = d.value[usize::from(max)][l] else { continue };
-                let req = if max { rel - od - job.setup_uncertainty } else { rel + job.hold_uncertainty - od };
+                let req = if max { rel - od - unc(Some(&clk), true) } else { rel + unc(Some(&clk), false) - od };
                 if slot.as_ref().is_none_or(|b| if max { req < b.0 } else { req > b.0 }) {
                     *slot = Some((req, clk.clone(), cl, rel));
                 }
@@ -4192,7 +4205,7 @@ fn build_report(
             _ => 0.0,
         };
         let rel_open = rel_close - pulse_width;
-        (open_latency + rel_open + open_crpr - job.setup_uncertainty, rel_open, open_latency, open_crpr)
+        (open_latency + rel_open + open_crpr - unc(cclk, true), rel_open, open_latency, open_crpr)
     };
     // ---- latch D->Q: what passes through a transparent latch -------------------------------------
     // The reference's arrival search postpones every latch output and, after each pass, takes
@@ -4268,7 +4281,7 @@ fn build_report(
                 // (`PathEndCheck::margin`) is at the data path's, D's late slew. 0.6 ps apart on
                 // an ASAP7 latch, and the downstream register's slack moves with it.
                 let margin = c.eval_edge(l == 0, check_clk_slew(cap, cl, false), early_slew[idx][l]);
-                let close = cap_early + rel_close + crpr - job.setup_uncertainty - margin;
+                let close = cap_early + rel_close + crpr - unc(to_end.clock.as_deref(), true) - margin;
                 if close < best {
                     best = close;
                     let (open, rel_open, _, _) = latch_opening(cap, crpr_lck, to_end.clock.as_deref(), pc, cl, rel_close);
@@ -4471,7 +4484,7 @@ fn build_report(
                     (Some(l), Some(c)) => crpr_credit(l, c, cl, true),
                     _ => 0.0,
                 };
-                (cap_early + edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), src_edge(cap, cl)).0 + shift + crpr - job.setup_uncertainty, ck_slew)
+                (cap_early + edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), src_edge(cap, cl)).0 + shift + crpr - unc(to_end.clock.as_deref(), true), ck_slew)
             };
             let open_of = |c: &Constraint, via: bool| -> f64 {
                 let cl = usize::from(c.clk_edge == ClkEdge::Fall);
@@ -4579,7 +4592,7 @@ fn build_report(
         let mut any = false;
         for tl in 0..2 {
             let q = (0..2)
-                .filter_map(|fl| m[0][fl][tl].map(|mg| runs[0].early_arr[*f][fl] - job.setup_uncertainty - mg))
+                .filter_map(|fl| m[0][fl][tl].map(|mg| runs[0].early_arr[*f][fl] - unc(launch_ck(*f, runs[0].from).and_then(clock_name_of), true) - mg))
                 .filter(|q| q.is_finite())
                 .fold(f64::INFINITY, f64::min);
             if q.is_finite() {
@@ -4984,7 +4997,7 @@ fn build_report(
                         let cap_late = cap.map(|i| late_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
                         let ck_slew = check_clk_slew(cap, cl, false);
                         let hold_rel = hold_relation(idx, pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), src_edge(cap, cl)) + shift;
-                        let base = crpr - cap_late - hold_rel - job.hold_uncertainty;
+                        let base = crpr - cap_late - hold_rel - unc(to_end.clock.as_deref(), false);
                         let sl = a + base - c.eval_edge(l == 0, ck_slew, early_slew[idx][l]);
                         if sl < slack {
                             slack = sl;
@@ -5011,7 +5024,7 @@ fn build_report(
                     let hold_rel = hold_relation(idx, pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), src_edge(cap, cl)) + shift;
                     inc_hold.push(HoldRec {
                         idx,
-                        base: crpr - cap_late - hold_rel - job.hold_uncertainty,
+                        base: crpr - cap_late - hold_rel - unc(to_end.clock.as_deref(), false),
                         cons: hold.clone(),
                         ck_slew,
                         launch_ck: m_lck,
@@ -5062,7 +5075,7 @@ fn build_report(
             for (fl, by_to) in m[1].iter().enumerate() {
                 let (Some(mg), late) = (by_to[tl], runs[0].late_arr[*f][fl]) else { continue };
                 if late.is_finite() {
-                    let sl = a + period - (late + job.hold_uncertainty + mg);
+                    let sl = a + period - (late + unc(launch_ck(*f, runs[0].from).and_then(clock_name_of), false) + mg);
                     if sl < slack {
                         slack = sl;
                         slack_at = (0, tl);
@@ -5257,7 +5270,7 @@ fn build_report(
                 // an output port, captured by the clock edge of the delay that set the slack
                 let (req, clk, cl, rel) = out_check(v, &from_end, run.edge, pl, max)[l].clone()?;
                 let (tgt_time, required, uncertainty) =
-                    (launch + rel, launch + req, if max { -job.setup_uncertainty } else { job.hold_uncertainty });
+                    (launch + rel, launch + req, if max { -unc(Some(&clk), true) } else { unc(Some(&clk), false) });
                 return Some(CheckPath {
                     max,
                     group: group.to_string(),
@@ -5307,13 +5320,13 @@ fn build_report(
                     let cap_early = cap.map(|i| early_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
                     let ck_slew = check_clk_slew(cap, cl, true);
                     let rel = edge_relation(pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), src_edge(cap, cl)).0 + shift;
-                    let req = cap_early + rel + crpr - job.setup_uncertainty - c.eval_edge(l == 0, ck_slew, late_slew[v][l]);
+                    let req = cap_early + rel + crpr - unc(to_end.clock.as_deref(), true) - c.eval_edge(l == 0, ck_slew, late_slew[v][l]);
                     (req, cl, cap_early, rel, crpr)
                 } else {
                     let cap_late = cap.map(|i| late_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
                     let ck_slew = check_clk_slew(cap, cl, false);
                     let rel = hold_relation(v, pl, from_end.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), src_edge(cap, cl)) + shift;
-                    let req = cap_late + rel + job.hold_uncertainty - crpr + c.eval_edge(l == 0, ck_slew, early_slew[v][l]);
+                    let req = cap_late + rel + unc(to_end.clock.as_deref(), false) - crpr + c.eval_edge(l == 0, ck_slew, early_slew[v][l]);
                     (req, cl, cap_late, rel, crpr)
                 }
             });
@@ -5345,7 +5358,7 @@ fn build_report(
                     arrival,
                     tgt_clock: clock_line(tgt_name, src_edge(cap, 1 - cl) == 0, launch + rel_open),
                     tgt_network_delay: open_latency,
-                    uncertainty: -job.setup_uncertainty,
+                    uncertainty: -unc(Some(tgt_name), true),
                     crpr: open_crpr,
                     tgt_pin: cap.map(|c| (desc(c), cl == 1)),
                     margin_what: "time borrowed from endpoint".to_string(),
@@ -5379,7 +5392,7 @@ fn build_report(
                 arrival,
                 tgt_clock: clock_line(tgt_name, src_edge(cap, cl) == 0, launch + rel),
                 tgt_network_delay: cap_arr,
-                uncertainty: if max { -job.setup_uncertainty } else { job.hold_uncertainty },
+                uncertainty: if max { -unc(Some(tgt_name), true) } else { unc(Some(tgt_name), false) },
                 crpr: if max { crpr } else { -crpr },
                 tgt_pin: cap.map(|c| (desc(c), cl == 0)),
                 margin_what: format!("library {check} time"),

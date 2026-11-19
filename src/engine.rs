@@ -71,6 +71,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         max_time_borrow: Vec::new(),
         setup_uncertainty: 0.0,
         hold_uncertainty: 0.0,
+        clock_uncertainty: Vec::new(),
         late_derate: 1.0,
         early_derate: 1.0,
         pocv_sigma: 0.0,

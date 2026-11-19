@@ -101,6 +101,7 @@ fn job(pba: bool) -> StaJob {
         max_time_borrow: Vec::new(),
         setup_uncertainty: 0.0,
         hold_uncertainty: 0.0,
+        clock_uncertainty: Vec::new(),
         sdc: None,
         metadata: None,
         base_dir: String::new(),
