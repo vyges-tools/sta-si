@@ -453,4 +453,8 @@ fn query_slack_pairs_each_data_edge_with_its_own_check() {
     let p = r.check_paths.iter().find(|c| c.max && c.endpoint == "r2").expect("setup path to r2");
     let r2d = ends.iter().find(|(p, _)| t.pin_label(*p) == "r2/D").expect("r2/D is an endpoint").1;
     assert!((p.slack - r2d).abs() < 1e-12, "reported {} queried {r2d}", p.slack);
+    // and the arrival it was taken against is that edge's, the reported path's
+    let pin = ends.iter().find(|(p, _)| t.pin_label(*p) == "r2/D").unwrap().0;
+    let a = t.check_arrival(pin).unwrap();
+    assert!((p.arrival - a).abs() < 1e-12, "reported arrival {} queried {a}", p.arrival);
 }

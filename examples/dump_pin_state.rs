@@ -49,7 +49,7 @@ fn main() {
             t.arrival_min(p),
             f(t.slack(p)),
             f(hold.get(&p).copied()),
-            f(t.slack(p).map(|_| t.setup_arrival(p))),
+            f(t.check_arrival(p)),
             f(borrow.get(&p).copied())
         );
     }

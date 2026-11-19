@@ -873,6 +873,10 @@ pub(crate) struct Timing {
     // are one value per pin (the worst lane), which no single arc is computed from.
     slew_rf: Vec<[f64; 2]>,
     load_rf: Vec<[f64; 2]>,
+    // The arrival each setup end's slack was taken against: the checked launching edge's and
+    // data edge's, not the latest over them (`arrival`). NaN = not recorded (the incremental
+    // path keeps none; see `Timer::check_arrival`).
+    check_arr: Vec<f64>,
 }
 
 impl Timing {
@@ -911,6 +915,7 @@ impl Timing {
             endpoint_req: endpoint_req.to_vec(),
             slew_rf: slew_rf.to_vec(),
             load_rf: load_rf.to_vec(),
+            check_arr: Vec::new(),
         }
     }
 }
@@ -1111,6 +1116,14 @@ impl Timer {
         let excluded = self.timing.excluded_setup.get(p).copied().unwrap_or(false);
         (self.is_endpoint(p) && self.setup_arrival(p).is_finite() && !excluded)
             .then(|| self.timing.endpoint_req[p])
+    }
+    /// The arrival the setup slack at `p` was taken against: that of the launching edge and data
+    /// edge whose check set it, which a reference timer's path to `p` reports. [`Timer::
+    /// setup_arrival`] is the latest over them. Falls back to it where none was recorded (an
+    /// end launched from a clock source, or after an incremental update). `Some` only at a setup
+    /// endpoint.
+    pub fn check_arrival(&self, p: PinId) -> Option<f64> {
+        self.required(p).map(|_| self.timing.check_arr.get(p).copied().filter(|a| a.is_finite()).unwrap_or_else(|| self.setup_arrival(p)))
     }
     /// Setup slack at `p` (`required − arrival`) — `Some` only at a setup endpoint.
     pub fn slack(&self, p: PinId) -> Option<f64> {
@@ -4066,6 +4079,7 @@ fn build_report(
         crate::exc::check_shift(&exc_matchers, hold, &point(from), &point(to), pl, pc)
     };
     let mut excluded_setup = vec![false; n]; // false-path endpoints (skip setup)
+    let mut check_arr = vec![f64::NAN; n]; // see `Timing::check_arr`
     // the reference's rule, where the job asks for it: an output with no output delay ends no path
     if job.unconstrained_outputs {
         for (idx, name) in &output_ports {
@@ -4695,6 +4709,9 @@ fn build_report(
         // read. Folded only for several launching edges or a latch end, the query answered the
         // tightest required (one data edge) less the latest arrival (the other): an ECO consumer
         // ranked a pessimistic slack the report never showed.
+        if let Some((r, l)) = slack_at {
+            check_arr[v] = runs[r].late_arr[v][l];
+        }
         if slack_at.is_some() {
             endpoint_req[v] = arr_v + slack;
         }
@@ -5466,7 +5483,7 @@ fn build_report(
     // closures above still hold immutable borrows of these arrays through the return.
     // the query API reports one load per driver: the larger edge's
     let node_load_max: Vec<f64> = node_load.iter().map(|l| l[1][0].max(l[1][1])).collect();
-    let timing = Timing::new(
+    let mut timing = Timing::new(
         &labels,
         &is_endpoint,
         &excluded_setup,
@@ -5480,6 +5497,7 @@ fn build_report(
         &late_slew,
         &node_load.iter().map(|l| l[1]).collect::<Vec<[f64; 2]>>(),
     );
+    timing.check_arr = check_arr;
 
     // Capture the persistent incremental graph (simple context only). Built once here; the
     // optimizer's `update()` then recomputes only the cone of a cell swap against it.
