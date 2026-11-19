@@ -219,3 +219,143 @@ fn a_rise_fall_spread_on_the_common_clock_is_not_credited() {
     let (a, b) = (analyze_inputs(NL_ASYM, &lib, &on).unwrap(), analyze_inputs(NL_ASYM, &lib, &off).unwrap());
     assert!((a.wns - b.wns).abs() < 1e-9, "setup: crpr on {} off {}", a.wns, b.wns);
 }
+
+// A hold check is scored per launch that CRPR tells apart, not only from the earliest arrival.
+// The reference keeps a path per CRPR clock pin at every pin and drops one only when the best
+// arrival, moved by that best path's largest possible credit (`CheckCrpr::maxCrpr`: the clock
+// spread at its own launching clock pin), is still earlier (`ArrivalVisitor::pruneCrprArrivals`).
+// Here r1's own Q->D loop reaches r1/D first, with its WHOLE clock path as credit (launch and
+// capture are the same pin), while r2's path arrives 0.027 later but shares only the root buffer
+// with r1, so it gets 0.024 of credit instead of 0.12: r2's is the worse hold, by 0.069. Scored
+// from the earliest arrival alone the check read the self loop's 0.115, optimistic. Measured on
+// CoralNPU: 52.923 here against the reference's 47.237 at one register-to-register end.
+const LIB_LOOP: &str = r#"
+library (crpr_loop) {
+  lu_table_template (s) { variable_1 : related_pin_transition; variable_2 : constrained_pin_transition; }
+  lu_table_template (t) { variable_1 : input_net_transition; variable_2 : total_output_net_capacitance; }
+  cell (BUF) {
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output;
+      timing () {
+        related_pin : "A"; timing_sense : positive_unate;
+        cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.12, 0.12", "0.12, 0.12" ); }
+        cell_fall (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.12, 0.12", "0.12, 0.12" ); }
+        rise_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.03", "0.03, 0.03" ); }
+        fall_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.03", "0.03, 0.03" ); }
+      }
+    }
+  }
+  cell (DLY) {
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output;
+      timing () {
+        related_pin : "A"; timing_sense : positive_unate;
+        cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.03", "0.03, 0.03" ); }
+        cell_fall (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.03", "0.03, 0.03" ); }
+        rise_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.03", "0.03, 0.03" ); }
+        fall_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.03", "0.03, 0.03" ); }
+      }
+    }
+  }
+  cell (INV) {
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output;
+      timing () {
+        related_pin : "A"; timing_sense : negative_unate;
+        cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.12, 0.12", "0.12, 0.12" ); }
+        cell_fall (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.12, 0.12", "0.12, 0.12" ); }
+        rise_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.03", "0.03, 0.03" ); }
+        fall_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.03", "0.03, 0.03" ); }
+      }
+    }
+  }
+  cell (AND2) {
+    pin (A) { direction : input; capacitance : 0.001; }
+    pin (B) { direction : input; capacitance : 0.001; }
+    pin (Y) {
+      direction : output; function : "A&B";
+      timing () {
+        related_pin : "A"; timing_sense : positive_unate;
+        cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.05, 0.05", "0.05, 0.05" ); }
+        cell_fall (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.05, 0.05", "0.05, 0.05" ); }
+        rise_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.03", "0.03, 0.03" ); }
+        fall_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.03", "0.03, 0.03" ); }
+      }
+      timing () {
+        related_pin : "B"; timing_sense : positive_unate;
+        cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.05, 0.05", "0.05, 0.05" ); }
+        cell_fall (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.05, 0.05", "0.05, 0.05" ); }
+        rise_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.03", "0.03, 0.03" ); }
+        fall_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.03", "0.03, 0.03" ); }
+      }
+    }
+  }
+  cell (DFF) {
+    ff (IQ, IQN) { clocked_on : "CK"; next_state : "D"; }
+    pin (CK) { direction : input; clock : true; capacitance : 0.001; }
+    pin (D) {
+      direction : input;
+      capacitance : 0.001;
+      timing () {
+        related_pin : "CK";
+        timing_type : setup_rising;
+        rise_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.05" ); }
+        fall_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.05" ); }
+      }
+      timing () {
+        related_pin : "CK";
+        timing_type : hold_rising;
+        rise_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.02" ); }
+        fall_constraint (s) { index_1 ("0.01"); index_2 ("0.01"); values ( "0.02" ); }
+      }
+    }
+    pin (Q) {
+      direction : output;
+      timing () {
+        related_pin : "CK";
+        timing_type : rising_edge;
+        cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.10, 0.10", "0.10, 0.10" ); }
+        cell_fall (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.10, 0.10", "0.10, 0.10" ); }
+        rise_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.03", "0.03, 0.03" ); }
+        fall_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.03", "0.03, 0.03" ); }
+      }
+    }
+  }
+}
+"#;
+
+// clk -> b0 (shared) -> a1..a4 -> r1/CK ; b0 -> c1..c4 -> dly -> r2/CK. r1/D = q1 & q2.
+// `with_r2` false ties r1/D's B to q1 too: the self loop alone.
+fn nl_loop(with_r2: bool) -> String {
+    let b = if with_r2 { "q2" } else { "q1" };
+    format!(
+        "module c ( clk ); input clk; wire k0, a1, a2, a3, a4, c1, c2, c3, c4, k2, q1, q2, n2, d1;\n\
+         BUF b0 ( .A(clk), .Y(k0) );\n\
+         BUF ba1 ( .A(k0), .Y(a1) ); BUF ba2 ( .A(a1), .Y(a2) ); BUF ba3 ( .A(a2), .Y(a3) ); BUF ba4 ( .A(a3), .Y(a4) );\n\
+         BUF bc1 ( .A(k0), .Y(c1) ); BUF bc2 ( .A(c1), .Y(c2) ); BUF bc3 ( .A(c2), .Y(c3) ); BUF bc4 ( .A(c3), .Y(c4) );\n\
+         DLY dl ( .A(c4), .Y(k2) );\n\
+         AND2 g ( .A(q1), .B({b}), .Y(d1) );\n\
+         DFF r1 ( .CK(a4), .D(d1), .Q(q1) );\n\
+         INV i2 ( .A(q2), .Y(n2) );\n\
+         DFF r2 ( .CK(k2), .D(n2), .Q(q2) );\n\
+         endmodule"
+    )
+}
+
+#[test]
+fn a_later_launch_with_less_crpr_credit_sets_the_hold() {
+    let alone = analyze_inputs(&nl_loop(false), LIB_LOOP, &job()).unwrap();
+    let both = analyze_inputs(&nl_loop(true), LIB_LOOP, &job()).unwrap();
+    // the self loop alone: early r1/CK 0.54, Q 0.09, AND 0.045; capture late 0.66 less the whole
+    // 0.12 spread at r1/CK; hold 0.02 (r2's own loop holds by more)
+    assert!((alone.whs - 0.115).abs() < 1e-6, "self loop alone {}", alone.whs);
+    // r2's launch: 0.027 later, credit only b0's 0.024 spread
+    assert!((both.whs - 0.046).abs() < 1e-6, "whs {}", both.whs);
+    let p = both.check_paths.iter().find(|p| !p.max).unwrap_or_else(|| panic!("no hold path: {:?}", both.check_paths.iter().map(|p| (&p.startpoint, &p.endpoint)).collect::<Vec<_>>()));
+    assert_eq!(p.endpoint, "r1", "{}", p.endpoint);
+    assert_eq!(p.startpoint, "r2", "the reported hold path is the launch that set the slack");
+    assert!((p.slack - 0.046).abs() < 1e-6, "reported {}", p.slack);
+}
