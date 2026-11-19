@@ -792,14 +792,17 @@ pub struct CheckPath {
     pub slack: f64,
 }
 
-enum EdgeKind {
+/// ⛔ A cell edge BORROWS its library arc: the graph lives only while `build_report` runs, and
+/// the library outlives it. A boxed copy per edge deep-copied every instance's tables; on a
+/// 1.6M-instance design that was most of the timer's peak memory, built and dropped each run.
+enum EdgeKind<'l> {
     Net(usize), // net index — delay looked up from the per-net delay table
-    Cell(Box<Arc>),
+    Cell(&'l Arc),
 }
 
-struct Edge {
+struct Edge<'l> {
     to: usize,
-    kind: EdgeKind,
+    kind: EdgeKind<'l>,
     /// `[from edge][to edge]` the constants let through (0 rise, 1 fall) — see [`crate::sim`]: an
     /// arc's sense once the held pins are substituted, and a pin held rising or falling. All
     /// true without case analysis; a net arc reads the diagonal.
@@ -812,7 +815,7 @@ struct Edge {
 
 const ALL_LANES: [[bool; 2]; 2] = [[true; 2]; 2];
 
-impl Edge {
+impl Edge<'_> {
     /// Does any arrival cross this arc? (A cut arc stays for the slews after it.)
     fn searched(&self) -> bool {
         self.lanes != [[false; 2]; 2]
@@ -2083,7 +2086,7 @@ fn build_report(
                 let latch_dq = is_latch_d_to_q(cell, arc);
                 out_edges[i_idx].push(Edge {
                     to: o_idx,
-                    kind: EdgeKind::Cell(Box::new(arc.clone())),
+                    kind: EdgeKind::Cell(arc),
                     lanes,
                     latch_dq,
                 });
@@ -4357,7 +4360,7 @@ fn build_report(
         .filter(|(idx, _, _)| latch_d.contains(idx))
         .flat_map(|(idx, setup, ck)| {
             out_edges[*idx].iter().filter(|e| e.latch_dq).filter_map(move |e| match &e.kind {
-                EdgeKind::Cell(arc) => Some((*idx, setup.as_slice(), ck, e.to, arc.as_ref(), e.lanes)),
+                EdgeKind::Cell(arc) => Some((*idx, setup.as_slice(), ck, e.to, *arc, e.lanes)),
                 EdgeKind::Net(_) => None,
             })
         })
@@ -5637,9 +5640,10 @@ fn build_report(
                 succ[u].push(e.to);
                 in_edges[e.to].push(match &e.kind {
                     EdgeKind::Net(_) => InEdge::Net { from: u },
+                    // the incremental graph outlives the build: it keeps its own copy
                     EdgeKind::Cell(arc) => InEdge::Cell {
                         from: u,
-                        arc: arc.clone(),
+                        arc: Box::new((*arc).clone()),
                     },
                 });
             }
