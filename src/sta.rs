@@ -3737,16 +3737,24 @@ fn build_report(
     };
     // final late propagation consistent with the converged per-arc delays, and the
     // early (min-delay) propagation used for hold and for early clock arrivals.
-    let (arrival, slew, from, order_late, late_arr, late_slew, late_from) =
-        relax(&arc_d, &arc_s, true, &seed_main, false, None, None, None);
     // CRPR candidates are tracked only where the merged arrival can mislead: a CRPR credit that
     // differs between launches, without per-stage (AOCV) or statistical (POCV) delays, which do
-    // not add along a path
+    // not add along a path. On the setup side, not where a latch passes data on (its outputs'
+    // arrivals are re-propagated from its window, see `latch_seeds`).
     let track_cands = job.crpr && !pocv && !aocv;
+    let track_setup = track_cands && latch_d.is_empty();
     let rec_pass = |on: bool| {
         rec_on.set(on);
         *crpr_rec.borrow_mut() = on.then(Vec::new);
     };
+    let mut late_recs: Vec<Vec<ArcRec>> = Vec::new();
+    rec_pass(track_setup && !fall_launch);
+    let (arrival, slew, from, order_late, late_arr, late_slew, late_from) =
+        relax(&arc_d, &arc_s, true, &seed_main, false, None, None, None);
+    if let Some(r) = crpr_rec.borrow_mut().take() {
+        late_recs.push(r);
+    }
+    rec_pass(false);
     rec_pass(track_cands && !fall_launch);
     let (arr_min, slew_min, from_min, _ord_min, early_arr, early_slew, early_from) =
         relax(&early_d, &early_s, false, &seed_early, false, None, None, None);
@@ -3772,7 +3780,11 @@ fn build_report(
             .into_iter()
             .map(|edge| {
                 let (sd, sd_early) = (edge_seed(edge, 1), edge_seed(edge, 0));
+                rec_pass(track_setup);
                 let (_, _, from, _, late_arr, _, late_from) = relax(&arc_d, &arc_s, true, &sd, false, Some(edge), Some(&late_slew), None);
+                if let Some(r) = crpr_rec.borrow_mut().take() {
+                    late_recs.push(r);
+                }
                 rec_pass(track_cands);
                 let (_, _, from_min, _, early_arr, _, early_from) =
                     relax(&early_d, &early_s, false, &sd_early, false, Some(edge), Some(&early_slew), None);
@@ -4456,6 +4468,49 @@ fn build_report(
         }
     }
 
+    // The launches a pin keeps where CRPR tells them apart (see `crpr_cands`, and the hold side
+    // below): each launch's clock pin spread (`CheckCrpr::maxCrpr`) prunes the others.
+    let start_spread = |k: usize| -> f64 {
+        if !is_ck[k] {
+            return 0.0;
+        }
+        let l = ck_lane[k].unwrap_or(0);
+        ((late_arr[k][l] as f32) - (early_arr[k][l] as f32)).abs() as f64
+    };
+    let any_spread = crpr_on && (0..n).any(|k| is_ck[k] && start_spread(k) > 0.0);
+    let skip_from = |u: usize| clock_declared && clock_reached[u] && !is_ck[u];
+    // where an edge's predecessors lead back to: the first clock pin, else the start
+    let chain_start = |from: &[[Pred; 2]], v: usize, l: usize| -> Option<usize> {
+        let (mut x, mut xl) = (v, l);
+        while let Some((u, ul)) = from[x][xl] {
+            if is_ck[u] {
+                return Some(u);
+            }
+            (x, xl) = (u, ul);
+        }
+        Some(x)
+    };
+    // ⛔ SETUP, PER LAUNCH WHERE CRPR TELLS THEM APART, the mirror of the hold side: the merged
+    // late arrival is the LATEST launch's, scored with its CRPR credit; an earlier launch whose
+    // clock path shares less with the capture's gets less credit and can be the worse setup. A
+    // register's own Q->D loop is the common case: its credit is its whole clock path.
+    let mut setup_keep = vec![false; n];
+    for (idx, _, _) in &flop_d {
+        setup_keep[*idx] = !latch_d.contains(idx);
+    }
+    let setup_cands: Vec<HashMap<usize, [Vec<Cand>; 2]>> = if any_spread && track_setup && late_recs.len() == runs.len() {
+        runs.iter()
+            .zip(&late_recs)
+            .map(|(run, recs)| crpr_cands(recs, run.late_arr, &is_ck, &skip_from, &start_spread, true, &setup_keep, None).0)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let simple_ctx = simple_ctx && setup_cands.iter().all(|m| m.values().all(|c| c.iter().all(|s| s.len() < 2)));
+    // per (run, end, data edge) where launches were told apart: (slack, arrival, launch pin)
+    let mut setup_cand_slack: HashMap<(usize, usize, usize), (f64, f64, usize)> = HashMap::new();
+    // a setup end whose worst launch its edge's predecessors do not reach: (run, data edge, launch)
+    let mut setup_pick: HashMap<usize, (usize, usize, usize)> = HashMap::new();
     // A latch data pin's check also needs the time the latch OPENS, per launching edge and data
     // edge (`latch_open[(r, v)][l]`, NaN = none): `req_run` holds the time it closes.
     let mut latch_open: HashMap<(usize, usize), [f64; 2]> = HashMap::new();
@@ -4523,6 +4578,56 @@ fn build_report(
                         if is_latch {
                             open[l] = open_of(c, via);
                         }
+                    }
+                }
+            }
+            // each launch this end keeps on each data edge, checked with its own CRPR credit, period
+            // and exceptions; the latest one's arrival as the pass found it
+            if let Some(cands) = setup_cands.get(r).and_then(|m| m.get(idx)).filter(|_| !is_latch) {
+                for (l, set) in cands.iter().enumerate() {
+                    let a_m = run.late_arr[*idx][l];
+                    if set.is_empty() || !a_m.is_finite() {
+                        continue;
+                    }
+                    let last = set.iter().map(|e| e.0).fold(f64::NEG_INFINITY, f64::max);
+                    let mut best: Option<(f64, f64, usize)> = None;
+                    for &(a, k) in set {
+                        let k = k as usize;
+                        let a = if a == last { a_m } else { a };
+                        let (lck_c, sport) = if is_ck[k] { (Some(k), None) } else { (None, is_in_port[k].then_some(k)) };
+                        let pl_c = lck_c.map(clock_period_of).or_else(|| in_clock_at(sport, run.edge).map(period_named)).unwrap_or(pc);
+                        let from_c = match lck_c {
+                            Some(c) => reg_end(Some(c), c),
+                            None => End {
+                                name: sport.map(|v| labels[v].clone()).unwrap_or_default(),
+                                clock: Some(in_clock_at(sport, run.edge).unwrap_or(primary_clock).to_string()),
+                                port: true,
+                            },
+                        };
+                        let Some(shift_c) = exc_shift(false, &from_c, &to_end, pl_c, pc) else {
+                            continue;
+                        };
+                        let in_clk_c = lck_c.map_or_else(|| in_clock_at(sport, run.edge), |_| None);
+                        if is_async(lck_c, cap) || is_async_named(in_clk_c, to_end.clock.as_deref()) {
+                            continue;
+                        }
+                        for c in setup.iter().filter(|c| checks_edge(c, l == 0)) {
+                            let cl = usize::from(c.clk_edge == ClkEdge::Fall);
+                            let cap_early = cap.map(|i| early_arr[i][cl]).filter(|a| a.is_finite()).unwrap_or(0.0);
+                            let ck_slew = check_clk_slew(cap, cl, true);
+                            let crpr = match (lck_c, cap) {
+                                (Some(lc), Some(cc)) => crpr_credit(lc, cc, cl, true),
+                                _ => 0.0,
+                            };
+                            let rel = edge_relation(pl_c, from_c.clock.as_deref(), run.edge, pc, to_end.clock.as_deref(), src_edge(cap, cl)).0 + shift_c;
+                            let q = cap_early + rel + crpr - unc(to_end.clock.as_deref(), true) - c.eval_edge(l == 0, ck_slew, late_slew[*idx][l]);
+                            if best.is_none_or(|b| q - a < b.0) {
+                                best = Some((q - a, a, k));
+                            }
+                        }
+                    }
+                    if let Some(b) = best {
+                        setup_cand_slack.insert((r, *idx, l), b);
                     }
                 }
             }
@@ -4675,7 +4780,8 @@ fn build_report(
                             let (s, b) = latch_setup(o, q, a);
                             (s, Some(b))
                         }
-                        None => (q - a, None),
+                        // a launch told apart from the merged one by its CRPR credit: its own check
+                        None => (setup_cand_slack.get(&(r, v, l)).map_or(q - a, |c| c.0), None),
                     };
                     // equal slacks of two latch checks: the larger borrow is the worse end
                     // (`PathEnd::cmpSlack`)
@@ -4711,6 +4817,14 @@ fn build_report(
         // ranked a pessimistic slack the report never showed.
         if let Some((r, l)) = slack_at {
             check_arr[v] = runs[r].late_arr[v][l];
+            if let Some(&(_, a, k)) = setup_cand_slack.get(&(r, v, l)) {
+                check_arr[v] = a;
+                // the report follows this edge's own predecessors: traced only for a launch they
+                // do not reach
+                if Some(k) != chain_start(runs[r].late_from, v, l) {
+                    setup_pick.insert(v, (r, l, k));
+                }
+            }
         }
         if slack_at.is_some() {
             endpoint_req[v] = arr_v + slack;
@@ -4899,15 +5013,6 @@ fn build_report(
     // passes' recorded relaxations (`crpr_cands`). Measured on CoralNPU: a register's own
     // Q->D loop arrived first with 40.7 ps of credit, a neighbour 9.3 ps later with 25.7: the
     // reference's 47.237 against 52.923 here.
-    let start_spread = |k: usize| -> f64 {
-        if !is_ck[k] {
-            return 0.0;
-        }
-        let l = ck_lane[k].unwrap_or(0);
-        ((late_arr[k][l] as f32) - (early_arr[k][l] as f32)).abs() as f64
-    };
-    let any_spread = crpr_on && (0..n).any(|k| is_ck[k] && start_spread(k) > 0.0);
-    let skip_from = |u: usize| clock_declared && clock_reached[u] && !is_ck[u];
     let mut hold_keep = vec![false; n];
     for (idx, _, _) in &flop_hold {
         hold_keep[*idx] = true;
@@ -4924,17 +5029,6 @@ fn build_report(
     let simple_ctx = simple_ctx && hold_cands.iter().all(|m| m.values().all(|c| c.iter().all(|s| s.len() < 2)));
     // a hold end whose worst launch is not its merged arrival's: (run, data edge, launch pin)
     let mut hold_pick: HashMap<usize, (usize, usize, usize)> = HashMap::new();
-    // where an edge's predecessors lead back to: the first clock pin, else the start
-    let chain_start = |from: &[[Pred; 2]], v: usize, l: usize| -> Option<usize> {
-        let (mut x, mut xl) = (v, l);
-        while let Some((u, ul)) = from[x][xl] {
-            if is_ck[u] {
-                return Some(u);
-            }
-            (x, xl) = (u, ul);
-        }
-        Some(x)
-    };
     for (idx, hold, ck) in &flop_hold {
         let idx = *idx;
         if arr_min[idx] == f64::INFINITY {
@@ -5431,23 +5525,24 @@ fn build_report(
             for (g, (slack, v, r, l)) in ordered(worst) {
                 // a hold end whose worst launch is not the merged arrival's: that launch's own
                 // path, as it survived the pruning (`crpr_cands` traced)
-                let traced = (!max)
-                    .then(|| hold_pick.get(&v).filter(|p| p.0 == r && p.1 == l))
-                    .flatten()
-                    .map(|&(_, _, k)| {
-                        let (_, tr) = crpr_cands(&early_recs[r], runs[r].early_arr, &is_ck, &skip_from, &start_spread, false, &vec![false; n], Some(k as u32));
-                        let (ta, tp) = tr.unwrap();
-                        let fm: Vec<Option<usize>> = (0..n)
-                            .map(|x| {
-                                let b = if ta[x][0] <= ta[x][1] { 0 } else { 1 };
-                                tp[x][b].map(|(u, _)| u)
-                            })
-                            .collect();
-                        (ta, tp, fm)
-                    });
-                let view = match &traced {
-                    Some((ta, tp, fm)) => EdgeView { edge: runs[r].edge, late_arr: runs[r].late_arr, late_from: runs[r].late_from, from: runs[r].from, early_arr: ta, early_from: tp, from_min: fm },
-                    None => runs[r],
+                let pick = if max { setup_pick.get(&v) } else { hold_pick.get(&v) };
+                let traced = pick.filter(|p| p.0 == r && p.1 == l).map(|&(_, _, k)| {
+                    let recs = if max { &late_recs[r] } else { &early_recs[r] };
+                    let arr = if max { runs[r].late_arr } else { runs[r].early_arr };
+                    let (_, tr) = crpr_cands(recs, arr, &is_ck, &skip_from, &start_spread, max, &vec![false; n], Some(k as u32));
+                    let (ta, tp) = tr.unwrap();
+                    let fm: Vec<Option<usize>> = (0..n)
+                        .map(|x| {
+                            let b = if (ta[x][0] <= ta[x][1]) != max { 0 } else { 1 };
+                            tp[x][b].map(|(u, _)| u)
+                        })
+                        .collect();
+                    (ta, tp, fm)
+                });
+                let view = match (&traced, max) {
+                    (Some((ta, tp, fm)), true) => EdgeView { edge: runs[r].edge, late_arr: ta, late_from: tp, from: fm, early_arr: runs[r].early_arr, early_from: runs[r].early_from, from_min: runs[r].from_min },
+                    (Some((ta, tp, fm)), false) => EdgeView { edge: runs[r].edge, late_arr: runs[r].late_arr, late_from: runs[r].late_from, from: runs[r].from, early_arr: ta, early_from: tp, from_min: fm },
+                    (None, _) => runs[r],
                 };
                 if let Some(p) = make(max, v, &view, l, &g) {
                     debug_assert!((p.slack - slack).abs() < 1e-9, "{g}: reported {} scored {slack}", p.slack);

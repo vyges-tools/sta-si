@@ -331,17 +331,24 @@ library (crpr_loop) {
 // clk -> b0 (shared) -> a1..a4 -> r1/CK ; b0 -> c1..c4 -> dly -> r2/CK. r1/D = q1 & q2.
 // `with_r2` false ties r1/D's B to q1 too: the self loop alone.
 fn nl_loop(with_r2: bool) -> String {
+    nl_loop_dly(with_r2, false)
+}
+
+// `dly_on_r1`: the delay cell on r1's branch instead of r2's, so the self loop arrives LAST.
+fn nl_loop_dly(with_r2: bool, dly_on_r1: bool) -> String {
     let b = if with_r2 { "q2" } else { "q1" };
+    let (k1, k2) = if dly_on_r1 { ("k2", "c4") } else { ("a4", "k2") };
+    let dly_in = if dly_on_r1 { "a4" } else { "c4" };
     format!(
         "module c ( clk ); input clk; wire k0, a1, a2, a3, a4, c1, c2, c3, c4, k2, q1, q2, n2, d1;\n\
          BUF b0 ( .A(clk), .Y(k0) );\n\
          BUF ba1 ( .A(k0), .Y(a1) ); BUF ba2 ( .A(a1), .Y(a2) ); BUF ba3 ( .A(a2), .Y(a3) ); BUF ba4 ( .A(a3), .Y(a4) );\n\
          BUF bc1 ( .A(k0), .Y(c1) ); BUF bc2 ( .A(c1), .Y(c2) ); BUF bc3 ( .A(c2), .Y(c3) ); BUF bc4 ( .A(c3), .Y(c4) );\n\
-         DLY dl ( .A(c4), .Y(k2) );\n\
+         DLY dl ( .A({dly_in}), .Y(k2) );\n\
          AND2 g ( .A(q1), .B({b}), .Y(d1) );\n\
-         DFF r1 ( .CK(a4), .D(d1), .Q(q1) );\n\
+         DFF r1 ( .CK({k1}), .D(d1), .Q(q1) );\n\
          INV i2 ( .A(q2), .Y(n2) );\n\
-         DFF r2 ( .CK(k2), .D(n2), .Q(q2) );\n\
+         DFF r2 ( .CK({k2}), .D(n2), .Q(q2) );\n\
          endmodule"
     )
 }
@@ -359,4 +366,31 @@ fn a_later_launch_with_less_crpr_credit_sets_the_hold() {
     assert_eq!(p.endpoint, "r1", "{}", p.endpoint);
     assert_eq!(p.startpoint, "r2", "the reported hold path is the launch that set the slack");
     assert!((p.slack - 0.046).abs() < 1e-6, "reported {}", p.slack);
+}
+
+// The setup mirror (same rule, `pruneCrprArrivals` on the max side): r1's own loop is now the
+// LATEST arrival at r1/D, with its whole clock path (0.126) as credit, and r2's launch 0.033
+// earlier shares only b0 (0.024): r2's is the worse setup, by 0.069. Scored from the latest
+// arrival alone the check read the self loop's slack, optimistic.
+#[test]
+fn an_earlier_launch_with_less_crpr_credit_sets_the_setup() {
+    use vyges_sta_si::{liberty::Lib, netlist, sta::Timer};
+    let lib = Lib::parse(LIB_LOOP).unwrap();
+    let r1d = |with_r2: bool| {
+        let nl = netlist::parse(&nl_loop_dly(with_r2, true)).unwrap();
+        let t = Timer::build(&nl, &lib, &job(), None).unwrap();
+        let s = t.endpoint_slacks().into_iter().find(|(p, _)| t.pin_label(*p) == "r1/D").unwrap().1;
+        let path = t.report().check_paths.iter().find(|p| p.max && p.endpoint == "r1").map(|p| (p.startpoint.clone(), p.slack));
+        (s, path)
+    };
+    // late r1/CK 0.693, Q 0.11, AND 0.055; capture early 0.567 + 2.0 + the whole 0.126; setup 0.05
+    let (alone, _) = r1d(false);
+    assert!((alone - 1.785).abs() < 1e-6, "self loop alone {alone}");
+    // r2: late r2/CK 0.66, credit only b0's 0.024
+    let (both, path) = r1d(true);
+    assert!((both - 1.716).abs() < 1e-6, "r1/D with r2 {both}");
+    if let Some((start, slack)) = path {
+        assert_eq!(start, "r2", "the reported setup path is the launch that set the slack");
+        assert!((slack - both).abs() < 1e-9, "reported {slack}");
+    }
 }
