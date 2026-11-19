@@ -1880,6 +1880,7 @@ fn build_report(
     spef: Option<&CompactSpef>,
     capture: bool,
 ) -> Result<(TimingReport, Timing, Option<IncGraph>), StaError> {
+    let report_start = std::time::Instant::now();
     // A clock source written as a pattern (`create_clock … [get_ports *clk*]`) is every port it
     // matches, as the reference's `get_ports` resolves it. Kept literal it named no port, the
     // clock reached nothing, and every register went unchecked ("no constrained paths").
@@ -3072,7 +3073,7 @@ fn build_report(
     // (each clock edge is its own tag); `fixed_slew` then looks every delay up at the slews the
     // unfiltered pass merged over ALL launches, as the reference's slews are, so a filtered pass
     // moves arrivals only.
-    let relax = |nd: &[[f64; 2]],
+    let relax_walk = |nd: &[[f64; 2]],
                  ns: &[[f64; 2]],
                  late: bool,
                  seed_l: &[[f64; 2]],
@@ -3501,6 +3502,16 @@ fn build_report(
         // also hand back the per-lane arrays so the incremental fast path can seed a cone
         // recompute from the committed state (only captured by the final passes when asked).
         (arrival, slew_c, from_c, order, arr, slew, from)
+    };
+    // `VYGES_STAGE_TIMES=1`: the walks' count and time over the whole report — inside the
+    // findDelays / findArrivals stages, what the walks take apart from the wire computes
+    let relax_time = std::cell::Cell::new((0usize, 0.0f64));
+    let relax = |nd: &[[f64; 2]], ns: &[[f64; 2]], late: bool, seed_l: &[[f64; 2]], block_seq: bool, launch: Option<usize>, fixed_slew: Option<&[[f64; 2]]>, latch_seed: Option<&HashMap<usize, LatchSeed>>| {
+        let t = std::time::Instant::now();
+        let r = relax_walk(nd, ns, late, seed_l, block_seq, launch, fixed_slew, latch_seed);
+        let (c, secs) = relax_time.get();
+        relax_time.set((c + 1, secs + t.elapsed().as_secs_f64()));
+        r
     };
 
     // Per-arc interconnect delay, iterated to convergence. Each net's switching
@@ -5893,6 +5904,10 @@ fn build_report(
         out
     };
 
+    if std::env::var_os("VYGES_STAGE_TIMES").is_some_and(|v| v != "0") {
+        let (c, secs) = relax_time.get();
+        eprintln!("sta-si stage relax calls={c} secs={secs:.3} build_report_secs={:.3}", report_start.elapsed().as_secs_f64());
+    }
     let report = TimingReport {
         wns: if endpoints == 0 { f64::INFINITY } else { wns },
         tns,
