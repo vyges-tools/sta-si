@@ -38,6 +38,7 @@ pub mod data_check; // set_data_check / unset_data_check
 pub mod disable; // set_disable_timing / unset_disable_timing
 pub mod sim; // constants: set_case_analysis, set_logic_*, ties
 mod inc;
+mod labels;
 // SDC constraint linter + its metadata reader: in loom since 2026-10-30, shared with `vyges sdc`.
 pub use vyges_loom::{ipmeta, sdc_lint as sdclint};
 pub mod sdf; // SDF (Standard Delay Format) back-annotation writer

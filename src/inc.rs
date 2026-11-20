@@ -56,7 +56,7 @@ pub(crate) type Pred = Option<(usize, usize)>;
 
 /// The path into `v` on edge `l` (0 = rise, 1 = fall), followed lane by lane: every node at
 /// the edge the path actually carries there — what the reference reports for one path end.
-pub(crate) fn lane_path(labels: &[String], arr: &[[f64; 2]], slew: &[[f64; 2]], from: &[[Pred; 2]], v: usize, l: usize) -> Vec<PathNode> {
+pub(crate) fn lane_path(labels: &crate::labels::Labels, arr: &[[f64; 2]], slew: &[[f64; 2]], from: &[[Pred; 2]], v: usize, l: usize) -> Vec<PathNode> {
     let mut chain = vec![(v, l)];
     let (mut v, mut l) = (v, l);
     while let Some((u, ul)) = from[v][l] {
@@ -67,7 +67,7 @@ pub(crate) fn lane_path(labels: &[String], arr: &[[f64; 2]], slew: &[[f64; 2]], 
     chain
         .into_iter()
         .map(|(i, k)| PathNode {
-            label: labels[i].clone(),
+            label: labels[i].to_string(),
             arrival: arr[i][k],
             slew: slew[i][k],
         })
@@ -137,8 +137,8 @@ fn ck_load_preserving(old: &crate::liberty::Cell, new: &crate::liberty::Cell) ->
 /// Immutable timing topology — built once, never mutated, never cloned.
 pub(crate) struct IncTopo {
     pub n: usize,
-    pub labels: Vec<String>,
-    pub label2idx: HashMap<String, usize>,
+    pub labels: crate::labels::Labels,
+    pub label2idx: crate::labels::LabelIndex,
     pub succ: Vec<Vec<usize>>,      // forward adjacency (cone discovery)
     pub in_edges: Vec<Vec<InEdge>>, // reverse adjacency (node recompute)
     pub topo_pos: Vec<usize>,       // rank of each node in a valid topo order
@@ -387,7 +387,7 @@ impl IncGraph {
                         // a data endpoint's setup/hold tables belong to the CELL, so a swap
                         // changes the check itself, not just the arrival
                         if new_cell.is_seq {
-                            if let Some(&ep) = self.topo.label2idx.get(&format!("{inst}/{pin}")) {
+                            if let Some(ep) = self.topo.label2idx.get(&self.topo.labels, &format!("{inst}/{pin}")) {
                                 cons_override.insert(
                                     ep,
                                     (
@@ -411,7 +411,7 @@ impl IncGraph {
                     Dir::Out => {
                         // output pin: rebuild its incoming cell arcs from the new cell, held
                         // as an override so the base topology stays immutable.
-                        let ox = *self.topo.label2idx.get(&format!("{inst}/{pin}"))?;
+                        let ox = self.topo.label2idx.get(&self.topo.labels, &format!("{inst}/{pin}"))?;
                         let conn: HashMap<&str, &str> = iref
                             .conns
                             .iter()
@@ -422,10 +422,10 @@ impl IncGraph {
                             if !conn.contains_key(arc.related_pin.as_str()) {
                                 continue;
                             }
-                            let from = *self
+                            let from = self
                                 .topo
                                 .label2idx
-                                .get(&format!("{inst}/{}", arc.related_pin))?;
+                                .get(&self.topo.labels, &format!("{inst}/{}", arc.related_pin))?;
                             edges.push(InEdge::Cell {
                                 from,
                                 arc: Box::new(arc.clone()),
@@ -588,7 +588,7 @@ impl IncGraph {
                 .map(|(l, _)| (v, l))
         });
         let (worst_endpoint, worst_path) = match worst_edge {
-            Some((v, l)) => (self.topo.labels[v].clone(), lane_path(&self.topo.labels, &late.arr, &late.slew, &late.from, v, l)),
+            Some((v, l)) => (self.topo.labels[v].to_string(), lane_path(&self.topo.labels, &late.arr, &late.slew, &late.from, v, l)),
             None => self.trace(worst, &arrival, &slew, &from),
         };
 
@@ -630,7 +630,7 @@ impl IncGraph {
             }
         }
         let (worst_hold_endpoint, worst_hold_path) = match worst_hold {
-            Some((v, l)) => (self.topo.labels[v].clone(), lane_path(&self.topo.labels, &early.arr, &early.slew, &early.from, v, l)),
+            Some((v, l)) => (self.topo.labels[v].to_string(), lane_path(&self.topo.labels, &early.arr, &early.slew, &early.from, v, l)),
             None => (String::new(), Vec::new()),
         };
 
@@ -693,7 +693,7 @@ impl IncGraph {
     ) -> (String, Vec<PathNode>) {
         match end {
             Some(mut v) => {
-                let end_label = self.topo.labels[v].clone();
+                let end_label = self.topo.labels[v].to_string();
                 let mut chain = vec![v];
                 while let Some(u) = pred[v] {
                     chain.push(u);
@@ -703,7 +703,7 @@ impl IncGraph {
                 let path = chain
                     .into_iter()
                     .map(|i| PathNode {
-                        label: self.topo.labels[i].clone(),
+                        label: self.topo.labels[i].to_string(),
                         arrival: arrival[i],
                         slew: slew[i],
                     })

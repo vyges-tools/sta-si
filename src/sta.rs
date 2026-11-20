@@ -32,6 +32,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::inc::{checks_edge, HoldRec, InEdge, IncGraph, IncState, IncTopo, Lanes, Pred, SetupRec};
 use crate::job::StaJob;
+use crate::labels::{LabelIndex, Labels};
 use crate::liberty::{Arc, ClkEdge, Constraint, Dir, Lib};
 use crate::names::{instance_of, split_inst_pin};
 use crate::netlist::Netlist;
@@ -854,8 +855,8 @@ pub type PinId = usize;
 /// incremental recompute.)
 #[derive(Clone)]
 pub(crate) struct Timing {
-    labels: Vec<String>,
-    label2idx: HashMap<String, usize>,
+    labels: Labels,
+    label2idx: LabelIndex,
     is_endpoint: Vec<bool>,
     excluded_setup: Vec<bool>, // false-path endpoints (no setup check)
     arrival: Vec<f64>,         // latest (setup) arrival, ns
@@ -889,7 +890,7 @@ impl Timing {
     /// and the incremental fast path so both produce an identical snapshot.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        labels: Vec<String>,
+        labels: Labels,
         is_endpoint: &[bool],
         excluded_setup: &[bool],
         arrival: &[f64],
@@ -903,11 +904,7 @@ impl Timing {
         load_rf: &[[f64; 2]],
     ) -> Timing {
         Timing {
-            label2idx: labels
-                .iter()
-                .enumerate()
-                .map(|(i, l)| (l.clone(), i))
-                .collect(),
+            label2idx: LabelIndex::new(&labels),
             labels,
             is_endpoint: is_endpoint.to_vec(),
             excluded_setup: excluded_setup.to_vec(),
@@ -1068,11 +1065,11 @@ impl Timer {
     }
     /// Resolve a human label (`"port"` or `"inst/pin"`) to its handle.
     pub fn pin(&self, label: &str) -> Option<PinId> {
-        self.timing.label2idx.get(label).copied()
+        self.timing.label2idx.get(&self.timing.labels, label)
     }
     /// The label of a pin.
     pub fn pin_label(&self, p: PinId) -> &str {
-        self.timing.labels.get(p).map(String::as_str).unwrap_or("")
+        self.timing.labels.get(p).unwrap_or("")
     }
     /// Whether `p` is a setup capture endpoint (a primary output or a flop data pin).
     pub fn is_endpoint(&self, p: PinId) -> bool {
@@ -1187,7 +1184,7 @@ impl Timer {
     /// against the netlist rather than trusted. Anything that does not resolve to a known
     /// instance is reported as a primary port (ports drive a net of the same name).
     pub fn pin_site(&self, p: PinId) -> PinSite {
-        let label = self.timing.labels[p].clone();
+        let label = self.timing.labels[p].to_string();
         if let Some(cut) = label.rfind('/') {
             let (inst_name, pin_name) = (&label[..cut], &label[cut + 1..]);
             if let Some(&i) = self.inst_idx.get(inst_name) {
@@ -1268,7 +1265,7 @@ impl Timer {
                 let stage_delay = prev.map_or(0.0, |a| n.arrival - a);
                 prev = Some(n.arrival);
                 // the report's path carries labels; recover the graph id to reach the site
-                let pin_id = self.timing.label2idx.get(&n.label).copied();
+                let pin_id = self.timing.label2idx.get(&self.timing.labels, &n.label);
                 PathStage {
                     site: pin_id.map_or_else(
                         || PinSite {
@@ -1656,17 +1653,18 @@ impl<'a> NodeKeys<'a> {
     }
 
     // port `p`'s node, made (labelled `p`) if it has none
-    fn port_node(&mut self, p: &'a str, labels: &mut Vec<String>, is_endpoint: &mut Vec<bool>) -> usize {
+    fn port_node(&mut self, p: &'a str, labels: &mut Labels, is_endpoint: &mut Vec<bool>) -> usize {
         if let Some(i) = self.port(p) {
             return i;
         }
-        let i = new_node(p.to_string(), labels, is_endpoint);
+        let i = labels.push(p);
+        is_endpoint.push(false);
         self.ports.insert(p, i);
         i
     }
 
     // the node of instance `k`'s connection `j`, made (labelled `inst/pin`) if it has none
-    fn pin_node(&mut self, k: usize, j: usize, labels: &mut Vec<String>, is_endpoint: &mut Vec<bool>) -> usize {
+    fn pin_node(&mut self, k: usize, j: usize, labels: &mut Labels, is_endpoint: &mut Vec<bool>) -> usize {
         let inst = &self.nl.insts[k];
         let pin = inst.conns[j].0.as_str();
         let first = *self.inst_of.entry(inst.name.as_str()).or_insert(k);
@@ -1679,7 +1677,8 @@ impl<'a> NodeKeys<'a> {
         let i = match found {
             Some(i) => i,
             None => {
-                let i = new_node(format!("{}/{}", inst.name, pin), labels, is_endpoint);
+                let i = labels.push_pin(&inst.name, pin);
+                is_endpoint.push(false);
                 if first != k {
                     self.dup_pins.insert(format!("{}\0{}", inst.name, pin), i);
                 }
@@ -1693,13 +1692,6 @@ impl<'a> NodeKeys<'a> {
 
 // a register's check: (data pin node, its check arcs, its CK pin as (instance, pin))
 type FlopCheck<'a> = (usize, Cow<'a, [Constraint]>, Option<(&'a str, &'a str)>);
-
-fn new_node(label: String, labels: &mut Vec<String>, is_endpoint: &mut Vec<bool>) -> usize {
-    let i = labels.len();
-    labels.push(label);
-    is_endpoint.push(false);
-    i
-}
 
 /// Build the timing graph, propagate arrival/required, and return the report.
 ///
@@ -1750,7 +1742,7 @@ fn build_report(
     let cap_step = 1.0 / ff_per_cap;
     // the RC solves (Elmore, transient) work in ns: their times to and from the library's unit
     let (ns_per_time, time_per_ns) = (pow10_exact(lib.units.time_s / 1e-9), pow10_exact(1e-9 / lib.units.time_s));
-    let mut labels: Vec<String> = Vec::new();
+    let mut labels = Labels::default();
     let mut keys = NodeKeys::new(nl);
     let mut is_endpoint: Vec<bool> = Vec::new();
 
@@ -3181,7 +3173,7 @@ fn build_report(
                                         if dmp_trace {
                                             eprintln!(
                                                 "dmp|{}|ol={ol}|in_slew={:e}|c2={:e}|rpi={:e}|c1={:e}|rd={:e}|alg={:?}|ceff={:e}|delay={:e}|slew={:e}",
-                                                labels[v], sin * lib.units.time_s, c2 * lib.units.cap_f, rpi, c1 * lib.units.cap_f, rd * ohm_per_r,
+                                                &labels[v], sin * lib.units.time_s, c2 * lib.units.cap_f, rpi, c1 * lib.units.cap_f, rd * ohm_per_r,
                                                 crate::dmp::select_alg_r(rd, c2, rpi / ohm_per_r, c1, ohm_per_r),
                                                 r.ceff * lib.units.cap_f, r.delay * lib.units.time_s, r.slew * lib.units.time_s
                                             );
@@ -3716,7 +3708,7 @@ fn build_report(
                 }
                 let adj: Vec<Vec<usize>> = out_edges.iter().map(|es| es.iter().filter(|e| !e.latch_dq).map(|e| e.to).collect()).collect();
                 let cycle = find_cycle(&adj, &done).unwrap_or_default();
-                return Err(StaError::CombinationalLoop(cycle.into_iter().map(|v| labels[v].clone()).collect()));
+                return Err(StaError::CombinationalLoop(cycle.into_iter().map(|v| labels[v].to_string()).collect()));
             }
             cycle_checked = true;
         }
@@ -4064,7 +4056,7 @@ fn build_report(
         let unclocked: Vec<usize> = (0..n).filter(|&i| is_ck[i] && !clock_reached[i]).collect();
         if !unclocked.is_empty() {
             let total = is_ck.iter().filter(|&&b| b).count();
-            let head: Vec<&str> = unclocked.iter().take(5).map(|&i| labels[i].as_str()).collect();
+            let head: Vec<&str> = unclocked.iter().take(5).map(|&i| &labels[i]).collect();
             vyges_events::emit(
                 &vyges_events::Event::new(
                     "vyges-sta-si",
@@ -4240,7 +4232,7 @@ fn build_report(
         Some(ck) => reg_end(Some(ck), ck),
         None => {
             let p = start_port(endpoint, pred);
-            let name = p.map(|v| labels[v].clone()).unwrap_or_default();
+            let name = p.map(|v| labels[v].to_string()).unwrap_or_default();
             End { name, clock: Some(in_clock_at(p, edge).unwrap_or(primary_clock).to_string()), port: true }
         }
     };
@@ -4275,7 +4267,7 @@ fn build_report(
     type OutCheck = [Option<(f64, String, usize, f64)>; 2];
     let out_check = |idx: usize, from: &End, edge: usize, pl: f64, max: bool| -> OutCheck {
         let mut best: OutCheck = [None, None];
-        let name = labels[idx].as_str();
+        let name = &labels[idx];
         for d in out_delays.get(&idx).map(Vec::as_slice).unwrap_or_default() {
             let clk = d.clock.clone().unwrap_or_else(|| primary_clock.to_string());
             // clocks in separate groups: no check (a delay with no clock names none)
@@ -4762,7 +4754,7 @@ fn build_report(
                         let from_c = match lck_c {
                             Some(c) => reg_end(Some(c), c),
                             None => End {
-                                name: sport.map(|v| labels[v].clone()).unwrap_or_default(),
+                                name: sport.map(|v| labels[v].to_string()).unwrap_or_default(),
                                 clock: Some(in_clock_at(sport, run.edge).unwrap_or(primary_clock).to_string()),
                                 port: true,
                             },
@@ -4907,7 +4899,7 @@ fn build_report(
     // a path group of its own (`probe`), for a path-by-path comparison with the reference's
     // `report_checks -to`. Unset, nothing changes.
     let probe_end: Option<String> = std::env::var("VYGES_STA_PROBE_END").ok();
-    let is_probe = |v: usize| probe_end.as_deref() == Some(labels[v].as_str());
+    let is_probe = |v: usize| probe_end.as_deref() == Some(&labels[v]);
     for v in 0..n {
         if !is_endpoint[v] || excluded_setup[v] {
             continue; // not an endpoint, or false-path-excluded
@@ -5019,10 +5011,10 @@ fn build_report(
         // scored per edge: that launching edge's and data edge's own path
         (Some(v), Some((r, l))) => {
             worst_path = crate::inc::lane_path(&labels, runs[r].late_arr, &late_slew, runs[r].late_from, v, l);
-            labels[v].clone()
+            labels[v].to_string()
         }
         (Some(mut v), None) => {
-            let end_label = labels[v].clone();
+            let end_label = labels[v].to_string();
             // trace through the pass that produced the reported slack, so the printed
             // path is the one the number came from
             let (pred, arr_of, slew_of) = if worst_is_clk_launched {
@@ -5038,7 +5030,7 @@ fn build_report(
             chain.reverse();
             for idx in chain {
                 worst_path.push(PathNode {
-                    label: labels[idx].clone(),
+                    label: labels[idx].to_string(),
                     arrival: arr_of[idx],
                     slew: slew_of[idx],
                 });
@@ -5249,7 +5241,7 @@ fn build_report(
                     let from_end = match lck {
                         Some(c) => reg_end(Some(c), c),
                         None => End {
-                            name: sport.map(|v| labels[v].clone()).unwrap_or_default(),
+                            name: sport.map(|v| labels[v].to_string()).unwrap_or_default(),
                             clock: Some(in_clock_at(sport, run.edge).unwrap_or(primary_clock).to_string()),
                             port: true,
                         },
@@ -5338,7 +5330,7 @@ fn build_report(
     for (f, t, m) in &data_checks {
         if hold_end.contains_key(t) {
             vyges_events::emit(
-                &vyges_events::Event::new("vyges-sta-si", vyges_events::Severity::Warn, format!("data check: hold at {}, a register data pin, is not modelled; not applied", labels[*t]))
+                &vyges_events::Event::new("vyges-sta-si", vyges_events::Severity::Warn, format!("data check: hold at {}, a register data pin, is not modelled; not applied", &labels[*t]))
                     .with_code("STA-DATA-CHECK"),
             );
             continue;
@@ -5430,7 +5422,7 @@ fn build_report(
     // The path of the edge whose check set the slack — not the earliest lane at each node,
     // which can be the other edge's path printed beside this one's slack.
     let (worst_hold_endpoint, worst_hold_path) = match worst_hold {
-        Some((v, (r, l))) => (labels[v].clone(), crate::inc::lane_path(&labels, runs[r].early_arr, &early_slew, runs[r].early_from, v, l)),
+        Some((v, (r, l))) => (labels[v].to_string(), crate::inc::lane_path(&labels, runs[r].early_arr, &early_slew, runs[r].early_from, v, l)),
         None => (String::new(), Vec::new()),
     };
 
@@ -5445,12 +5437,12 @@ fn build_report(
         // `pin (cell)`, or a port's `name (in)` / `name (out)`
         let desc = |u: usize| -> String {
             if in_port.contains(&u) {
-                format!("{} (in)", labels[u])
+                format!("{} (in)", &labels[u])
             } else if out_port.contains(&u) {
-                format!("{} (out)", labels[u])
+                format!("{} (out)", &labels[u])
             } else {
                 let inst = instance_of(&labels[u]);
-                format!("{} ({})", labels[u], inst_cell.get(inst).copied().unwrap_or("?"))
+                format!("{} ({})", &labels[u], inst_cell.get(inst).copied().unwrap_or("?"))
             }
         };
         let clock_line = |name: &str, rise: bool, time: f64| -> ClockLine {
@@ -5464,7 +5456,7 @@ fn build_report(
         // `edge` if it has one (`ReportPath::clkRegLatchDesc`)
         let reg_desc = |ck: usize, edge: Option<usize>| -> &'static str {
             let label = &labels[ck];
-            let (inst, pin) = label.rsplit_once('/').unwrap_or((label.as_str(), ""));
+            let (inst, pin) = label.rsplit_once('/').unwrap_or((label, ""));
             let edges: Vec<usize> = inst_cell
                 .get(inst)
                 .and_then(|c| lib.cell(c))
@@ -5521,7 +5513,7 @@ fn build_report(
             let src_clock = clock_line(src_name, launch_edge == 0, launch);
             let (startpoint, start_reason) = match k {
                 Some(_) => (instance_of(&labels[s0]).to_string(), format!("{} clocked by {src_name}", reg_desc(s0, Some(s0l)))),
-                None => (labels[s0].clone(), format!("input port clocked by {src_name}")),
+                None => (labels[s0].to_string(), format!("input port clocked by {src_name}")),
             };
             let src_network_delay = if k.is_some() { arr[s0][s0l] } else { 0.0 };
             let input_delay = if k.is_none() { Some((arr[s0][s0l], s0l == 0)) } else { None };
@@ -5553,7 +5545,7 @@ fn build_report(
                     group: group.to_string(),
                     startpoint,
                     start_reason,
-                    endpoint: labels[v].clone(),
+                    endpoint: labels[v].to_string(),
                     end_reason: format!("output port clocked by {clk}"),
                     src_clock,
                     src_network_delay,
@@ -6065,7 +6057,7 @@ mod node_keys_rule {
         .unwrap();
         // the reader names a second `u1` `u1_1`; the map still answers for a netlist that does not
         nl.insts[1].name = "u1".to_string();
-        let (mut labels, mut ends) = (Vec::new(), Vec::new());
+        let (mut labels, mut ends) = (crate::labels::Labels::default(), Vec::new());
         let mut keys = NodeKeys::new(&nl);
         let a = keys.port_node("a", &mut labels, &mut ends);
         assert_eq!(keys.port_node("a", &mut labels, &mut ends), a, "a port is made once");
@@ -6075,7 +6067,7 @@ mod node_keys_rule {
         assert_eq!(keys.pin_node(1, 0, &mut labels, &mut ends), u1a);
         let u1b = keys.pin_node(1, 1, &mut labels, &mut ends);
         assert_eq!(keys.pin_node(1, 2, &mut labels, &mut ends), u1y);
-        assert_eq!(labels, ["a", "u1/A", "u1/Y", "u1/B"]);
+        assert_eq!(labels.iter().collect::<Vec<_>>(), ["a", "u1/A", "u1/Y", "u1/B"]);
         assert_eq!(keys.port("a"), Some(a));
         assert_eq!(keys.port("y"), None, "no node made for y");
         assert_eq!(keys.pin("u1", "A"), Some(u1a));
