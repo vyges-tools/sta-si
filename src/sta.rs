@@ -5200,7 +5200,13 @@ fn build_report(
     // DIAGNOSTIC: `VYGES_STA_PROBE_END=<pin>` also reports that end's own setup and hold path, in
     // a path group of its own (`probe`), for a path-by-path comparison with the reference's
     // `report_checks -to`. Unset, nothing changes.
-    let probe_end: Option<String> = std::env::var("VYGES_STA_PROBE_END").ok();
+    // ⛔ It was silent in a `.sta` job: its paths reached only a script's `report_checks`, which a
+    // job's report never prints. They now print to stderr under `vy_probe_end`.
+    let probe_end: Option<String> = std::env::var("VYGES_STA_PROBE_END").ok().filter(|p| !p.is_empty());
+    let probe_print = probe_end.is_some() && crate::debug::on(crate::debug::PROBE_END);
+    if probe_end.is_some() && !probe_print {
+        eprintln!("sta-si: VYGES_STA_PROBE_END names an end; its paths print with VYGES_DEBUG={}:{}=1", crate::debug::TOOL, crate::debug::PROBE_END);
+    }
     let is_probe = |v: usize| probe_end.as_deref() == Some(&labels[v]);
     for v in 0..n {
         if !is_endpoint[v] || excluded_setup[v] {
@@ -6009,6 +6015,17 @@ fn build_report(
         }
         out
     };
+    if probe_print {
+        let probes: Vec<&CheckPath> = check_paths.iter().filter(|p| p.group == "probe").collect();
+        if probes.is_empty() {
+            eprintln!("probe| {}: no timed setup or hold check ends there", probe_end.as_deref().unwrap_or(""));
+        }
+        for p in probes {
+            for l in crate::tcl::full_path(p, 4).lines() {
+                eprintln!("probe| {l}");
+            }
+        }
+    }
 
     if std::env::var_os("VYGES_STAGE_TIMES").is_some_and(|v| v != "0") {
         let (c, secs) = relax_time.get();

@@ -550,6 +550,14 @@ fn start_end(s: &mut String, key: &str, pt: &str, reason: &str) {
 /// One path end in the reference's full format (`ReportPath::reportFull` for a check or an
 /// output delay): header, the source clock and data path, the target clock and required time,
 /// the slack; two blank lines after.
+/// One check path in `report_checks`' full format, with the slew and capacitance columns, at
+/// `digits` decimals.
+pub(crate) fn full_path(p: &crate::sta::CheckPath, digits: usize) -> String {
+    let mut s = String::new();
+    path_end(&mut s, p, Fields { cap: true, slew: true, input_pins: false }, digits);
+    s
+}
+
 fn path_end(s: &mut String, p: &crate::sta::CheckPath, fields: Fields, digits: usize) {
     let c = Cols { fields, digits };
     let mut out = |l: String| {

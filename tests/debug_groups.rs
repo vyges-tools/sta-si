@@ -12,7 +12,7 @@
 use std::process::{Command, Output};
 
 const JOB: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/top/top.sta");
-const VARS: &[&str] = &["VYGES_DEBUG", "VYGES_STAGE_TIMES", "VYGES_STA_DMP_TRACE", "VYGES_STA_RC_TRACE", "VYGES_STA_RC_NET"];
+const VARS: &[&str] = &["VYGES_DEBUG", "VYGES_STAGE_TIMES", "VYGES_STA_DMP_TRACE", "VYGES_STA_RC_TRACE", "VYGES_STA_RC_NET", "VYGES_STA_PROBE_END"];
 
 fn run(env: &[(&str, &str)]) -> Output {
     let mut c = Command::new(env!("CARGO_BIN_EXE_vyges-sta-si"));
@@ -66,7 +66,7 @@ fn the_old_switches_are_aliases_with_a_note() {
 fn an_unknown_group_is_a_warning_naming_the_valid_ones() {
     let on = run(&[("VYGES_DEBUG", "sta-si:no_such_group=1")]);
     let e = err(&on);
-    assert!(e.contains("unknown debug group sta-si:no_such_group; valid groups for sta-si: dmp_ceff, vy_rc_model"), "{e}");
+    assert!(e.contains("unknown debug group sta-si:no_such_group; valid groups for sta-si: dmp_ceff, vy_rc_model, vy_probe_end"), "{e}");
 }
 
 #[test]
@@ -77,4 +77,25 @@ fn describe_lists_the_groups() {
     assert!(text.contains("\"group\":\"dmp_ceff\"") && text.contains("\"group\":\"vy_rc_model\""), "{text}");
     assert!(text.contains("\"reference\":\"sta dmp_ceff\""), "{text}");
     assert!(text.ends_with("}\n}\n"), "one object, closed once:\n{text}");
+}
+
+/// The rule: `VYGES_STA_PROBE_END=<pin>` names an end and `vy_probe_end` prints its own check paths
+/// in `report_checks`' full format, whatever the job's report (in a `.sta` job they were computed
+/// and never printed). The pin alone prints only a note saying how; a pin that ends no check says
+/// so; the report never changes.
+#[test]
+fn the_probe_end_group_prints_that_ends_path() {
+    let off = run(&[]);
+    let pin_only = run(&[("VYGES_STA_PROBE_END", "y")]);
+    let e = err(&pin_only);
+    assert!(!e.contains("probe|"), "{e}");
+    assert!(e.contains("its paths print with VYGES_DEBUG=sta-si:vy_probe_end=1"), "{e}");
+    let on = run(&[("VYGES_STA_PROBE_END", "y"), ("VYGES_DEBUG", "sta-si:vy_probe_end=1")]);
+    let e = err(&on);
+    assert_eq!(on.stdout, off.stdout, "the probe changed the report");
+    for l in ["probe| Endpoint: y (output port", "probe| Path Group: probe", "probe| Path Type: max", "slack ("] {
+        assert!(e.contains(l), "no `{l}`:\n{e}");
+    }
+    let none = run(&[("VYGES_STA_PROBE_END", "no_such_pin"), ("VYGES_DEBUG", "sta-si:vy_probe_end=1")]);
+    assert!(err(&none).contains("probe| no_such_pin: no timed setup or hold check ends there"), "{}", err(&none));
 }

@@ -9,6 +9,7 @@
 //! - The old switches still work, as aliases with a one-time deprecation note:
 //!   `VYGES_STA_DMP_TRACE` is `dmp_ceff`, `VYGES_STA_RC_TRACE` is `vy_rc_model`.
 //!   `VYGES_STA_RC_NET=<net>` still picks the one net the model trace lists.
+//!   `VYGES_STA_PROBE_END=<pin>` picks the end whose paths `vy_probe_end` prints.
 //!
 //! ⛔ A group changes only what is printed (to stderr), never a result.
 
@@ -21,6 +22,8 @@ pub const TOOL: &str = "sta-si";
 pub const DMP_CEFF: &str = "dmp_ceff";
 /// Which interconnect model each arc's delay came from.
 pub const RC_MODEL: &str = "vy_rc_model";
+/// One end's own setup and hold path, printed as the reference's `report_checks -to` prints it.
+pub const PROBE_END: &str = "vy_probe_end";
 
 /// Every debug group the engine offers.
 pub const DEBUG_GROUPS: &[DebugGroup] = &[
@@ -34,6 +37,12 @@ pub const DEBUG_GROUPS: &[DebugGroup] = &[
         group: RC_MODEL,
         max_level: 1,
         what: "after the delay loop, which interconnect model each arc got (transient, tree Elmore, lumped, none), nets worst first; VYGES_STA_RC_NET=<net> lists one net",
+        reference: None,
+    },
+    DebugGroup {
+        group: PROBE_END,
+        max_level: 1,
+        what: "the setup and hold path of the end VYGES_STA_PROBE_END=<pin> names, in report_checks' full format (`probe|` lines), whatever the job's report; also a `probe` group in a script's report_checks",
         reference: None,
     },
 ];
