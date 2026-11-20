@@ -2648,6 +2648,8 @@ fn build_report(
     // slew is still set by the arc from it; a disabled clock buffer leaves a whole leaf's flops,
     // their Q pins and an inverter fed only by one of them at 0.
     let dis_src: Vec<bool> = (0..n).map(|v| !held[v] && indeg[v] == 0 && sim_cut[v] == 0 && dis_cut[v] > 0).collect();
+    // the cut counts' last use: they only sort roots (0.09 GiB on a 5.7M-pin design kept to the end)
+    drop((sim_cut, dis_cut));
     let sim_narrows = out_edges.iter().flatten().any(|e| e.lanes != ALL_LANES);
 
     // ---- on-chip variation model ----------------------------------------
@@ -2745,10 +2747,12 @@ fn build_report(
     // different edge. `None` leaves the old extremum behaviour for a clock pin whose cell
     // declares no sequential arc — a gate we cannot attribute an edge to, where guessing
     // one would be worse than the pessimism.
-    let mut ck_lane = vec![None::<usize>; n];
+    // per register clock pin, not per pin (a dense vector was 0.09 GiB on a 5.7M-pin design)
+    let mut ck_lane: ByNode<Option<usize>> = ByNode::new(n, None);
     for &(i, l) in &ck_lane_list {
-        ck_lane[i] = l;
+        *ck_lane.entry(i) = l;
     }
+    ck_lane.shrink();
 
     // ---- per-lane launch times -------------------------------------------
     // The main pass measures every delay *from the launching clock edge*, so both
@@ -2937,7 +2941,9 @@ fn build_report(
     // source up to the register clock pins arrives at the source's own time — no network delay —
     // with the clock transition as its slew, so a register's CK->Q is looked up at that slew. The
     // reference's rule; a propagated clock is timed through its network as before.
-    let mut ideal_slew: Vec<Option<[f64; 2]>> = vec![None; n];
+    // per pin of an ideal clock's network, not per pin (a dense vector was 0.13 GiB on a 5.7M-pin
+    // design); the reference keeps a clock's ideal slew on the clock, not on each vertex
+    let mut ideal_slew: ByNode<Option<[f64; 2]>> = ByNode::new(n, None);
     {
         let mut stack: Vec<usize> = Vec::new();
         for (src, sl) in &job.ideal_clocks {
@@ -2946,7 +2952,7 @@ fn build_report(
                 None => keys.port(src),
             };
             if let Some(nd) = node.filter(|&nd| !const_driver[nd]) {
-                ideal_slew[nd] = Some(*sl);
+                *ideal_slew.entry(nd) = Some(*sl);
                 stack.push(nd);
             }
         }
@@ -2956,11 +2962,13 @@ fn build_report(
             }
             for e in out_edges[u].iter().filter(|e| e.searched() && !e.latch_dq) {
                 if ideal_slew[e.to].is_none() {
-                    ideal_slew[e.to] = ideal_slew[u];
+                    let sl = ideal_slew[u];
+                    *ideal_slew.entry(e.to) = sl;
                     stack.push(e.to);
                 }
             }
         }
+        ideal_slew.shrink();
     }
     // Guarded on having RESOLVED at least one declared clock source. With none we
     // cannot tell a missing `create_clock` from a clock port this model failed to
