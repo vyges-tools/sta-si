@@ -5843,12 +5843,17 @@ fn build_report(
                 format!("{} ({})", &labels[u], inst_cell.get(inst).copied().unwrap_or("?"))
             }
         };
-        let clock_line = |name: &str, rise: bool, time: f64| -> ClockLine {
+        // A clock as a report names it: primed when the clock pin's transition is not its edge's
+        // (`ReportPath::clkName`, `clk_end_rf != clk_rf`): an inverting or non-unate clock path.
+        let clk_name = |name: &str, inverted: bool| -> String { if inverted { format!("{name}'") } else { name.to_string() } };
+        // `rise`: the clock pin's transition, which the line names (`reportClkLine` prints
+        // `clk_end_rf`); `time`: its edge's
+        let clock_line = |name: &str, rise: bool, time: f64, inverted: bool| -> ClockLine {
             let src = job.clocks.iter().find(|c| c.0 == name).map_or(job.clock_port.as_str(), |c| c.1.as_str());
             let ideal = job.ideal_clocks.get(src);
             // a virtual clock (no source) is ideal
             let propagated = !src.is_empty() && ideal.is_none();
-            ClockLine { name: name.to_string(), rise, time, slew: ideal.map_or(0.0, |s| s[usize::from(!rise)]), propagated }
+            ClockLine { name: clk_name(name, inverted), rise, time, slew: ideal.map_or(0.0, |s| s[usize::from(!rise)]), propagated }
         };
         // a register's description from the clock-to-output arcs of its clock pin: the one on
         // `edge` if it has one (`ReportPath::clkRegLatchDesc`)
@@ -5909,9 +5914,11 @@ fn build_report(
             // the launch's clock edge is its run's: a run times one edge's tags (see `edge_seed`)
             let launch_edge = run.edge;
             let launch = clock_edge_time(job, Some(src_name), launch_edge, pl);
-            let src_clock = clock_line(src_name, launch_edge == 0, launch);
+            // a register's clock pin transition `s0l`; an input's line is its edge's
+            let src_inv = k.is_some() && s0l != launch_edge;
+            let src_clock = clock_line(src_name, if k.is_some() { s0l == 0 } else { launch_edge == 0 }, launch, src_inv);
             let (startpoint, start_reason) = match k {
-                Some(_) => (instance_of(&labels[s0]).to_string(), format!("{} clocked by {src_name}", reg_desc(s0, Some(s0l)))),
+                Some(_) => (instance_of(&labels[s0]).to_string(), format!("{} clocked by {}", reg_desc(s0, Some(s0l)), clk_name(src_name, src_inv))),
                 None => (labels[s0].to_string(), format!("input port clocked by {src_name}")),
             };
             let src_network_delay = if k.is_some() { arr[s0][s0l] } else { 0.0 };
@@ -5951,7 +5958,7 @@ fn build_report(
                     input_delay,
                     lines,
                     arrival,
-                    tgt_clock: clock_line(&clk, cl == 0, tgt_time),
+                    tgt_clock: clock_line(&clk, cl == 0, tgt_time, false),
                     tgt_network_delay: 0.0,
                     uncertainty,
                     crpr: 0.0,
@@ -6022,13 +6029,13 @@ fn build_report(
                     start_reason,
                     endpoint: instance_of(&labels[v]).to_string(),
                     // open on the rise: a positive latch
-                    end_reason: format!("{} level-sensitive latch clocked by {tgt_name}", if cl == 1 { "positive" } else { "negative" }),
+                    end_reason: format!("{} level-sensitive latch clocked by {}", if cl == 1 { "positive" } else { "negative" }, clk_name(tgt_name, ce != cl)),
                     src_clock,
                     src_network_delay,
                     input_delay,
                     lines,
                     arrival,
-                    tgt_clock: clock_line(tgt_name, ce == 1, launch + rel_open),
+                    tgt_clock: clock_line(tgt_name, cl == 1, launch + rel_open, ce != cl),
                     tgt_network_delay: open_latency,
                     uncertainty: -unc(Some(tgt_name), true),
                     crpr: open_crpr,
@@ -6048,7 +6055,7 @@ fn build_report(
             let end_reason = if is_async {
                 format!("{check} check against {}-edge clock {tgt_name}", if cl == 1 { "falling" } else { "rising" })
             } else {
-                format!("{} clocked by {tgt_name}", cap.map_or("rising edge-triggered flip-flop", |c| reg_desc(c, Some(cl))))
+                format!("{} clocked by {}", cap.map_or("rising edge-triggered flip-flop", |c| reg_desc(c, Some(cl))), clk_name(tgt_name, ce != cl))
             };
             Some(CheckPath {
                 max,
@@ -6062,7 +6069,7 @@ fn build_report(
                 input_delay,
                 lines,
                 arrival,
-                tgt_clock: clock_line(tgt_name, ce == 0, launch + rel),
+                tgt_clock: clock_line(tgt_name, cl == 0, launch + rel, ce != cl),
                 tgt_network_delay: cap_arr,
                 uncertainty: if max { -unc(Some(tgt_name), true) } else { unc(Some(tgt_name), false) },
                 crpr: if max { crpr } else { -crpr },
