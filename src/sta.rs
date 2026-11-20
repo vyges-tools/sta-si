@@ -828,6 +828,47 @@ struct Edge<'l> {
 
 const ALL_LANES: [[bool; 2]; 2] = [[true; 2]; 2];
 
+/// Each node's out-edges in one flat list, a node's own a contiguous slice in the order they were
+/// made (compressed sparse rows). `adj[v]` is node v's slice; `adj.iter()` the slices in node order.
+///
+/// ⛔ ONE list, not a `Vec` per node: those held 0.90 GiB on a 5.7M-pin design, in headers and
+/// per-node allocation slack. The reference keeps one edge object per edge in a table, each
+/// vertex holding only the id of its first out-edge (`Vertex::out_edges_`, a linked list).
+struct Adj<T> {
+    // node v's items are `items[start[v]..start[v + 1]]`
+    start: Vec<usize>,
+    items: Vec<T>,
+}
+
+impl<T> Adj<T> {
+    /// From `(node, item)` in the order made; a node's items keep that order.
+    fn new(nodes: usize, mut made: Vec<(u32, T)>) -> Adj<T> {
+        made.sort_by_key(|e| e.0); // stable: a node's own stay in the order made
+        let mut start = vec![0usize; nodes + 1];
+        for e in &made {
+            start[e.0 as usize + 1] += 1;
+        }
+        for v in 0..nodes {
+            start[v + 1] += start[v];
+        }
+        let mut items = Vec::with_capacity(made.len());
+        items.extend(made.into_iter().map(|e| e.1));
+        Adj { start, items }
+    }
+
+    /// Each node's items, in node order.
+    fn iter(&self) -> impl ExactSizeIterator<Item = &[T]> + '_ {
+        (0..self.start.len() - 1).map(move |v| &self[v])
+    }
+}
+
+impl<T> std::ops::Index<usize> for Adj<T> {
+    type Output = [T];
+    fn index(&self, v: usize) -> &[T] {
+        &self.items[self.start[v]..self.start[v + 1]]
+    }
+}
+
 impl Edge<'_> {
     /// Does any arrival cross this arc? (A cut arc stays for the slews after it.)
     fn searched(&self) -> bool {
@@ -2199,7 +2240,8 @@ fn build_report(
     let mut dis_cut = vec![0usize; n];
 
     // ---- pass 2: edges ---------------------------------------------------
-    let mut out_edges: Vec<Vec<Edge>> = (0..n).map(|_| Vec::new()).collect();
+    // (from node, edge) in the order made; a node's out-edges keep that order (see `Adj`)
+    let mut made_edges: Vec<(u32, Edge)> = Vec::new();
     let mut indeg = vec![0usize; n];
 
     // cell arcs: related input pin -> output pin (within an instance)
@@ -2241,12 +2283,12 @@ fn build_report(
                     }
                 }
                 let latch_dq = is_latch_d_to_q(cell, arc);
-                out_edges[i_idx].push(Edge {
+                made_edges.push((i_idx as u32, Edge {
                     to: o_idx,
                     kind: EdgeKind::Cell(arc),
                     lanes,
                     latch_dq,
-                });
+                }));
                 // the order is the reference's levels: not through a latch D->Q arc
                 if !latch_dq {
                     indeg[o_idx] += 1;
@@ -2494,17 +2536,18 @@ fn build_report(
                     for (l, row) in lanes.iter_mut().enumerate() {
                         row[l] = pass_lane(d, l) && pass_lane(s, l);
                     }
-                    out_edges[d].push(Edge {
+                    made_edges.push((d as u32, Edge {
                         to: s,
                         kind: EdgeKind::Net(aid),
                         lanes,
                         latch_dq: false,
-                    });
+                    }));
                     indeg[s] += 1;
                 }
             }
         }
     }
+    let out_edges = Adj::new(n, made_edges);
     let n_arcs = arcs.len();
     // A node the constants hold, or whose every in-arc they cut, is untimed exactly as a tie
     // cell's output is: no seed, so nothing reaches its fanout.
@@ -6188,5 +6231,29 @@ mod crpr_cands_free_rule {
         assert_eq!(launches(&out, 3), [0, 1]);
         assert_eq!(launches(&out, 4), [0, 1], "the second read of pin 2 sees its whole set");
         assert_eq!(launches(&out, 2), [0, 1, 5], "a kept set is not freed");
+    }
+}
+
+#[cfg(test)]
+mod adj_rule {
+    use super::Adj;
+
+    /// The rule: a node's out-edges are walked in the order they were made (the per-node lists'
+    /// push order, which every walk over them, and so every tie between equal arrivals, follows);
+    /// a node with none has an empty slice.
+    #[test]
+    fn a_nodes_edges_keep_the_order_made() {
+        let a = Adj::new(4, vec![(2, 'a'), (0, 'b'), (2, 'c'), (3, 'd'), (2, 'e'), (0, 'f')]);
+        assert_eq!(&a[0], &['b', 'f']);
+        assert!(a[1].is_empty());
+        assert_eq!(&a[2], &['a', 'c', 'e']);
+        assert_eq!(&a[3], &['d']);
+        assert_eq!(a.iter().map(|s| s.len()).collect::<Vec<_>>(), [2, 0, 3, 1]);
+        // many edges over few nodes: the order made must survive whatever the sort does with ties
+        let made: Vec<(u32, usize)> = (0..2000).map(|i| ((i * 7 % 3) as u32, i)).collect();
+        let b = Adj::new(3, made);
+        for v in 0..3 {
+            assert!(b[v].windows(2).all(|w| w[0] < w[1]), "node {v}: edges out of the order made");
+        }
     }
 }
