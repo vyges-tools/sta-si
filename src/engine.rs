@@ -218,8 +218,14 @@ pub fn load_inputs_compact(
     job: &StaJob,
     lib_opts: crate::liberty::LibOpts,
 ) -> Result<(crate::netlist::Netlist, Lib, Option<crate::spef::CompactSpef>), StaError> {
+    // the reference's readers, one stage line each with VYGES_STAGE_TIMES=1
+    let stage = crate::debug::stage("readVerilog");
     let nl = load_netlist(&job.resolve(&job.netlist))?;
+    drop(stage);
+    let stage = crate::debug::stage("readLiberty");
     let lib = load_libs(job, lib_opts)?;
+    drop(stage);
+    let _stage = crate::debug::stage("readSpef");
     let spef = match &job.spef {
         Some(p) => Some(load_spef_compact(p, job, &nl)?),
         None => None,

@@ -397,12 +397,14 @@ fn emit_sta_si_events(job: &StaJob, rep: &TimingReport) {
 fn emit(job: &StaJob, rep: &TimingReport, cli: &Cli) -> ! {
     let tu = rep.units.time_label();
     emit_sta_si_events(job, rep); // vyges-events causal trail on stderr; report goes to stdout / -o
+    let stage = vyges_sta_si::debug::stage("reportPathEnds");
     let text = if cli.json {
         with_report_path(&engine::report_json(job, rep), cli.out.as_deref())
     } else {
         engine::render_report(job, rep)
     };
     write_out(&text, cli);
+    drop(stage);
     if cli.fail_on_violation {
         let setup_bad = rep.endpoints > 0 && rep.wns < 0.0;
         let hold_bad = rep.hold_endpoints > 0 && rep.whs < 0.0;
@@ -426,12 +428,14 @@ fn emit_mcmm(job: &StaJob, rep: &engine::McmmReport, cli: &Cli) -> ! {
     for s in &rep.scenarios {
         emit_sta_si_events(job, &s.report);
     }
+    let stage = vyges_sta_si::debug::stage("reportPathEnds");
     let text = if cli.json {
         engine::mcmm_json(job, rep)
     } else {
         engine::render_mcmm(job, rep)
     };
     write_out(&text, cli);
+    drop(stage);
     if cli.fail_on_violation {
         let setup_bad = rep.worst_setup().map(|x| x.1 < 0.0).unwrap_or(false);
         let hold_bad = rep.worst_hold().map(|x| x.1 < 0.0).unwrap_or(false);
@@ -455,12 +459,14 @@ fn emit_tcl(
 ) -> ! {
     let tu = rep.units.time_label();
     emit_sta_si_events(job, rep); // vyges-events causal trail on stderr
+    let stage = vyges_sta_si::debug::stage("reportPathEnds");
     let text = if cli.json {
         engine::report_json(job, rep)
     } else {
         vyges_sta_si::tcl::render(job, rep, reports)
     };
     write_out(&text, cli);
+    drop(stage);
     if cli.fail_on_violation {
         let setup_bad = rep.endpoints > 0 && rep.wns < 0.0;
         let hold_bad = rep.hold_endpoints > 0 && rep.whs < 0.0;
@@ -544,9 +550,13 @@ pub fn main() {
   ]
 }
 "#;
-        print!("{DESCRIBE}");
+        // the debug-group table goes in as one more top-level key; the rest is printed as written
+        let body = DESCRIBE.trim_end().strip_suffix('}').expect("DESCRIBE is one JSON object").trim_end();
+        print!("{body},\n  \"debug_groups\": {}\n}}\n", vyges_sta_si::debug::describe());
         return;
     }
+    vyges_sta_si::debug::register_aliases();
+    vyges_events::debug::warn_unknown_debug_groups(vyges_sta_si::debug::TOOL, vyges_sta_si::debug::DEBUG_GROUPS);
     let cli = parse_cli(&args);
 
     if cli.bug_report {

@@ -1597,6 +1597,11 @@ fn build_report(
     // A clock source written as a pattern (`create_clock … [get_ports *clk*]`) is every port it
     // matches, as the reference's `get_ports` resolves it. Kept literal it named no port, the
     // clock reached nothing, and every register went unchecked ("no constrained paths").
+    // the reference's `makeGraph`, `findDelays`, `findArrivals` and `findPathEnds`, one stage line
+    // each with VYGES_STAGE_TIMES=1
+    let stage_graph = crate::debug::stage("makeGraph");
+    // the debug groups, read once per run: they print, they never change a result
+    let dmp_trace = crate::debug::on(crate::debug::DMP_CEFF);
     let expanded;
     let job = if job.clocks.iter().any(|(_, s, _)| s.contains(['*', '?'])) {
         let ports: Vec<&String> = nl.inputs.iter().chain(nl.outputs.iter()).collect();
@@ -2314,7 +2319,7 @@ fn build_report(
                             }
                             None => (dt.lookup(sin, net.load[mm][ol]), st.lookup(sin, net.load[mm][ol]), None),
                         };
-                        if std::env::var_os("VYGES_STA_DMP_TRACE").is_some() {
+                        if dmp_trace {
                             eprintln!("drive|{name}|mm={mm}|ol={ol}|il={il}|in_slew={sin}|pi={pi:?}|gate={gate}|intrinsic={intrinsic}|slew={slew}");
                         }
                         pd.slew[mm][ol] = slew;
@@ -3088,9 +3093,9 @@ fn build_report(
                                             &gate,
                                             ohm_per_r,
                                         );
-                                        // `VYGES_STA_DMP_TRACE=1`: the reference's `dmp_ceff` debug
+                                        // `VYGES_DEBUG=sta-si:dmp_ceff=1`: the reference's `dmp_ceff` debug
                                         // line per driver edge, in SI, beside the result.
-                                        if std::env::var_os("VYGES_STA_DMP_TRACE").is_some() {
+                                        if dmp_trace {
                                             eprintln!(
                                                 "dmp|{}|ol={ol}|in_slew={:e}|c2={:e}|rpi={:e}|c1={:e}|rd={:e}|alg={:?}|ceff={:e}|delay={:e}|slew={:e}",
                                                 labels[v], sin * lib.units.time_s, c2 * lib.units.cap_f, rpi, c1 * lib.units.cap_f, rd * ohm_per_r,
@@ -3249,7 +3254,7 @@ fn build_report(
     // drops to a coarser model is indistinguishable in the output from one the fine model
     // handled — the delay is just wrong by an amount nothing reports. Recorded here, at
     // the point of the decision, so the answer cannot drift from the code that makes it.
-    // Dump it with VYGES_STA_RC_TRACE=1 (and VYGES_STA_RC_NET=<net> for one net).
+    // Dump it with VYGES_DEBUG=sta-si:vy_rc_model=1 (and VYGES_STA_RC_NET=<net> for one net).
     const RC_NONE: u8 = 0;
     const RC_TRANSIENT: u8 = 1;
     const RC_TREE_ELMORE: u8 = 2;
@@ -3607,6 +3612,8 @@ fn build_report(
         (d, s)
     };
 
+    drop(stage_graph);
+    let stage_delays = crate::debug::stage("findDelays");
     const MAX_SI_ITERS: usize = 20;
     const SI_TOL: f64 = 1e-9; // ns — per-arc delay change below which we stop
     let neg = vec![[f64::NEG_INFINITY; 2]; nn];
@@ -3656,7 +3663,7 @@ fn build_report(
     }
     // Say which interconnect model the design actually got. Opt-in: it is a diagnostic,
     // and the counts are only meaningful once the loop above has converged.
-    if std::env::var_os("VYGES_STA_RC_TRACE").is_some() {
+    if crate::debug::on(crate::debug::RC_MODEL) {
         let b = rc_branch.borrow();
         let mut tally = [0usize; 4];
         for &x in b.iter() {
@@ -3811,6 +3818,8 @@ fn build_report(
         }
         (d, sl)
     };
+    drop(stage_delays);
+    let stage_arrivals = crate::debug::stage("findArrivals");
     // final late propagation consistent with the converged per-arc delays, and the
     // early (min-delay) propagation used for hold and for early clock arrivals.
     // CRPR candidates are tracked only where the merged arrival can mislead: a CRPR credit that
@@ -3895,6 +3904,8 @@ fn build_report(
         )
     };
 
+    drop(stage_arrivals);
+    let _stage_path_ends = crate::debug::stage("findPathEnds");
     // ---- clock paths + CRPR ---------------------------------------------
     // Proper OCV uses opposite clock corners on launch vs capture (setup: late
     // launch / early capture; hold: early launch / late capture). The launch and

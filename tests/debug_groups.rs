@@ -1,0 +1,80 @@
+// SPDX-License-Identifier: Apache-2.0
+//! Debug groups and stage lines print to stderr and never change the report.
+//!
+//! **The rule** (the engines' debug-flag standard): `VYGES_DEBUG=sta-si:<group>=<level>` turns a
+//! group on, as the reference's `set_debug_level sta <group> <level>` does; an old switch keeps
+//! working as an alias with a deprecation note; an unknown group is a warning naming the valid
+//! ones; `VYGES_STAGE_TIMES=1` adds one line per stage. None of it may change a result: the
+//! report is the same byte for byte with every group on.
+//!
+//! **Witness.** `examples/top` (a SPEF-annotated input-to-flop path): each group's lines appear
+//! when it is on and none when it is off.
+use std::process::{Command, Output};
+
+const JOB: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/top/top.sta");
+const VARS: &[&str] = &["VYGES_DEBUG", "VYGES_STAGE_TIMES", "VYGES_STA_DMP_TRACE", "VYGES_STA_RC_TRACE", "VYGES_STA_RC_NET"];
+
+fn run(env: &[(&str, &str)]) -> Output {
+    let mut c = Command::new(env!("CARGO_BIN_EXE_vyges-sta-si"));
+    c.args(["run", JOB]);
+    for v in VARS {
+        c.env_remove(v);
+    }
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    let out = c.output().expect("the engine binary runs");
+    assert!(out.status.success(), "exit {:?}\n{}", out.status, String::from_utf8_lossy(&out.stderr));
+    out
+}
+
+fn err(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stderr).to_string()
+}
+
+#[test]
+fn groups_print_when_on_are_silent_when_off_and_never_change_the_report() {
+    let off = run(&[]);
+    let e = err(&off);
+    for marker in ["dmp|", "drive|", "rc-trace:", "VYGES-STAGE", "stage=", "deprecated"] {
+        assert!(!e.contains(marker), "off, yet `{marker}` printed:\n{e}");
+    }
+
+    let on = run(&[("VYGES_DEBUG", "sta-si:dmp_ceff=1,sta-si:vy_rc_model=1"), ("VYGES_STAGE_TIMES", "1")]);
+    let e = err(&on);
+    assert_eq!(on.stdout, off.stdout, "a debug group changed the report");
+    assert!(e.contains("dmp|"), "dmp_ceff on, no `dmp|` line:\n{e}");
+    assert!(e.contains("rc-trace:"), "vy_rc_model on, no `rc-trace:` line:\n{e}");
+    for s in ["readVerilog", "readLiberty", "readSpef", "makeGraph", "findDelays", "findArrivals", "findPathEnds", "reportPathEnds"] {
+        assert!(e.contains(&format!("stage={s} ")), "no stage line for {s}:\n{e}");
+    }
+    assert!(!e.contains("deprecated"), "{e}");
+}
+
+#[test]
+fn the_old_switches_are_aliases_with_a_note() {
+    let off = run(&[]);
+    let on = run(&[("VYGES_STA_DMP_TRACE", "1"), ("VYGES_STA_RC_TRACE", "1")]);
+    let e = err(&on);
+    assert_eq!(on.stdout, off.stdout, "an old switch changed the report");
+    assert!(e.contains("dmp|") && e.contains("rc-trace:"), "{e}");
+    assert!(e.contains("VYGES_STA_DMP_TRACE is deprecated; use VYGES_DEBUG=sta-si:dmp_ceff=1"), "{e}");
+    assert!(e.contains("VYGES_STA_RC_TRACE is deprecated; use VYGES_DEBUG=sta-si:vy_rc_model=1"), "{e}");
+}
+
+#[test]
+fn an_unknown_group_is_a_warning_naming_the_valid_ones() {
+    let on = run(&[("VYGES_DEBUG", "sta-si:no_such_group=1")]);
+    let e = err(&on);
+    assert!(e.contains("unknown debug group sta-si:no_such_group; valid groups for sta-si: dmp_ceff, vy_rc_model"), "{e}");
+}
+
+#[test]
+fn describe_lists_the_groups() {
+    let out = Command::new(env!("CARGO_BIN_EXE_vyges-sta-si")).arg("--describe").output().expect("the engine binary runs");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("\n  \"debug_groups\": {\"env\":\"VYGES_DEBUG\""), "{text}");
+    assert!(text.contains("\"group\":\"dmp_ceff\"") && text.contains("\"group\":\"vy_rc_model\""), "{text}");
+    assert!(text.contains("\"reference\":\"sta dmp_ceff\""), "{text}");
+    assert!(text.ends_with("}\n}\n"), "one object, closed once:\n{text}");
+}
