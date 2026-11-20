@@ -1548,6 +1548,52 @@ fn elmore_at(by_node: &[(Name, f64)], node: Name) -> Option<f64> {
     by_node.binary_search_by_key(&node, |e| e.0).ok().map(|j| by_node[j].1)
 }
 
+/// Per net, each receiver's capacitance at its SPEF node, `[analysis][edge]` (fF): what
+/// `ReduceToPi::pinCapacitance` adds to `downstreamCap`.
+///
+/// ⛔ ONE flat table, not four hash maps per net: those held 1.09 GiB on a 1.7M-net design. A
+/// net's entries are a slice sorted by node; a node's contributions are summed in the order they
+/// were given (`add` order), so each sum is the one the maps' `entry().or_default() +=` made.
+#[derive(Default)]
+struct NetPinCaps {
+    // net i's entries are `caps[start[i]..start[i + 1]]`
+    start: Vec<usize>,
+    caps: Vec<(Name, [[f64; 2]; 2])>,
+}
+
+impl NetPinCaps {
+    /// From `(net, node, cap)` contributions, in the order they are summed.
+    fn new(nets: usize, mut adds: Vec<(u32, Name, [[f64; 2]; 2])>) -> NetPinCaps {
+        adds.sort_by_key(|a| (a.0, a.1)); // stable: a node's contributions stay in order
+        let mut start = Vec::with_capacity(nets + 1);
+        let mut caps: Vec<(Name, [[f64; 2]; 2])> = Vec::with_capacity(adds.len());
+        let mut next = adds.iter().peekable();
+        for net in 0..nets {
+            start.push(caps.len());
+            while let Some(&(_, node, c)) = next.next_if(|a| a.0 as usize == net) {
+                if caps.len() == start[net] || caps.last().map(|e| e.0) != Some(node) {
+                    caps.push((node, [[0.0; 2]; 2]));
+                }
+                let sum = &mut caps.last_mut().expect("an entry was just pushed").1;
+                for mm in 0..2 {
+                    for l in 0..2 {
+                        sum[mm][l] += c[mm][l];
+                    }
+                }
+            }
+        }
+        start.push(caps.len());
+        caps.shrink_to_fit();
+        NetPinCaps { start, caps }
+    }
+
+    /// Net `net`'s receiver capacitance at `node`, if a receiver sits there.
+    fn get(&self, net: usize, node: Name) -> Option<&[[f64; 2]; 2]> {
+        let caps = &self.caps[self.start[net]..self.start[net + 1]];
+        caps.binary_search_by_key(&node, |e| e.0).ok().map(|j| &caps[j].1)
+    }
+}
+
 /// `DelayCalcBase::thresholdAdjust`: a wire delay and load slew found at the DRIVER library's
 /// thresholds, re-expressed at the LOAD library's. The reference calls it only when the two
 /// libraries differ; with equal thresholds it is the identity. Its thresholds are floats, and so
@@ -3339,9 +3385,8 @@ fn build_report(
     // ⚠️ Liberty caps are pF and SPEF node caps are fF, so convert.
     // Per edge (lane 0 rise, 1 fall): each edge's Elmore walks that edge's receiver caps.
     // `[analysis][edge]` like the driver load.
-    let net_pin_cap: Vec<[[HashMap<Name, f64>; 2]; 2]> = {
-        let e = || [HashMap::new(), HashMap::new()];
-        let mut v: Vec<[[HashMap<Name, f64>; 2]; 2]> = (0..nn).map(|_| [e(), e()]).collect();
+    let net_pin_cap: NetPinCaps = {
+        let mut adds: Vec<(u32, Name, [[f64; 2]; 2])> = Vec::new();
         if spef.is_some() {
             for a in arcs.iter() {
                 if net_rc[a.net_idx].is_none() {
@@ -3350,26 +3395,18 @@ fn build_report(
                 if a.sink_pin {
                     if let Some(node) = node_of_pin[a.sink] {
                         let c = pin_cap_node.get(&a.sink).copied().unwrap_or([[0.0; 2]; 2]);
-                        for mm in 0..2 {
-                            for l in 0..2 {
-                                *v[a.net_idx][mm][l].entry(node).or_default() += c[mm][l] * ff_per_cap;
-                            }
-                        }
+                        adds.push((a.net_idx as u32, node, c.map(|lanes| lanes.map(|x| x * ff_per_cap))));
                     }
                 } else if is_out_port[a.sink] {
                     // A top-level output port: its external load at its own node, as the Pi above
                     // takes it (`ReduceToPi::pinCapacitance` → `Sdc::portExtCap`) — the reduction
                     // that gives the Pi also gives each load's Elmore. Without it the wire delay to
                     // every other load of a net that drives a port missed the port's load.
-                    for lanes in v[a.net_idx].iter_mut() {
-                        for caps in lanes.iter_mut() {
-                            *caps.entry(node_of_port[a.sink]).or_default() += job.output_load * ff_per_cap;
-                        }
-                    }
+                    adds.push((a.net_idx as u32, node_of_port[a.sink], [[job.output_load * ff_per_cap; 2]; 2]));
                 }
             }
         }
-        v
+        NetPinCaps::new(nn, adds)
     };
     let rc_branch = std::cell::RefCell::new(vec![RC_NONE; n_arcs]);
     // Each load's Elmore, kept across passes while its net's reduction inputs stand, as the
@@ -3527,7 +3564,7 @@ fn build_report(
                     if let (Some(dt), Some(st)) = (dnode, snode) {
                         let kept = tau_kept.borrow()[k][mm];
                         let taus = kept.unwrap_or_else(|| {
-                            let t = [0, 1].map(|l| elmore_i[l].get_or_init(|| rc.elmore(dt, xc_i, |k| net_pin_cap[i][mm][l].get(&k).copied()).map(elmore_by_node)).as_ref().and_then(|dl| elmore_at(dl, st)));
+                            let t = [0, 1].map(|l| elmore_i[l].get_or_init(|| rc.elmore(dt, xc_i, |k| net_pin_cap.get(i, k).map(|c| c[mm][l])).map(elmore_by_node)).as_ref().and_then(|dl| elmore_at(dl, st)));
                             tau_kept.borrow_mut()[k][mm] = Some(t);
                             t
                         });
@@ -6083,5 +6120,28 @@ mod node_keys_rule {
         assert_eq!(keys.pin("u1", "B"), Some(u1b));
         assert_eq!(keys.pin("u2", "A"), None, "u2 made no node");
         assert_eq!(keys.pin("u1", "C"), None);
+    }
+}
+
+#[cfg(test)]
+mod net_pin_caps_rule {
+    use super::NetPinCaps;
+
+    /// The rule (the per-net maps' `entry(node).or_default() += c` it replaced): each receiver
+    /// node's capacitance is the sum of its contributions in the order given, per analysis and
+    /// edge; a node with no contribution, or a net with none, finds nothing.
+    #[test]
+    fn a_node_sums_its_contributions_in_order_per_net() {
+        let c = |x: f64| [[x, x + 1.0], [x + 2.0, x + 3.0]];
+        // 0.1 + 0.2 + 0.3 in that order differs in the last bit from 0.3 + 0.2 + 0.1
+        let ordered = ((0.0 + 0.1) + 0.2) + 0.3;
+        let reversed = ((0.0 + 0.3) + 0.2) + 0.1;
+        assert_ne!(ordered, reversed, "the order is observable");
+        let t = NetPinCaps::new(3, vec![(2, 7, c(0.1)), (0, 5, c(1.0)), (2, 4, c(9.0)), (2, 7, c(0.2)), (2, 7, c(0.3))]);
+        assert_eq!(t.get(2, 7).map(|v| v[0][0]), Some(ordered));
+        assert_eq!(t.get(2, 4), Some(&c(9.0)));
+        assert_eq!(t.get(0, 5), Some(&c(1.0)));
+        assert_eq!(t.get(0, 7), None, "a node of another net");
+        assert_eq!(t.get(1, 5), None, "a net with no receivers");
     }
 }
