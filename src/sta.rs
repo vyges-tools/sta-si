@@ -828,6 +828,48 @@ struct Edge<'l> {
 
 const ALL_LANES: [[bool; 2]; 2] = [[true; 2]; 2];
 
+/// A value for a few of the graph's nodes, read as if every node had one: `by[v]` is node v's
+/// value, or `none` for a node never given one. The reference keeps such data per driver pin
+/// (a driver's reduced parasitics), not per vertex.
+struct ByNode<T> {
+    // node v's place in `vals`, `NO_VALUE` if it has none
+    slot: Vec<u32>,
+    vals: Vec<T>,
+    none: T,
+}
+
+const NO_VALUE: u32 = u32::MAX;
+
+impl<T: Clone> ByNode<T> {
+    fn new(nodes: usize, none: T) -> ByNode<T> {
+        ByNode { slot: vec![NO_VALUE; nodes], vals: Vec::new(), none }
+    }
+
+    /// Drop the values' growth slack once they are all given.
+    fn shrink(&mut self) {
+        self.vals.shrink_to_fit();
+    }
+
+    /// Node v's value to change, starting from `none` the first time.
+    fn entry(&mut self, v: usize) -> &mut T {
+        if self.slot[v] == NO_VALUE {
+            self.slot[v] = u32::try_from(self.vals.len()).expect("fewer than 2^32 - 1 valued nodes");
+            self.vals.push(self.none.clone());
+        }
+        &mut self.vals[self.slot[v] as usize]
+    }
+}
+
+impl<T> std::ops::Index<usize> for ByNode<T> {
+    type Output = T;
+    fn index(&self, v: usize) -> &T {
+        match self.slot[v] {
+            NO_VALUE => &self.none,
+            j => &self.vals[j as usize],
+        }
+    }
+}
+
 /// Each node's out-edges in one flat list, a node's own a contiguous slice in the order they were
 /// made (compressed sparse rows). `adj[v]` is node v's slice; `adj.iter()` the slices in node order.
 ///
@@ -2372,7 +2414,8 @@ fn build_report(
     // Per output edge: the receiver caps it sums are that edge's.
     // `[analysis][edge]`, each a (C2 near pF, Rpi, C1 far pF) Pi.
     type Pi = Option<(f64, f64, f64)>;
-    let mut shield: Vec<[[Pi; 2]; 2]> = vec![[[None; 2]; 2]; n];
+    // ⛔ Kept per DRIVER (see `ByNode`): a slot for every pin held 0.68 GiB on a 5.7M-pin design.
+    let mut shield: ByNode<[[Pi; 2]; 2]> = ByNode::new(n, [[None; 2]; 2]);
     if let Some(s) = spef {
         for (name, net) in &nets {
             if let Some(d) = net.driver {
@@ -2400,7 +2443,7 @@ fn build_report(
                             }
                         }
                         if let Some((c2_ff, rpi, c1_ff)) = rc.pi_reduce(dnode, cc, |k| pcap.get(&k).copied()) {
-                            shield[d][mm][lane] = Some((c2_ff / ff_per_cap, rpi, c1_ff / ff_per_cap));
+                            shield.entry(d)[mm][lane] = Some((c2_ff / ff_per_cap, rpi, c1_ff / ff_per_cap));
                         }
                         }
                     }
@@ -2408,6 +2451,7 @@ fn build_report(
             }
         }
     }
+    shield.shrink();
 
     // ---- input ports with a driving cell (`GraphDelayCalc::findInputDriverDelay`) -------
     // Per analysis and port edge, each arc of the cell from its `from` pin into `pin` ending in
@@ -6255,5 +6299,26 @@ mod adj_rule {
         for v in 0..3 {
             assert!(b[v].windows(2).all(|w| w[0] < w[1]), "node {v}: edges out of the order made");
         }
+    }
+}
+
+#[cfg(test)]
+mod by_node_rule {
+    use super::ByNode;
+
+    /// The rule: a node never given a value reads as the default (a pin that drives no reduced
+    /// net has no Pi on any edge), and a node's value is the one its writes left, whatever the
+    /// order nodes were first written in.
+    #[test]
+    fn an_unwritten_node_reads_the_default_and_writes_stick() {
+        let mut b: ByNode<[Option<u8>; 2]> = ByNode::new(5, [None; 2]);
+        b.entry(3)[1] = Some(7);
+        b.entry(1)[0] = Some(1);
+        b.entry(3)[0] = Some(9);
+        b.shrink();
+        assert_eq!(b[3], [Some(9), Some(7)]);
+        assert_eq!(b[1], [Some(1), None]);
+        assert_eq!(b[0], [None, None]);
+        assert_eq!(b[4], [None, None]);
     }
 }
