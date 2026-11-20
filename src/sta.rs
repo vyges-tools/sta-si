@@ -1039,36 +1039,38 @@ pub(crate) struct Timing {
 
 impl Timing {
     /// Assemble the query snapshot from the propagated arrays — shared by the full builder
-    /// and the incremental fast path so both produce an identical snapshot.
+    /// and the incremental fast path so both produce an identical snapshot. It takes the arrays
+    /// themselves: ⛔ copying them here, from arrays the build still held, was about 0.3 GiB at
+    /// the very end of a 5.7M-pin build, where it set the run's peak.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         labels: Labels,
-        is_endpoint: &[bool],
-        excluded_setup: &[bool],
-        arrival: &[f64],
-        clk_arrival: &[f64],
-        slew: &[f64],
-        arr_min: &[f64],
-        slew_min: &[f64],
-        node_load: &[f64],
-        endpoint_req: &[f64],
-        slew_rf: &[[f64; 2]],
-        load_rf: &[[f64; 2]],
+        is_endpoint: Vec<bool>,
+        excluded_setup: Vec<bool>,
+        arrival: Vec<f64>,
+        clk_arrival: Vec<f64>,
+        slew: Vec<f64>,
+        arr_min: Vec<f64>,
+        slew_min: Vec<f64>,
+        node_load: Vec<f64>,
+        endpoint_req: Vec<f64>,
+        slew_rf: Vec<[f64; 2]>,
+        load_rf: Vec<[f64; 2]>,
     ) -> Timing {
         Timing {
             label2idx: LabelIndex::new(&labels),
             labels,
-            is_endpoint: is_endpoint.to_vec(),
-            excluded_setup: excluded_setup.to_vec(),
-            arrival: arrival.to_vec(),
-            clk_arrival: clk_arrival.to_vec(),
-            slew: slew.to_vec(),
-            arr_min: arr_min.to_vec(),
-            slew_min: slew_min.to_vec(),
-            node_load: node_load.to_vec(),
-            endpoint_req: endpoint_req.to_vec(),
-            slew_rf: slew_rf.to_vec(),
-            load_rf: load_rf.to_vec(),
+            is_endpoint,
+            excluded_setup,
+            arrival,
+            clk_arrival,
+            slew,
+            arr_min,
+            slew_min,
+            node_load,
+            endpoint_req,
+            slew_rf,
+            load_rf,
             check_arr: Vec::new(),
         }
     }
@@ -6052,25 +6054,30 @@ fn build_report(
         check_paths,
         latch_borrow,
     };
-    // Retain a per-pin snapshot for the Timer's query API (Phase 1). The arrays are cloned: closures
-    // above still hold immutable borrows of them through the return. ⛔ The labels are MOVED, and the
-    // construction keys dropped first: a copy of both was 1.7 GiB on a 1.6M-instance design.
+    // Retain a per-pin snapshot for the Timer's query API (Phase 1). ⛔ Every array is MOVED in,
+    // not copied, and the construction keys dropped first: a copy of the labels and keys was 1.7
+    // GiB on a 1.6M-instance design, and the per-pin arrays' copies about 0.3 GiB at the end of a
+    // 5.7M-pin build, where they set its peak. The incremental graph below copies from the
+    // snapshot what it keeps as well; `late_slew` it takes, so the snapshot copies that one.
     // the query API reports one load per driver: the larger edge's
     let node_load_max: Vec<f64> = node_load.iter().map(|l| l[1][0].max(l[1][1])).collect();
+    let load_rf: Vec<[f64; 2]> = node_load.iter().map(|l| l[1]).collect();
     drop(keys);
+    let mut late_slew = late_slew;
+    let slew_rf = if simple_ctx { late_slew.clone() } else { std::mem::take(&mut late_slew) };
     let mut timing = Timing::new(
         std::mem::take(&mut labels),
-        &is_endpoint,
-        &excluded_setup,
-        &arrival,
-        &clk_arr,
-        &slew,
-        &arr_min,
-        &slew_min,
-        &node_load_max,
-        &endpoint_req,
-        &late_slew,
-        &node_load.iter().map(|l| l[1]).collect::<Vec<[f64; 2]>>(),
+        is_endpoint,
+        excluded_setup,
+        arrival,
+        clk_arr,
+        slew,
+        arr_min,
+        slew_min,
+        node_load_max,
+        endpoint_req,
+        slew_rf,
+        load_rf,
     );
     timing.check_arr = check_arr;
 
@@ -6110,8 +6117,8 @@ fn build_report(
             in_edges,
             topo_pos,
             is_ck: is_ck.clone(),
-            is_endpoint: is_endpoint.clone(),
-            excluded_setup: excluded_setup.clone(),
+            is_endpoint: timing.is_endpoint.clone(),
+            excluded_setup: timing.excluded_setup.clone(),
             net_driver,
             setup_recs: inc_setup,
             hold_recs: inc_hold,
@@ -6131,14 +6138,14 @@ fn build_report(
                 slew: early_slew,
                 from: early_from,
             },
-            arrival: arrival.clone(),
-            slew: slew.clone(),
+            arrival: timing.arrival.clone(),
+            slew: timing.slew.clone(),
             from: from.clone(),
-            arr_min: arr_min.clone(),
-            slew_min: slew_min.clone(),
+            arr_min: timing.arr_min.clone(),
+            slew_min: timing.slew_min.clone(),
             from_min: from_min.clone(),
-            endpoint_req: endpoint_req.clone(),
-            clk_arrival: clk_arr.clone(),
+            endpoint_req: timing.endpoint_req.clone(),
+            clk_arrival: timing.clk_arrival.clone(),
             overrides: HashMap::new(),
         };
         Some(IncGraph { topo, state })

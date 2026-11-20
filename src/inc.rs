@@ -657,17 +657,17 @@ impl IncGraph {
         };
         let timing = Timing::new(
             self.topo.labels.clone(),
-            &self.topo.is_endpoint,
-            &self.topo.excluded_setup,
-            &arrival,
-            &self.state.clk_arrival,
-            &slew,
-            &arr_min,
-            &slew_min,
-            &self.state.node_load.iter().map(|l| l[1][0].max(l[1][1])).collect::<Vec<f64>>(),
-            &endpoint_req,
-            &late.slew,
-            &self.state.node_load.iter().map(|l| l[1]).collect::<Vec<[f64; 2]>>(),
+            self.topo.is_endpoint.clone(),
+            self.topo.excluded_setup.clone(),
+            arrival.clone(),
+            self.state.clk_arrival.clone(),
+            slew.clone(),
+            arr_min.clone(),
+            slew_min.clone(),
+            self.state.node_load.iter().map(|l| l[1][0].max(l[1][1])).collect::<Vec<f64>>(),
+            endpoint_req.clone(),
+            late.slew.clone(),
+            self.state.node_load.iter().map(|l| l[1]).collect::<Vec<[f64; 2]>>(),
         );
 
         // commit the recomputed state.
