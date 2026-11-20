@@ -1,0 +1,11 @@
+# The same clock propagated and derated: its arrival and slew at the clock pins come through
+# the buffers, and n2 -> r3 (the worst setup path) takes its CRPR credit on the fall edge n2
+# is launched by, the clock buffers' rise and fall spreads being different.
+# OpenSTA (standalone 4af3c130), as above: setup n2 -> r3 1.1564 (with its CRPR credit), hold
+# n2 -> y 0.1386.
+design:      ideal_clk
+netlist:     ideal_clk.v
+lib:         ideal_clk.lib
+sdc:         ideal_clk_prop.sdc
+input_slew:  0.02
+output_load: 0.005

@@ -1,0 +1,11 @@
+# An ideal clock (no set_propagated_clock): its set_clock_transition is the slew at every
+# register clock pin it reaches, through the clock buffers. The report moves if that slew stops
+# at the clock port.
+# OpenSTA (standalone 4af3c130) on this design, with set_input_transition 0.02 and set_load
+# 0.005: setup n2 -> y 0.5656, hold n2 -> y 0.0199.
+design:      ideal_clk
+netlist:     ideal_clk.v
+lib:         ideal_clk.lib
+sdc:         ideal_clk.sdc
+input_slew:  0.02
+output_load: 0.005
