@@ -443,8 +443,16 @@ fn crpr_cands(
         // pruned when the best moved by its own largest credit is still better
         set.retain(|c| c.1 == b.1 || !better(thr, c.0));
     };
+    // ⛔ A pin's set is read only when the pin is a relaxation's source, so after its LAST such
+    // relaxation it is dead unless kept: it is freed there. Holding every pin's set to the end held
+    // 1.7 GiB on a 1.6M-instance design (the reference keeps its pruned arrivals per vertex, but
+    // ours are only this pass's working sets).
+    let mut last_src = vec![usize::MAX; n];
+    for (i, r) in recs.iter().enumerate() {
+        last_src[r.u as usize] = i;
+    }
     let mut src: Vec<Cand> = Vec::new();
-    for r in recs {
+    for (i, r) in recs.iter().enumerate() {
         let (u, v, il, ol) = (r.u as usize, r.v as usize, r.il as usize, r.ol as usize);
         if skip_from(u) {
             continue;
@@ -484,6 +492,9 @@ fn crpr_cands(
                     tp[v][ol] = Some((u, il));
                 }
             }
+        }
+        if last_src[u] == i && !keep[u] {
+            sets[u] = [Vec::new(), Vec::new()];
         }
     }
     if let (Some(t), Some((ta, _))) = (trace, tr.as_mut()) {
@@ -6143,5 +6154,39 @@ mod net_pin_caps_rule {
         assert_eq!(t.get(0, 5), Some(&c(1.0)));
         assert_eq!(t.get(0, 7), None, "a node of another net");
         assert_eq!(t.get(1, 5), None, "a net with no receivers");
+    }
+}
+
+#[cfg(test)]
+mod crpr_cands_free_rule {
+    use super::{crpr_cands, ArcRec};
+
+    fn rec(u: u32, v: u32, d: f64) -> ArcRec {
+        ArcRec { u, v, il: 0, ol: 0, d }
+    }
+
+    fn launches(out: &std::collections::HashMap<usize, [Vec<(f64, u32)>; 2]>, v: usize) -> Vec<u32> {
+        let mut k: Vec<u32> = out.get(&v).map(|s| s[0].iter().map(|c| c.1).collect()).unwrap_or_default();
+        k.sort();
+        k
+    }
+
+    /// The rule: a pin's candidate set is read whenever the pin is a relaxation's source, so it is
+    /// freed only after its LAST such relaxation, and never when it is kept for the caller. Pin 2
+    /// feeds 3 and then 4 (both sources read the full set of launches 0 and 1); pin 2 is also
+    /// kept, and a launch (5) reaches it only after its last use as a source.
+    #[test]
+    fn a_set_is_freed_after_its_last_read_and_never_when_kept() {
+        let recs = vec![rec(0, 2, 1.0), rec(1, 2, 1.0), rec(2, 3, 1.0), rec(2, 4, 1.0), rec(5, 2, 1.0)];
+        let arr = vec![[1.0; 2], [1.0; 2], [2.0; 2], [3.0; 2], [3.0; 2], [1.0; 2]];
+        let is_ck = [true, true, false, false, false, true];
+        let mut keep = vec![false; 6];
+        keep[2] = true;
+        keep[3] = true;
+        keep[4] = true;
+        let (out, _) = crpr_cands(&recs, &arr, &is_ck, &|_| false, &|_| 10.0, true, &keep, None);
+        assert_eq!(launches(&out, 3), [0, 1]);
+        assert_eq!(launches(&out, 4), [0, 1], "the second read of pin 2 sees its whole set");
+        assert_eq!(launches(&out, 2), [0, 1, 5], "a kept set is not freed");
     }
 }
