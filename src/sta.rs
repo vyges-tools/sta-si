@@ -39,6 +39,28 @@ use crate::netlist::Netlist;
 use crate::spef::compact::{Name, NO_NAME};
 use crate::spef::{CompactNet, CompactSpef, Spef};
 
+/// Per-arc (delay, sink slew) per lane: the wires one analysis's pass fills.
+type ArcWires = (Vec<[f64; 2]>, Vec<[f64; 2]>);
+
+/// What a walk hands back: the picked arrival, slew and predecessor per vertex, the order, and the
+/// per-lane arrival, slew and predecessors.
+type WalkOut = (Vec<f64>, Vec<f64>, Vec<Option<usize>>, Vec<usize>, Vec<[f64; 2]>, Vec<[f64; 2]>, Vec<[Pred; 2]>);
+
+thread_local! {
+    static FORCE_FIXED_POINT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Runs `f` with the Jacobi fixed point forced where the single levelized pass would run
+/// (`miller ≤ 1`) — on this thread only. The pass is checked against the fixed point it replaces
+/// (tests, correlation probes); not a user setting.
+#[doc(hidden)]
+pub fn with_fixed_point<R>(f: impl FnOnce() -> R) -> R {
+    FORCE_FIXED_POINT.with(|c| c.set(true));
+    let r = f();
+    FORCE_FIXED_POINT.with(|c| c.set(false));
+    r
+}
+
 #[derive(Debug)]
 pub enum StaError {
     Parse(String),
@@ -3073,6 +3095,12 @@ fn build_report(
     // (each clock edge is its own tag); `fixed_slew` then looks every delay up at the slews the
     // unfiltered pass merged over ALL launches, as the reference's slews are, so a filtered pass
     // moves arrivals only.
+    // 🔑 With no Miller increment (`miller ≤ 1`), a net's wires need only its own driver's slew,
+    // final when the driver pops: ONE levelized pass per analysis computes each net's wires there
+    // (`GraphDelayCalc::findDriverArcDelays`: `gateDelay`, then that driver's `loadDelaySlew`), and
+    // no fixed point is run. `pass_wires`: the per-arc (delay, sink slew) that pass fills as it goes.
+    let single_pass = job.miller <= 1.0 && !FORCE_FIXED_POINT.with(std::cell::Cell::get);
+    let pass_wires: std::cell::RefCell<Option<ArcWires>> = std::cell::RefCell::new(None);
     let relax_walk = |nd: &[[f64; 2]],
                  ns: &[[f64; 2]],
                  late: bool,
@@ -3080,16 +3108,9 @@ fn build_report(
                  block_seq: bool,
                  launch: Option<usize>,
                  fixed_slew: Option<&[[f64; 2]]>,
-                 latch_seed: Option<&HashMap<usize, LatchSeed>>|
-     -> (
-        Vec<f64>,
-        Vec<f64>,
-        Vec<Option<usize>>,
-        Vec<usize>,
-        Vec<[f64; 2]>,
-        Vec<[f64; 2]>,
-        Vec<[Pred; 2]>,
-    ) {
+                 latch_seed: Option<&HashMap<usize, LatchSeed>>,
+                 at_pop: Option<&dyn Fn(usize, [f64; 2])>|
+     -> WalkOut {
         let init = if late {
             f64::NEG_INFINITY
         } else {
@@ -3097,7 +3118,9 @@ fn build_report(
         };
         // this pass re-evaluates every arc of its analysis; the clock-launched pass re-times the
         // same arcs and leaves the main pass's waveforms as they are
-        let records = !block_seq && launch.is_none() && fixed_slew.is_none();
+        // In the single pass only that pass records: its waveforms are consumed at each driver's
+        // pop and nothing after it reads them (`wires_of_net` is their only reader).
+        let records = !block_seq && launch.is_none() && fixed_slew.is_none() && (at_pop.is_some() || !single_pass);
         if records {
             drvr_wave.borrow_mut()[late as usize].iter_mut().for_each(|w| w.iter_mut().for_each(Vec::clear));
         }
@@ -3174,6 +3197,10 @@ fn build_report(
                     }
                 }
             }
+            // the single pass: this vertex's slew is final, so the wires of the net it drives
+            if let Some(h) = at_pop {
+                h(u, slew[u]);
+            }
             for e in &out_edges[u] {
                 // Outside the order (see `Edge::latch_dq`), and nothing crosses it here: a latch
                 // output's arrivals come through its enable.
@@ -3200,6 +3227,11 @@ fn build_report(
                             // an ideal clock network: no wire delay, the clock transition
                             let (d, sink_slew) = match ideal_slew[v] {
                                 Some(isl) => (0.0, isl[l].max(f64::MIN_POSITIVE)),
+                                None if at_pop.is_some() => {
+                                    let w = pass_wires.borrow();
+                                    let (d, s) = w.as_ref().expect("the single pass's wires");
+                                    (d[*i][l], s[*i][l])
+                                }
                                 None => (nd[*i][l], ns[*i][l]),
                             };
                             // No RC model gave this load a slew (0 = the driver's): the reference
@@ -3508,7 +3540,7 @@ fn build_report(
     let relax_time = std::cell::Cell::new((0usize, 0.0f64));
     let relax = |nd: &[[f64; 2]], ns: &[[f64; 2]], late: bool, seed_l: &[[f64; 2]], block_seq: bool, launch: Option<usize>, fixed_slew: Option<&[[f64; 2]]>, latch_seed: Option<&HashMap<usize, LatchSeed>>| {
         let t = std::time::Instant::now();
-        let r = relax_walk(nd, ns, late, seed_l, block_seq, launch, fixed_slew, latch_seed);
+        let r = relax_walk(nd, ns, late, seed_l, block_seq, launch, fixed_slew, latch_seed, None);
         let (c, secs) = relax_time.get();
         relax_time.set((c + 1, secs + t.elapsed().as_secs_f64()));
         r
@@ -3869,6 +3901,63 @@ fn build_report(
         (d, s)
     };
 
+    // The single pass (`single_pass`): the nets each vertex drives, and the pass itself — every
+    // net no vertex drives first (its wires at slew 0, as `compute` gives them), then one walk
+    // whose pops compute the wires of the nets their vertex drives, at that vertex's final slew,
+    // with the driving-cell port share added as `compute` adds it; that driver's waveforms are then
+    // dropped (rule 13: nothing reads them after its net). Returns the walk's order and the wires.
+    let neg_windows = vec![[f64::NEG_INFINITY; 2]; nn];
+    let zero_slews = vec![[0.0f64; 2]; nn];
+    let drv_nets: Vec<Vec<usize>> = {
+        let mut m = vec![Vec::new(); n];
+        for (i, d) in net_drv.iter().enumerate() {
+            if let Some(d) = d {
+                m[*d].push(i);
+            }
+        }
+        m
+    };
+    let wires_of = |i: usize, mm: usize, slew_i: [f64; 2], d: &mut [[f64; 2]], s: &mut [[f64; 2]]| {
+        // miller ≤ 1: the window term is 0.0 for every window, so no window is needed
+        wires_of_net(i, mm, net_xc(i, &neg_windows, &zero_slews), slew_i, d, s);
+        if let Some(extra) = port_extra(i, mm) {
+            for &k in &arcs_of_net[i] {
+                for (x, e) in d[k].iter_mut().zip(extra) {
+                    *x += e;
+                }
+            }
+        }
+    };
+    let one_pass = |late: bool, seed: &[[f64; 2]]| -> (Vec<usize>, Vec<[f64; 2]>, Vec<[f64; 2]>) {
+        let mm = late as usize;
+        let (mut d, mut s) = (vec![[0.0; 2]; n_arcs], vec![[0.0; 2]; n_arcs]);
+        for i in (0..nn).filter(|&i| net_drv[i].is_none()) {
+            wires_of(i, mm, [0.0; 2], &mut d, &mut s);
+        }
+        *pass_wires.borrow_mut() = Some((d, s));
+        let at_pop = |u: usize, slew_u: [f64; 2]| {
+            if drv_nets[u].is_empty() {
+                return;
+            }
+            {
+                let mut w = pass_wires.borrow_mut();
+                let (d, s) = w.as_mut().expect("the single pass's wires");
+                for &i in &drv_nets[u] {
+                    wires_of(i, mm, slew_u, d, s);
+                }
+            }
+            for wl in drvr_wave.borrow_mut()[mm][u].iter_mut() {
+                *wl = Vec::new();
+            }
+        };
+        let t = std::time::Instant::now();
+        let (_a, _s, _f, ord, _arr, _slw, _fl) = relax_walk(&[], &[], late, seed, false, None, None, None, Some(&at_pop));
+        let (c, secs) = relax_time.get();
+        relax_time.set((c + 1, secs + t.elapsed().as_secs_f64()));
+        let (d, s) = pass_wires.borrow_mut().take().expect("the single pass's wires");
+        (ord, d, s)
+    };
+
     drop(stage_graph);
     let stage_delays = crate::debug::stage("findDelays");
     const MAX_SI_ITERS: usize = 20;
@@ -3878,44 +3967,57 @@ fn build_report(
     // A STARTING POINT for the iteration below, nothing more: no windows and no slews yet
     // exist, so this is a degenerate operating point and its delays are systematically
     // small. ⚠️ It is not a usable answer — see `early_d`/`early_s` after the loop.
-    let (nom_d, nom_s) = compute(&neg, &zero, 1);
-    let mut arc_d = nom_d.clone();
-    let mut arc_s = nom_s.clone();
-    // The converged per-net driver slew, kept past the loop: the EARLY interconnect has to
-    // be evaluated at the same operating point as the late one.
-    let mut conv_net_slew = zero.clone();
-    let mut cycle_checked = false;
-    for _ in 0..MAX_SI_ITERS {
-        let (_a, _s, _f, ord, arr, slw, _fl) = relax(&arc_d, &arc_s, true, &seed_main, false, None, None, None);
-        if !cycle_checked {
-            if ord.len() != n {
-                // name one cycle the order could not pass: its pins, in order
-                let mut done = vec![false; n];
-                for &v in &ord {
-                    done[v] = true;
-                }
-                let adj: Vec<Vec<usize>> = out_edges.iter().map(|es| es.iter().filter(|e| !e.latch_dq).map(|e| e.to).collect()).collect();
-                let cycle = find_cycle(&adj, &done).unwrap_or_default();
-                return Err(StaError::CombinationalLoop(cycle.into_iter().map(|v| labels[v].to_string()).collect()));
-            }
-            cycle_checked = true;
+    // a walk that could not order every vertex: one cycle it could not pass, its pins in order
+    let check_cycle = |ord: &[usize]| -> Result<(), StaError> {
+        if ord.len() == n {
+            return Ok(());
         }
-        // per-lane driver arrival and slew — `relax` hands the per-lane arrays back
-        let sw: Vec<[f64; 2]> = (0..nn)
-            .map(|i| net_drv[i].map(|d| arr[d]).unwrap_or([f64::NEG_INFINITY; 2]))
-            .collect();
-        let net_slew: Vec<[f64; 2]> = (0..nn)
-            .map(|i| net_drv[i].map(|d| slw[d]).unwrap_or([0.0; 2]))
-            .collect();
-        let (nd, ns) = compute(&sw, &net_slew, 1);
-        let delta = (0..n_arcs)
-            .map(|k| (nd[k][0] - arc_d[k][0]).abs().max((nd[k][1] - arc_d[k][1]).abs()))
-            .fold(0.0, f64::max);
-        conv_net_slew = net_slew;
-        arc_d = nd;
-        arc_s = ns;
-        if delta < SI_TOL {
-            break;
+        let mut done = vec![false; n];
+        for &v in ord {
+            done[v] = true;
+        }
+        let adj: Vec<Vec<usize>> = out_edges.iter().map(|es| es.iter().filter(|e| !e.latch_dq).map(|e| e.to).collect()).collect();
+        let cycle = find_cycle(&adj, &done).unwrap_or_default();
+        Err(StaError::CombinationalLoop(cycle.into_iter().map(|v| labels[v].to_string()).collect()))
+    };
+    let mut arc_d: Vec<[f64; 2]>;
+    let mut arc_s: Vec<[f64; 2]>;
+    // The converged per-net driver slew, kept past the loop: the EARLY interconnect has to
+    // be evaluated at the same operating point as the late one (the fixed point only).
+    let mut conv_net_slew = zero.clone();
+    if single_pass {
+        let (ord, d, s) = one_pass(true, &seed_main);
+        check_cycle(&ord)?;
+        arc_d = d;
+        arc_s = s;
+    } else {
+        let (nom_d, nom_s) = compute(&neg, &zero, 1);
+        arc_d = nom_d.clone();
+        arc_s = nom_s.clone();
+        let mut cycle_checked = false;
+        for _ in 0..MAX_SI_ITERS {
+            let (_a, _s, _f, ord, arr, slw, _fl) = relax(&arc_d, &arc_s, true, &seed_main, false, None, None, None);
+            if !cycle_checked {
+                check_cycle(&ord)?;
+                cycle_checked = true;
+            }
+            // per-lane driver arrival and slew — `relax` hands the per-lane arrays back
+            let sw: Vec<[f64; 2]> = (0..nn)
+                .map(|i| net_drv[i].map(|d| arr[d]).unwrap_or([f64::NEG_INFINITY; 2]))
+                .collect();
+            let net_slew: Vec<[f64; 2]> = (0..nn)
+                .map(|i| net_drv[i].map(|d| slw[d]).unwrap_or([0.0; 2]))
+                .collect();
+            let (nd, ns) = compute(&sw, &net_slew, 1);
+            let delta = (0..n_arcs)
+                .map(|k| (nd[k][0] - arc_d[k][0]).abs().max((nd[k][1] - arc_d[k][1]).abs()))
+                .fold(0.0, f64::max);
+            conv_net_slew = net_slew;
+            arc_d = nd;
+            arc_s = ns;
+            if delta < SI_TOL {
+                break;
+            }
         }
     }
     // Say which interconnect model the design actually got. Opt-in: it is a diagnostic,
@@ -4056,7 +4158,11 @@ fn build_report(
     // the LATE slew at its driver `_12893_/Q`, where the early slew there is 0.4032. That
     // one pin's cell delay came out 0.211 ns long and the endpoint read 0.277 ns
     // OPTIMISTIC — the direction that misses a real hold violation.
-    let (early_d, early_s) = {
+    let (early_d, early_s) = if single_pass {
+        // the single pass: early wires at the early driver slews, by construction
+        let (_ord, d, sl) = one_pass(false, &seed_early);
+        (d, sl)
+    } else {
         let (mut d, mut sl) = compute(&neg, &conv_net_slew, 0); // seeded from the late point
         for _ in 0..MAX_SI_ITERS {
             let (_a, _s2, _f, _o, _ar, slw, _fl) = relax(&d, &sl, false, &seed_early, false, None, None, None);
