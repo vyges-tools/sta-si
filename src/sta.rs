@@ -1896,7 +1896,9 @@ fn build_report(
     // the clock those delays are relative to (`None`: the primary clock stands in).
     let unset = [f64::NEG_INFINITY; 2];
     let mut in_seed: [[Vec<[f64; 2]>; 2]; 2] = [[vec![[0.0; 2]; n], vec![[0.0; 2]; n]], [vec![unset; n], vec![unset; n]]];
-    let mut in_clock: Vec<[Option<String>; 2]> = vec![[None, None]; n];
+    // Held for the input ports that carry a delay only, by node: one pair per pin was 0.26 GiB on
+    // a 1.6M-instance design, nearly all of it `None`. Looked up, never iterated.
+    let mut in_clock: HashMap<usize, [Option<String>; 2]> = HashMap::new();
     let mut in_fall = false;
     let mut multi_clock_in: Vec<&str> = Vec::new();
     // A port with no declared arrival is UNCONSTRAINED: it is not a timing start point, so
@@ -1925,8 +1927,9 @@ fn build_report(
             for d in &delays {
                 let e = usize::from(d.clock_fall);
                 in_fall |= e == 1;
-                match (&in_clock[*idx][e], &d.clock) {
-                    (None, c) => in_clock[*idx][e] = c.clone(),
+                let ic = in_clock.entry(*idx).or_default();
+                match (&ic[e], &d.clock) {
+                    (None, c) => ic[e] = c.clone(),
                     (Some(a), Some(b)) if a != b => multi_clock_in.push(name.as_str()),
                     _ => {}
                 }
@@ -2134,12 +2137,10 @@ fn build_report(
         }
     }
     // index the nets so net arcs can look up a (mutable, per-pass) delay table
-    let net_order: Vec<String> = nets.keys().cloned().collect();
-    let net_idx: HashMap<&str, usize> = net_order
-        .iter()
-        .enumerate()
-        .map(|(i, nm)| (nm.as_str(), i))
-        .collect();
+    // the names borrow the map's own keys (it is not changed after this); a copy was 0.13 GiB on a
+    // 1.7M-net design
+    let net_order: Vec<&str> = nets.keys().map(String::as_str).collect();
+    let net_idx: HashMap<&str, usize> = net_order.iter().enumerate().map(|(i, nm)| (*nm, i)).collect();
     let nn = net_order.len();
     let mut net_res = vec![0.0f64; nn];
     let mut net_cap = vec![0.0f64; nn];
@@ -3770,7 +3771,7 @@ fn build_report(
                 }
             }
             if let Some(i) = rows.iter().map(|(i, _)| *i).find(|i| {
-                std::env::var("VYGES_STA_RC_NET").ok().as_deref() == Some(&net_order[*i])
+                std::env::var("VYGES_STA_RC_NET").ok().as_deref() == Some(net_order[*i])
             }) {
                 let cc: f64 = net_cpl[i].iter().map(|(_, c)| *c).sum();
                 eprintln!(
@@ -4164,7 +4165,7 @@ fn build_report(
         is_in_port[v].then_some(v)
     };
     // the clock an input port's delays on launching edge `edge` are relative to, if one is named
-    let in_clock_at = |port: Option<usize>, edge: usize| -> Option<&str> { port.and_then(|p| in_clock[p][edge].as_deref()) };
+    let in_clock_at = |port: Option<usize>, edge: usize| -> Option<&str> { port.and_then(|p| in_clock.get(&p)?[edge].as_deref()) };
     // the launch period of the path from an input port on edge `edge`: its delay's clock's
     let in_period = |endpoint: usize, pred: &[Option<usize>], edge: usize| in_clock_at(start_port(endpoint, pred), edge).map(period_named);
     let launch_end = |lck: Option<usize>, endpoint: usize, pred: &[Option<usize>], edge: usize| match lck {

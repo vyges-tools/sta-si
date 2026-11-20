@@ -366,6 +366,30 @@ fn io_delays_keep_their_clock_and_edge() {
     assert!((base.1 - ddr.1 - 0.1).abs() < 1e-9, "the falling edge's 0.5 - 0.2 is the tighter: {ddr:?}");
 }
 
+/// Reference rule: an input delay launches from ITS clock (`seedInputDelayArrival` tags the
+/// arrival with the delay's clock edge), so an exception naming that clock (`-from [get_clocks b]`)
+/// matches the input's paths too, not only the registers clocked by b. Here din's delay is on b,
+/// the second clock: the false path cuts din -> r1/D as well as r2 -> r3/D. Taken against the
+/// primary clock instead, din's path would survive and only r3/D would go. Measured on the
+/// reference at its pin with the same netlist in ASAP7 cells: three setup ends (r1/D and r3/D in
+/// group a, r2/D in b), and with the false path only r2/D.
+#[test]
+fn an_input_delay_launches_from_its_own_clock() {
+    let run = |cmds: &str| {
+        let sdc = vyges_sta_si::sdc::Sdc::parse(&format!(
+            "create_clock -name a -period 1 [get_ports ca]\ncreate_clock -name b -period 2 [get_ports cb]\n\
+             set_input_delay 0.1 -clock b [get_ports din]\n{cmds}"
+        ))
+        .unwrap();
+        let mut j = job(vec![]);
+        vyges_sta_si::job::merge_sdc_into(&sdc, &mut j);
+        analyze_inputs(NL_2CK, LIB, &j).unwrap()
+    };
+    let base = run("");
+    let cut = run("set_false_path -from [get_clocks b]\n");
+    assert_eq!(cut.endpoints, base.endpoints - 2, "r1/D (from din, on b) and r3/D (from r2, on b) are cut: {} -> {}", base.endpoints, cut.endpoints);
+}
+
 /// Reference rule (a false path drops the path, `Search` tags it out; an endpoint no other path
 /// reaches has no check, `VisitPathEnds`): with a launch on each clock edge (here an input delay
 /// on the clock's fall) every endpoint is checked once per launching edge. An end whose only path
