@@ -27,6 +27,7 @@
 //! fan-in alternatives (path-local slew), without GBA's merged worst slew. Pure std
 //! — unit-tested.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 
 use crate::inc::{checks_edge, HoldRec, InEdge, IncGraph, IncState, IncTopo, Lanes, Pred, SetupRec};
@@ -1518,6 +1519,17 @@ fn spef_scales(u: crate::liberty::LibUnits) -> (f64, f64, f64) {
     (pow10_exact(u.cap_f / 1e-15), pow10_exact(u.time_s / u.cap_f), pow10_exact(1e-15 / u.time_s))
 }
 
+/// A register pin's checks of one kind (setup, hold, recovery or removal): the library's own list,
+/// borrowed, when `keep` passes every check, as it does unless `set_disable_timing` names one;
+/// otherwise the checks it keeps, in library order.
+fn checks_of<'l>(cons: &'l [Constraint], keep: impl Fn(&Constraint) -> bool) -> Cow<'l, [Constraint]> {
+    if cons.iter().all(&keep) {
+        Cow::Borrowed(cons)
+    } else {
+        Cow::Owned(cons.iter().filter(|c| keep(c)).cloned().collect())
+    }
+}
+
 /// A net's reduced Elmore as the walk lists it (`elmore_of`), held for lookup by node: sorted by
 /// node, a node the walk lists twice keeping its LATER value, which is what collecting the walk
 /// into a map gave (an insert replaces). Each pass reads it once per load, so it is searched,
@@ -1704,7 +1716,10 @@ fn build_report(
     // (D pin node, constraint table(s), this flop's CK pin key) — the constraint is
     // interpolated at the operating slews later; the CK key resolves to a node whose
     // arrival is the clock insertion delay to this flop (skew).
-    let mut flop_d: Vec<(usize, Vec<Constraint>, Option<String>)> = Vec::new();
+    // ⛔ A register's checks BORROW the library's (`checks_of`): the reference's check arcs are
+    // the library cell's own, shared by every instance. A copy per instance held 827k
+    // constraints, tables included, for 824 distinct ones on a 1.6M-instance design (2.2 GiB).
+    let mut flop_d: Vec<(usize, Cow<'_, [Constraint]>, Option<String>)> = Vec::new();
     // `set_disable_timing`: the pins and arcs the constraints take out (see `crate::disable`).
     let mut disable_warnings = Vec::new();
     let disables = crate::disable::Disables::new(&job.disabled_timing, nl, lib, &mut disable_warnings);
@@ -1718,21 +1733,16 @@ fn build_report(
     // clock pin is disabled (`checkEdgeEnabled` needs `searchFrom` of the check's from vertex) or
     // when the instance or cell disables the check arc itself (a `-from`/`-to` names checks too;
     // "all" does not).
-    let enabled_checks = |inst: &crate::netlist::Inst, pin: &str, cons: &[Constraint]| -> Vec<Constraint> {
-        cons.iter()
-            .filter(|c| {
-                !disables.pin(Some(&inst.name), Some(&inst.cell), &c.related_pin)
-                    && !disables.arc(&inst.name, &inst.cell, &c.related_pin, pin, true)
-            })
-            .cloned()
-            .collect()
+    let enabled_check = |inst: &crate::netlist::Inst, pin: &str, c: &Constraint| -> bool {
+        !disables.pin(Some(&inst.name), Some(&inst.cell), &c.related_pin)
+            && !disables.arc(&inst.name, &inst.cell, &c.related_pin, pin, true)
     };
     // the recovery / removal pins among them: the reference reports their checks in their own
     // path group, `asynchronous`
     let mut async_end: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // the latch data pins among the setup ends: checked as the reference's latch checks
     let mut latch_d: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    let mut flop_hold: Vec<(usize, Vec<Constraint>, Option<String>)> = Vec::new();
+    let mut flop_hold: Vec<(usize, Cow<'_, [Constraint]>, Option<String>)> = Vec::new();
     // Nodes that drive a fixed logic level (tie cells: `function : "1"` / `"0"`). A net
     // driven by one can never switch, so it carries no timing — see the edge build below.
     let mut const_driver: Vec<bool> = Vec::new();
@@ -1826,7 +1836,7 @@ fn build_report(
                         ck_lane_list.push((idx, lane));
                     }
                     if cell.is_seq {
-                        let setup = enabled_checks(inst, pin, &cell.pins[pin].setup);
+                        let setup = checks_of(&cell.pins[pin].setup, |c| enabled_check(inst, pin, c));
                         if !setup.is_empty() {
                             is_endpoint[idx] = true; // data pin = setup capture endpoint
                             flop_d.push((idx, setup, ck_key.clone()));
@@ -1834,7 +1844,7 @@ fn build_report(
                                 latch_d.insert(idx);
                             }
                         }
-                        let hold = enabled_checks(inst, pin, &cell.pins[pin].hold);
+                        let hold = checks_of(&cell.pins[pin].hold, |c| enabled_check(inst, pin, c));
                         if !hold.is_empty() {
                             flop_hold.push((idx, hold, ck_key.clone()));
                         }
@@ -1848,13 +1858,13 @@ fn build_report(
                         // setup/hold groups, so nothing above ever names it. On a real
                         // block that is not a rounding error — sky130 `dfrtp` reset pins
                         // account for roughly a fifth of the design's hold checks.
-                        let recovery = enabled_checks(inst, pin, &cell.pins[pin].recovery);
+                        let recovery = checks_of(&cell.pins[pin].recovery, |c| enabled_check(inst, pin, c));
                         if !recovery.is_empty() {
                             is_endpoint[idx] = true;
                             flop_d.push((idx, recovery, ck_key.clone()));
                             async_end.insert(idx);
                         }
-                        let removal = enabled_checks(inst, pin, &cell.pins[pin].removal);
+                        let removal = checks_of(&cell.pins[pin].removal, |c| enabled_check(inst, pin, c));
                         if !removal.is_empty() {
                             flop_hold.push((idx, removal, ck_key.clone()));
                             async_end.insert(idx);
@@ -2793,8 +2803,8 @@ fn build_report(
                     let (setup_edge, hold_edge) = if one { (ClkEdge::Rise, ClkEdge::Fall) } else { (ClkEdge::Fall, ClkEdge::Rise) };
                     let ck_key = Some(pin_key(&inst.name, &clk));
                     is_endpoint[ei] = true;
-                    flop_d.push((ei, vec![zero(setup_edge, &clk)], ck_key.clone()));
-                    flop_hold.push((ei, vec![zero(hold_edge, &clk)], ck_key));
+                    flop_d.push((ei, Cow::Owned(vec![zero(setup_edge, &clk)]), ck_key.clone()));
+                    flop_hold.push((ei, Cow::Owned(vec![zero(hold_edge, &clk)]), ck_key));
                     gating_end.insert(ei);
                 }
             }
@@ -4412,7 +4422,7 @@ fn build_report(
         .filter(|(idx, _, _)| latch_d.contains(idx))
         .flat_map(|(idx, setup, ck)| {
             out_edges[*idx].iter().filter(|e| e.latch_dq).filter_map(move |e| match &e.kind {
-                EdgeKind::Cell(arc) => Some((*idx, setup.as_slice(), ck, e.to, *arc, e.lanes)),
+                EdgeKind::Cell(arc) => Some((*idx, &**setup, ck, e.to, *arc, e.lanes)),
                 EdgeKind::Net(_) => None,
             })
         })
@@ -4737,7 +4747,7 @@ fn build_report(
                     inc_setup.push(SetupRec {
                         idx: *idx,
                         base,
-                        cons: setup.clone(),
+                        cons: setup.to_vec(),
                         ck_slew,
                         launch_ck: lck,
                     });
@@ -5227,7 +5237,7 @@ fn build_report(
                     inc_hold.push(HoldRec {
                         idx,
                         base: crpr - cap_late - hold_rel - unc(to_end.clock.as_deref(), false),
-                        cons: hold.clone(),
+                        cons: hold.to_vec(),
                         ck_slew,
                         launch_ck: m_lck,
                         port: false,
@@ -5947,3 +5957,29 @@ mod elmore_by_node_rule {
         assert_eq!(by_node.len(), 3);
     }
 }
+
+#[cfg(test)]
+mod checks_of_rule {
+    use super::{checks_of, Constraint};
+    use std::borrow::Cow;
+
+    fn check(related: &str) -> Constraint {
+        Constraint { related_pin: related.to_string(), ..Default::default() }
+    }
+
+    /// The rule: a register's check arcs are the library cell's own (the reference shares one
+    /// arc set across every instance of a cell), so with nothing disabled the instance holds the
+    /// library's list itself, not a copy; a `set_disable_timing` that removes a check leaves the
+    /// rest, in library order.
+    #[test]
+    fn all_kept_is_the_library_list_itself_and_a_disable_keeps_the_rest_in_order() {
+        let lib = vec![check("CK"), check("SE"), check("CK2")];
+        let all = checks_of(&lib, |_| true);
+        assert!(matches!(all, Cow::Borrowed(s) if std::ptr::eq(s, lib.as_slice())), "nothing disabled: the library list, borrowed");
+        let some = checks_of(&lib, |c| c.related_pin != "SE");
+        let kept: Vec<&str> = some.iter().map(|c| c.related_pin.as_str()).collect();
+        assert_eq!(kept, ["CK", "CK2"]);
+        assert!(checks_of(&lib, |_| false).is_empty());
+    }
+}
+
