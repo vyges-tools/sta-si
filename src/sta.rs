@@ -3917,6 +3917,14 @@ fn build_report(
         early_recs.push(r);
     }
     rec_pass(false);
+    // ⛔ The driver waveforms are read only by the delay passes' wire solves (`wires_of_net`), all
+    // before this point; the two merged passes just above are the last that record them (a
+    // per-edge, clock-launched or fixed-slew pass records none). Kept to the end of the build they
+    // were ~9 GiB of a 1.6M-instance design's peak, which is set in findPathEnds. Emptied, not
+    // dropped: the relax closure still borrows the cell.
+    for side in drvr_wave.borrow_mut().iter_mut() {
+        *side = Vec::new();
+    }
 
     // ---- per launching edge -----------------------------------------------
     // The reference keeps one arrival per clock EDGE that launched it (a tag per `ClockEdge`) and
