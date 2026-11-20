@@ -2144,15 +2144,15 @@ fn build_report(
     let mut net_res = vec![0.0f64; nn];
     let mut net_cap = vec![0.0f64; nn];
     let mut net_drv: Vec<Option<usize>> = vec![None; nn];
-    let mut net_drv_ip: Vec<Option<(String, String)>> = vec![None; nn]; // driver (inst, pin)
+    // Whether each net's driver is an instance pin (not a port): all the timer asks of its name.
+    // ⚠️ It held the (inst, pin) Strings, 0.2 GiB on a 1.7M-net design, for that one bit.
+    let mut net_drv_pin: Vec<bool> = vec![false; nn];
     let mut net_cpl: Vec<Vec<(usize, f64)>> = vec![Vec::new(); nn]; // (aggressor net idx, Cc)
-    let ip_of = |node: usize| -> Option<(String, String)> {
-        split_inst_pin(&labels[node]).map(|(a, b)| (a.to_string(), b.to_string()))
-    };
+    let is_inst_pin = |node: usize| split_inst_pin(&labels[node]).is_some();
     for (name, net) in &nets {
         let i = net_idx[name.as_str()];
         net_drv[i] = net.driver;
-        net_drv_ip[i] = net.driver.and_then(ip_of);
+        net_drv_pin[i] = net.driver.is_some_and(is_inst_pin);
         if let Some((s, rc)) = spef.and_then(|s| s.net(name).map(|rc| (s, rc))) {
             net_res[i] = rc.res_ohm;
             net_cap[i] = rc.cap_ff;
@@ -2216,7 +2216,7 @@ fn build_report(
         for (name, net) in &nets {
             if let Some(d) = net.driver {
                 let i = net_idx[name.as_str()];
-                if let (Some(rc), Some(_)) = (s.net(name), &net_drv_ip[i]) {
+                if let (Some(rc), true) = (s.net(name), net_drv_pin[i]) {
                     if let Some(dnode) = node_of_pin[d] {
                         // the same capacitance content the reduction sees: coupling
                         // grounded at factor 1.0, plus Liberty receiver caps at the sinks
@@ -2347,7 +2347,9 @@ fn build_report(
     struct ArcInfo {
         net_idx: usize,
         sink: usize,
-        sink_ip: Option<(String, String)>,
+        /// The sink is an instance pin (not a port). ⚠️ It held the (inst, pin) Strings, 0.45 GiB
+        /// across 4M arcs, for this one bit.
+        sink_pin: bool,
     }
     let mut arcs: Vec<ArcInfo> = Vec::new();
     for (name, net) in &nets {
@@ -2359,7 +2361,7 @@ fn build_report(
                     arcs.push(ArcInfo {
                         net_idx: i,
                         sink: s,
-                        sink_ip: ip_of(s),
+                        sink_pin: is_inst_pin(s),
                     });
                     if held[d] || held[s] {
                         sim_cut[s] += 1;
@@ -3282,7 +3284,7 @@ fn build_report(
                 if net_rc[a.net_idx].is_none() {
                     continue;
                 }
-                if a.sink_ip.is_some() {
+                if a.sink_pin {
                     if let Some(node) = node_of_pin[a.sink] {
                         let c = pin_cap_node.get(&a.sink).copied().unwrap_or([[0.0; 2]; 2]);
                         for mm in 0..2 {
@@ -3382,7 +3384,7 @@ fn build_report(
                 return None;
             }
             let rc = net_rc[i]?;
-            net_drv_ip[i].as_ref()?;
+            net_drv_pin[i].then_some(())?;
             let dn = node_of_pin[net_drv[i]?]?;
             // the solve is in ns: the driver slew in, each delay and slew out
             let map = rc.transient(dn, slw_of(slew_i) * ns_per_time, xc_i, lib.thresholds)?;
@@ -3457,14 +3459,8 @@ fn build_report(
                 // (with its driving cell's waveform, else the closed form) and an output port is
                 // a load with its own Elmore, as an instance pin is.
                 {
-                    let dnode = match &net_drv_ip[i] {
-                        Some(_) => net_drv[i].and_then(|d| node_of_pin[d]),
-                        None => net_drv[i].map(|d| node_of_port[d]),
-                    };
-                    let snode = match &a.sink_ip {
-                        Some(_) => node_of_pin[a.sink],
-                        None => Some(node_of_port[a.sink]),
-                    };
+                    let dnode = if net_drv_pin[i] { net_drv[i].and_then(|d| node_of_pin[d]) } else { net_drv[i].map(|d| node_of_port[d]) };
+                    let snode = if a.sink_pin { node_of_pin[a.sink] } else { Some(node_of_port[a.sink]) };
                     if let (Some(dt), Some(st)) = (dnode, snode) {
                         let kept = tau_kept.borrow()[k][mm];
                         let taus = kept.unwrap_or_else(|| {
@@ -3572,7 +3568,7 @@ fn build_report(
                 // above, not a replacement, and it must not run unless requested — it took
                 // precedence silently and displaced the reference model entirely.
                 if transient_first {
-                    if let (Some(map), Some(_)) = (&tr_i, &a.sink_ip) {
+                    if let (Some(map), true) = (&tr_i, a.sink_pin) {
                         if let Some(sn) = node_of_pin[a.sink] {
                             if let Some(&(delay, slew)) = map.get(&sn) {
                                 mark(RC_TRANSIENT);
