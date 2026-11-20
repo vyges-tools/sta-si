@@ -1595,6 +1595,112 @@ pub(crate) fn pow10_exact(x: f64) -> f64 {
     }
 }
 
+/// The graph node of each port and instance pin, found by the netlist's own names.
+///
+/// ⛔ BORROWED names, not formatted keys: one `"I:inst:pin"` String per pin, in a String-keyed
+/// map, held 0.92 GiB on a 5.7M-pin design. A pin is found through the first instance of its
+/// name that made nodes, at its position in that instance's `conns`; the rules are the string
+/// map's, so a repeated pin, or a second instance of the same name, finds the node made first.
+struct NodeKeys<'a> {
+    nl: &'a Netlist,
+    ports: HashMap<&'a str, usize>,
+    // the first instance of each name that made nodes
+    inst_of: HashMap<&'a str, usize>,
+    // per instance, its first slot in `conn_node`
+    conn_start: Vec<usize>,
+    // the node of each instance connection, `u32::MAX` while it has none
+    conn_node: Vec<u32>,
+    // pins only a second instance of a name has (a malformed netlist), by `inst\0pin`
+    dup_pins: HashMap<String, usize>,
+}
+
+impl<'a> NodeKeys<'a> {
+    fn new(nl: &'a Netlist) -> Self {
+        let mut conn_start = Vec::with_capacity(nl.insts.len());
+        let mut total = 0;
+        for inst in &nl.insts {
+            conn_start.push(total);
+            total += inst.conns.len();
+        }
+        NodeKeys {
+            nl,
+            ports: HashMap::new(),
+            inst_of: HashMap::with_capacity(nl.insts.len()),
+            conn_start,
+            conn_node: vec![u32::MAX; total],
+            dup_pins: HashMap::new(),
+        }
+    }
+
+    fn port(&self, p: &str) -> Option<usize> {
+        self.ports.get(p).copied()
+    }
+
+    fn pin(&self, inst: &str, pin: &str) -> Option<usize> {
+        if let Some(&k) = self.inst_of.get(inst) {
+            if let Some(v) = self.conn(k, pin) {
+                return Some(v);
+            }
+        }
+        if self.dup_pins.is_empty() {
+            return None;
+        }
+        self.dup_pins.get(&format!("{inst}\0{pin}")).copied()
+    }
+
+    // the node of `pin` among instance `k`'s connections: its first connection of that name
+    fn conn(&self, k: usize, pin: &str) -> Option<usize> {
+        let j = self.nl.insts[k].conns.iter().position(|(q, _)| q == pin)?;
+        let v = self.conn_node[self.conn_start[k] + j];
+        (v != u32::MAX).then_some(v as usize)
+    }
+
+    // port `p`'s node, made (labelled `p`) if it has none
+    fn port_node(&mut self, p: &'a str, labels: &mut Vec<String>, is_endpoint: &mut Vec<bool>) -> usize {
+        if let Some(i) = self.port(p) {
+            return i;
+        }
+        let i = new_node(p.to_string(), labels, is_endpoint);
+        self.ports.insert(p, i);
+        i
+    }
+
+    // the node of instance `k`'s connection `j`, made (labelled `inst/pin`) if it has none
+    fn pin_node(&mut self, k: usize, j: usize, labels: &mut Vec<String>, is_endpoint: &mut Vec<bool>) -> usize {
+        let inst = &self.nl.insts[k];
+        let pin = inst.conns[j].0.as_str();
+        let first = *self.inst_of.entry(inst.name.as_str()).or_insert(k);
+        let found = if first == k {
+            // an earlier connection of this pin on this instance
+            self.conn(k, pin)
+        } else {
+            self.pin(&inst.name, pin)
+        };
+        let i = match found {
+            Some(i) => i,
+            None => {
+                let i = new_node(format!("{}/{}", inst.name, pin), labels, is_endpoint);
+                if first != k {
+                    self.dup_pins.insert(format!("{}\0{}", inst.name, pin), i);
+                }
+                i
+            }
+        };
+        self.conn_node[self.conn_start[k] + j] = i as u32;
+        i
+    }
+}
+
+// a register's check: (data pin node, its check arcs, its CK pin as (instance, pin))
+type FlopCheck<'a> = (usize, Cow<'a, [Constraint]>, Option<(&'a str, &'a str)>);
+
+fn new_node(label: String, labels: &mut Vec<String>, is_endpoint: &mut Vec<bool>) -> usize {
+    let i = labels.len();
+    labels.push(label);
+    is_endpoint.push(false);
+    i
+}
+
 /// Build the timing graph, propagate arrival/required, and return the report.
 ///
 /// (Phase 1+ splits this into persistent graph construction + propagation that the
@@ -1645,27 +1751,8 @@ fn build_report(
     // the RC solves (Elmore, transient) work in ns: their times to and from the library's unit
     let (ns_per_time, time_per_ns) = (pow10_exact(lib.units.time_s / 1e-9), pow10_exact(1e-9 / lib.units.time_s));
     let mut labels: Vec<String> = Vec::new();
-    let mut key2idx: HashMap<String, usize> = HashMap::new();
+    let mut keys = NodeKeys::new(nl);
     let mut is_endpoint: Vec<bool> = Vec::new();
-
-    let node = |key: String,
-                label: String,
-                key2idx: &mut HashMap<String, usize>,
-                labels: &mut Vec<String>,
-                is_endpoint: &mut Vec<bool>|
-     -> usize {
-        if let Some(&i) = key2idx.get(&key) {
-            return i;
-        }
-        let i = labels.len();
-        labels.push(label);
-        is_endpoint.push(false);
-        key2idx.insert(key, i);
-        i
-    };
-
-    let port_key = |p: &str| format!("P:{p}");
-    let pin_key = |inst: &str, pin: &str| format!("I:{inst}:{pin}");
 
     // ---- pass 1: nodes + nets -------------------------------------------
     let mut nets: HashMap<String, Net> = HashMap::new();
@@ -1680,13 +1767,7 @@ fn build_report(
     // primary input ports drive a net of the same name
     let mut input_ports: Vec<(usize, String)> = Vec::new();
     for p in &nl.inputs {
-        let idx = node(
-            port_key(p),
-            p.clone(),
-            &mut key2idx,
-            &mut labels,
-            &mut is_endpoint,
-        );
+        let idx = keys.port_node(p, &mut labels, &mut is_endpoint);
         ensure_net(&mut nets, p);
         nets.get_mut(p).unwrap().driver = Some(idx);
         input_ports.push((idx, p.clone()));
@@ -1694,13 +1775,7 @@ fn build_report(
     // primary output ports are endpoints + sinks of their net
     let mut output_ports: Vec<(usize, String)> = Vec::new();
     for p in &nl.outputs {
-        let idx = node(
-            port_key(p),
-            p.clone(),
-            &mut key2idx,
-            &mut labels,
-            &mut is_endpoint,
-        );
+        let idx = keys.port_node(p, &mut labels, &mut is_endpoint);
         is_endpoint[idx] = true;
         ensure_net(&mut nets, p);
         let net = nets.get_mut(p).unwrap();
@@ -1719,7 +1794,7 @@ fn build_report(
     // ⛔ A register's checks BORROW the library's (`checks_of`): the reference's check arcs are
     // the library cell's own, shared by every instance. A copy per instance held 827k
     // constraints, tables included, for 824 distinct ones on a 1.6M-instance design (2.2 GiB).
-    let mut flop_d: Vec<(usize, Cow<'_, [Constraint]>, Option<String>)> = Vec::new();
+    let mut flop_d: Vec<FlopCheck<'_>> = Vec::new();
     // `set_disable_timing`: the pins and arcs the constraints take out (see `crate::disable`).
     let mut disable_warnings = Vec::new();
     let disables = crate::disable::Disables::new(&job.disabled_timing, nl, lib, &mut disable_warnings);
@@ -1742,7 +1817,7 @@ fn build_report(
     let mut async_end: std::collections::HashSet<usize> = std::collections::HashSet::new();
     // the latch data pins among the setup ends: checked as the reference's latch checks
     let mut latch_d: std::collections::HashSet<usize> = std::collections::HashSet::new();
-    let mut flop_hold: Vec<(usize, Cow<'_, [Constraint]>, Option<String>)> = Vec::new();
+    let mut flop_hold: Vec<FlopCheck<'_>> = Vec::new();
     // Nodes that drive a fixed logic level (tie cells: `function : "1"` / `"0"`). A net
     // driven by one can never switch, so it carries no timing — see the edge build below.
     let mut const_driver: Vec<bool> = Vec::new();
@@ -1770,7 +1845,7 @@ fn build_report(
     // (CK node, lane of the edge that triggers it) — see the push site for why Liberty's
     // CK->Q arc is where that lives.
     let mut ck_lane_list: Vec<(usize, Option<usize>)> = Vec::new();
-    for inst in &nl.insts {
+    for (k, inst) in nl.insts.iter().enumerate() {
         // physical-only cells (fill/decap/tap/antenna) have no connections and no
         // timing view — skip them rather than erroring on a missing lib cell.
         let cell = match lib.cell(&inst.cell) {
@@ -1786,15 +1861,9 @@ fn build_report(
             }
             None => return Err(StaError::UnknownCell(inst.cell.clone())),
         };
-        let ck_key = cell.clock_pin.as_ref().map(|cp| pin_key(&inst.name, cp));
-        for (pin, net) in &inst.conns {
-            let idx = node(
-                pin_key(&inst.name, pin),
-                format!("{}/{}", inst.name, pin),
-                &mut key2idx,
-                &mut labels,
-                &mut is_endpoint,
-            );
+        let ck_key = cell.clock_pin.as_deref().map(|cp| (inst.name.as_str(), cp));
+        for (j, (pin, net)) in inst.conns.iter().enumerate() {
+            let idx = keys.pin_node(k, j, &mut labels, &mut is_endpoint);
             if let Some(t) = cell.thresholds {
                 node_th.insert(idx, t);
             }
@@ -1839,14 +1908,14 @@ fn build_report(
                         let setup = checks_of(&cell.pins[pin].setup, |c| enabled_check(inst, pin, c));
                         if !setup.is_empty() {
                             is_endpoint[idx] = true; // data pin = setup capture endpoint
-                            flop_d.push((idx, setup, ck_key.clone()));
+                            flop_d.push((idx, setup, ck_key));
                             if is_latch_data_pin(cell, pin) {
                                 latch_d.insert(idx);
                             }
                         }
                         let hold = checks_of(&cell.pins[pin].hold, |c| enabled_check(inst, pin, c));
                         if !hold.is_empty() {
-                            flop_hold.push((idx, hold, ck_key.clone()));
+                            flop_hold.push((idx, hold, ck_key));
                         }
                         // Asynchronous set/reset. Recovery is setup's counterpart (the
                         // release must arrive early enough before the capture edge) and
@@ -1861,12 +1930,12 @@ fn build_report(
                         let recovery = checks_of(&cell.pins[pin].recovery, |c| enabled_check(inst, pin, c));
                         if !recovery.is_empty() {
                             is_endpoint[idx] = true;
-                            flop_d.push((idx, recovery, ck_key.clone()));
+                            flop_d.push((idx, recovery, ck_key));
                             async_end.insert(idx);
                         }
                         let removal = checks_of(&cell.pins[pin].removal, |c| enabled_check(inst, pin, c));
                         if !removal.is_empty() {
-                            flop_hold.push((idx, removal, ck_key.clone()));
+                            flop_hold.push((idx, removal, ck_key));
                             async_end.insert(idx);
                         }
                     }
@@ -2066,13 +2135,13 @@ fn build_report(
     let mut dis_pin = vec![false; n];
     if !disables.is_empty() {
         for p in nl.inputs.iter().chain(&nl.outputs).chain(&nl.inouts) {
-            if let Some(&v) = key2idx.get(&port_key(p)) {
+            if let Some(v) = keys.port(p) {
                 dis_pin[v] = disables.pin(None, None, p);
             }
         }
         for inst in &nl.insts {
             for (pin, _) in &inst.conns {
-                if let Some(&v) = key2idx.get(&pin_key(&inst.name, pin)) {
+                if let Some(v) = keys.pin(&inst.name, pin) {
                     dis_pin[v] = disables.pin(Some(&inst.name), Some(&inst.cell), pin);
                 }
             }
@@ -2098,12 +2167,12 @@ fn build_report(
             if pininfo.direction != Dir::Out || !conn.contains_key(opin.as_str()) {
                 continue;
             }
-            let o_idx = key2idx[&pin_key(&inst.name, opin)];
+            let o_idx = keys.pin(&inst.name, opin).expect("a connected pin has a node");
             for arc in &pininfo.arcs {
                 if !conn.contains_key(arc.related_pin.as_str()) {
                     continue;
                 }
-                let i_idx = key2idx[&pin_key(&inst.name, &arc.related_pin)];
+                let i_idx = keys.pin(&inst.name, &arc.related_pin).expect("a connected pin has a node");
                 let sense = sim.sense.get(&(inst.name.clone(), arc.related_pin.clone(), opin.clone()));
                 // an arc FROM a held pin is gone, delay calculation included; one INTO a held
                 // pin carries nothing; one whose output no longer follows its input (a
@@ -2596,8 +2665,8 @@ fn build_report(
     let mut clock_src: HashMap<usize, f64> = HashMap::new();
     for (src, per) in &eff_clocks {
         let node = match split_inst_pin(src) {
-            Some((inst, pin)) => key2idx.get(&pin_key(inst, pin)).copied(),
-            None => key2idx.get(&port_key(src)).copied(),
+            Some((inst, pin)) => keys.pin(inst, pin),
+            None => keys.port(src),
         };
         if let Some(nd) = node {
             clock_src.insert(nd, *per);
@@ -2703,8 +2772,8 @@ fn build_report(
         let mut stack: Vec<usize> = Vec::new();
         for (src, sl) in &job.ideal_clocks {
             let node = match split_inst_pin(src) {
-                Some((inst, pin)) => key2idx.get(&pin_key(inst, pin)).copied(),
-                None => key2idx.get(&port_key(src)).copied(),
+                Some((inst, pin)) => keys.pin(inst, pin),
+                None => keys.port(src),
             };
             if let Some(nd) = node.filter(|&nd| !const_driver[nd]) {
                 ideal_slew[nd] = Some(*sl);
@@ -2785,28 +2854,29 @@ fn build_report(
         for inst in &nl.insts {
             let Some(cell) = lib.cell(&inst.cell) else { continue };
             for (en, _) in &inst.conns {
-                let Some(&ei) = key2idx.get(&pin_key(&inst.name, en)) else { continue };
+                let Some(ei) = keys.pin(&inst.name, en) else { continue };
                 if clock_reached[ei] || const_driver.get(ei).copied().unwrap_or(false) || cell.pins.get(en).map(|p| p.direction) != Some(Dir::In) {
                     continue;
                 }
                 // the enable's combinational arcs, to an output in the clock network
                 let found = cell.pins.iter().filter(|(_, p)| p.direction == Dir::Out).find_map(|(out, p)| {
-                    let oi = *key2idx.get(&pin_key(&inst.name, out))?;
+                    let oi = keys.pin(&inst.name, out)?;
                     if !clock_reached[oi] || !p.arcs.iter().any(|a| a.related_pin == *en && a.clk_edge.is_none()) {
                         return None;
                     }
                     let func = vyges_loom::liberty_func::Func::parse_in(p.function.as_deref()?.trim_matches('"'), |q| cell.pins.contains_key(q))?;
                     func.ports().into_iter().filter(|c| c != en).find_map(|c| {
                         let one = clk_gating_active_one(&func, en, c)?;
-                        let ci = *key2idx.get(&pin_key(&inst.name, c))?;
+                        let ci = keys.pin(&inst.name, c)?;
                         (clock_reached[ci] && reaches_ck(ci)).then(|| (c.to_string(), one))
                     })
                 });
                 if let Some((clk, one)) = found {
                     let (setup_edge, hold_edge) = if one { (ClkEdge::Rise, ClkEdge::Fall) } else { (ClkEdge::Fall, ClkEdge::Rise) };
-                    let ck_key = Some(pin_key(&inst.name, &clk));
+                    // the CK key names the connection, as the reference's check arc does; `clk` is one (its node was found)
+                    let ck_key = inst.conns.iter().find(|(p, _)| *p == clk).map(|(p, _)| (inst.name.as_str(), p.as_str()));
                     is_endpoint[ei] = true;
-                    flop_d.push((ei, Cow::Owned(vec![zero(setup_edge, &clk)]), ck_key.clone()));
+                    flop_d.push((ei, Cow::Owned(vec![zero(setup_edge, &clk)]), ck_key));
                     flop_hold.push((ei, Cow::Owned(vec![zero(hold_edge, &clk)]), ck_key));
                     gating_end.insert(ei);
                 }
@@ -3919,9 +3989,7 @@ fn build_report(
     // capture clock paths share a segment from the root to their common point;
     // deriving that shared segment two ways is unphysical pessimism, so CRPR credits
     // back its OCV spread (late arrival − early arrival at the common point).
-    let ck_node = |k: &Option<String>| -> Option<usize> {
-        k.as_deref().and_then(|s| key2idx.get(s)).copied()
-    };
+    let ck_node = |k: &Option<(&str, &str)>| -> Option<usize> { k.and_then(|(i, p)| keys.pin(i, p)) };
     // clock-network path from a CK pin back to the root, using clock-tree topology
     let path_to_root = |start: usize| -> Vec<usize> {
         let mut p = vec![start];
@@ -4039,8 +4107,8 @@ fn build_report(
                 continue;
             };
             let node = match split_inst_pin(src) {
-                Some((inst, pin)) => key2idx.get(&pin_key(inst, pin)).copied(),
-                None => key2idx.get(&port_key(src)).copied(),
+                Some((inst, pin)) => keys.pin(inst, pin),
+                None => keys.port(src),
             };
             if let Some(nd) = node {
                 clock_group_node.insert(nd, gi);
@@ -4060,8 +4128,8 @@ fn build_report(
         .iter()
         .filter_map(|(name, src, _)| {
             let node = match split_inst_pin(src) {
-                Some((inst, pin)) => key2idx.get(&pin_key(inst, pin)).copied(),
-                None => key2idx.get(&port_key(src)).copied(),
+                Some((inst, pin)) => keys.pin(inst, pin),
+                None => keys.port(src),
             };
             node.map(|nd| (nd, name.as_str()))
         })
@@ -4282,7 +4350,7 @@ fn build_report(
                 match o.accessor.as_str() {
                     "get_pins" => {
                         for j in vyges_loom::sdc::pins_matching(name, &inst_names, &inst_pins) {
-                            if let Some(&i) = key2idx.get(&pin_key(inst_names[inst_pins[j].0], inst_pins[j].1)) {
+                            if let Some(i) = keys.pin(inst_names[inst_pins[j].0], inst_pins[j].1) {
                                 pins.insert(i, limit);
                             }
                         }
@@ -4364,7 +4432,7 @@ fn build_report(
     };
     // (latch window per data edge, as the search clips a borrow: (opening, closing, enable edge
     // time from the launch, enable lane))
-    let latch_window = |run: &EdgeView, seeds: &[HashMap<usize, LatchSeed>], idx: usize, setup: &[Constraint], ck: &Option<String>| -> [Option<(f64, f64, f64, usize)>; 2] {
+    let latch_window = |run: &EdgeView, seeds: &[HashMap<usize, LatchSeed>], idx: usize, setup: &[Constraint], ck: &Option<(&str, &str)>| -> [Option<(f64, f64, f64, usize)>; 2] {
         let mut out = [None; 2];
         let cap = ck_node(ck);
         if unclocked_ck(cap) {
@@ -4413,7 +4481,7 @@ fn build_report(
         out
     };
     // (data pin, its setup checks, its enable pin key, Q, the D->Q arc, the lanes it passes)
-    type LatchArc<'a> = (usize, &'a [Constraint], &'a Option<String>, usize, &'a Arc, [[bool; 2]; 2]);
+    type LatchArc<'a> = (usize, &'a [Constraint], &'a Option<(&'a str, &'a str)>, usize, &'a Arc, [[bool; 2]; 2]);
     let latch_arcs: Vec<LatchArc<'_>> = flop_d
         .iter()
         .filter(|(idx, _, _)| latch_d.contains(idx))
@@ -4771,12 +4839,12 @@ fn build_report(
         let inst_names: Vec<&str> = nl.insts.iter().map(|i| i.name.as_str()).collect();
         let inst_pins: Vec<(usize, &str)> = nl.insts.iter().enumerate().flat_map(|(k, i)| i.conns.iter().map(move |(p, _)| (k, p.as_str()))).collect();
         let node_of = |(acc, name): &(String, String)| -> Option<usize> {
-            let port = key2idx.get(&port_key(name)).copied();
-            let pin = split_inst_pin(name).and_then(|(i, p)| key2idx.get(&pin_key(i, p)).copied());
+            let port = keys.port(name);
+            let pin = split_inst_pin(name).and_then(|(i, p)| keys.pin(i, p));
             match acc.as_str() {
                 "get_ports" => port,
                 "get_pins" => match vyges_loom::sdc::pins_matching(name, &inst_names, &inst_pins).as_slice() {
-                    &[j] => key2idx.get(&pin_key(inst_names[inst_pins[j].0], inst_pins[j].1)).copied(),
+                    &[j] => keys.pin(inst_names[inst_pins[j].0], inst_pins[j].1),
                     _ => None,
                 },
                 _ => port.or(pin),
@@ -5674,7 +5742,7 @@ fn build_report(
     // construction keys dropped first: a copy of both was 1.7 GiB on a 1.6M-instance design.
     // the query API reports one load per driver: the larger edge's
     let node_load_max: Vec<f64> = node_load.iter().map(|l| l[1][0].max(l[1][1])).collect();
-    drop(key2idx);
+    drop(keys);
     let mut timing = Timing::new(
         std::mem::take(&mut labels),
         &is_endpoint,
@@ -5978,3 +6046,42 @@ mod checks_of_rule {
     }
 }
 
+
+#[cfg(test)]
+mod node_keys_rule {
+    use super::NodeKeys;
+    use crate::netlist;
+
+    /// The rule (the string-keyed map's it replaced): a port and an instance pin are found by name;
+    /// a pin repeated on one instance, and a pin of a second instance of the same name, find the
+    /// node made first; a pin a second instance alone has gets its own node and is still found;
+    /// an instance or pin that made no node is not found.
+    #[test]
+    fn a_pin_is_found_by_name_and_a_repeat_finds_the_node_made_first() {
+        let mut nl = netlist::parse(
+            "module top(a, y);\ninput a;\noutput y;\nwire n;\n\
+             INV u1 (.A(a), .Y(n));\nINV u1 (.A(n), .B(a), .Y(y));\nINV u2 (.A(n));\nendmodule\n",
+        )
+        .unwrap();
+        // the reader names a second `u1` `u1_1`; the map still answers for a netlist that does not
+        nl.insts[1].name = "u1".to_string();
+        let (mut labels, mut ends) = (Vec::new(), Vec::new());
+        let mut keys = NodeKeys::new(&nl);
+        let a = keys.port_node("a", &mut labels, &mut ends);
+        assert_eq!(keys.port_node("a", &mut labels, &mut ends), a, "a port is made once");
+        let u1a = keys.pin_node(0, 0, &mut labels, &mut ends);
+        let u1y = keys.pin_node(0, 1, &mut labels, &mut ends);
+        // the second `u1`: its A and Y are the first's, its B is its own
+        assert_eq!(keys.pin_node(1, 0, &mut labels, &mut ends), u1a);
+        let u1b = keys.pin_node(1, 1, &mut labels, &mut ends);
+        assert_eq!(keys.pin_node(1, 2, &mut labels, &mut ends), u1y);
+        assert_eq!(labels, ["a", "u1/A", "u1/Y", "u1/B"]);
+        assert_eq!(keys.port("a"), Some(a));
+        assert_eq!(keys.port("y"), None, "no node made for y");
+        assert_eq!(keys.pin("u1", "A"), Some(u1a));
+        assert_eq!(keys.pin("u1", "Y"), Some(u1y));
+        assert_eq!(keys.pin("u1", "B"), Some(u1b));
+        assert_eq!(keys.pin("u2", "A"), None, "u2 made no node");
+        assert_eq!(keys.pin("u1", "C"), None);
+    }
+}
