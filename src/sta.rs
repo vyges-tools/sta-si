@@ -911,6 +911,42 @@ impl<T> std::ops::Index<usize> for Adj<T> {
     }
 }
 
+/// Each net's coupling aggressors as net indices, one per entry of the net's SPEF `coupling`
+/// list and in its order (`NO_NET` where the aggressor is no net of the design). The caps
+/// themselves stay in the SPEF; `of` pairs the two back up.
+///
+/// ⛔ Not a `Vec<(net, Cc)>` per net: that copied every coupling cap out of the SPEF, 0.79 GiB
+/// on a 1.7M-net design in copies, headers and growth slack. The reference keeps coupling caps
+/// only in the parasitic network, read where they are needed.
+struct NetCpl {
+    // net i's aggressors are `agg[start[i]..start[i + 1]]`
+    start: Vec<usize>,
+    agg: Vec<u32>,
+}
+
+const NO_NET: u32 = u32::MAX;
+
+impl NetCpl {
+    /// From each net's coupling list in net order; `net_of` names an aggressor's net, if any.
+    fn new<'c>(nets: impl Iterator<Item = &'c [(Name, f64)]>, net_of: impl Fn(Name) -> Option<usize>) -> NetCpl {
+        let mut start = vec![0usize];
+        let mut agg = Vec::new();
+        for cpl in nets {
+            agg.extend(cpl.iter().map(|&(a, _)| net_of(a).map_or(NO_NET, |ai| u32::try_from(ai).expect("fewer than 2^32 - 1 nets"))));
+            start.push(agg.len());
+        }
+        agg.shrink_to_fit();
+        NetCpl { start, agg }
+    }
+
+    /// Net i's `(aggressor net, Cc)` in SPEF order, skipping aggressors outside the design;
+    /// `cpl` is net i's SPEF coupling list, the one `new` was given.
+    fn of<'a>(&'a self, i: usize, cpl: &'a [(Name, f64)]) -> impl Iterator<Item = (usize, f64)> + 'a {
+        let agg = &self.agg[self.start[i]..self.start[i + 1]];
+        agg.iter().zip(cpl).filter(|(a, _)| **a != NO_NET).map(|(a, c)| (*a as usize, c.1))
+    }
+}
+
 impl Edge<'_> {
     /// Does any arrival cross this arc? (A cut arc stays for the slews after it.)
     fn searched(&self) -> bool {
@@ -2350,26 +2386,24 @@ fn build_report(
     // Whether each net's driver is an instance pin (not a port): all the timer asks of its name.
     // ⚠️ It held the (inst, pin) Strings, 0.2 GiB on a 1.7M-net design, for that one bit.
     let mut net_drv_pin: Vec<bool> = vec![false; nn];
-    let mut net_cpl: Vec<Vec<(usize, f64)>> = vec![Vec::new(); nn]; // (aggressor net idx, Cc)
     let is_inst_pin = |node: usize| split_inst_pin(&labels[node]).is_some();
     for (name, net) in &nets {
         let i = net_idx[name.as_str()];
         net_drv[i] = net.driver;
         net_drv_pin[i] = net.driver.is_some_and(is_inst_pin);
-        if let Some((s, rc)) = spef.and_then(|s| s.net(name).map(|rc| (s, rc))) {
+        if let Some(rc) = spef.and_then(|s| s.net(name)) {
             net_res[i] = rc.res_ohm;
             net_cap[i] = rc.cap_ff;
-            for &(agg, cc) in &rc.coupling {
-                if let Some(&ai) = net_idx.get(s.name(agg)) {
-                    net_cpl[i].push((ai, cc));
-                }
-            }
         }
     }
     // Each net's parasitic, and each of its pins' SPEF node, found once by name (`pin_node`'s
     // answer: the net's first `*CONN` entry for the pin). Looked up per load and per pass by
     // name, a net cost its fanout squared in string compares each pass.
     let net_rc: Vec<Option<&CompactNet>> = net_order.iter().map(|nm| spef.and_then(|s| s.net(nm))).collect();
+    // net i's (aggressor net, Cc), the caps read from its SPEF entry
+    let cpl_list = |i: usize| net_rc[i].map_or(&[][..], |rc| rc.coupling.as_slice());
+    let net_cpl = NetCpl::new((0..nn).map(cpl_list), |a| spef.and_then(|s| net_idx.get(s.name(a)).copied()));
+    let cpl_of = |i: usize| net_cpl.of(i, cpl_list(i));
     // Nodes are the SPEF's interned ids. A top-level port is its own node, named by the port
     // (`node_of_port`); a name the net does not hold is `NO_NAME`, which no walk finds — as an
     // unknown node NAME found nothing when nodes were strings.
@@ -2424,7 +2458,7 @@ fn build_report(
                     if let Some(dnode) = node_of_pin[d] {
                         // the same capacitance content the reduction sees: coupling
                         // grounded at factor 1.0, plus Liberty receiver caps at the sinks
-                        let cc: f64 = net_cpl[i].iter().map(|(_, c)| *c).sum();
+                        let cc: f64 = cpl_of(i).map(|(_, c)| c).sum();
                         for (mm, lane) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
                         let mut pcap: HashMap<Name, f64> = HashMap::new();
                         for &sk in &net.sinks {
@@ -2496,7 +2530,7 @@ fn build_report(
             for ol in 0..2 {
                 // the port net's Pi, with the same capacitance content as a gate driver's
                 let pi = spef.and_then(|s| s.net(name).map(|rc| (s, rc))).and_then(|(s, rc)| {
-                    let cc: f64 = net_cpl[i].iter().map(|(_, c)| *c).sum();
+                    let cc: f64 = cpl_of(i).map(|(_, c)| c).sum();
                     let mut pcap: HashMap<Name, f64> = HashMap::new();
                     for &sk in &net.sinks {
                         if split_inst_pin(&labels[sk]).is_some() {
@@ -3559,9 +3593,9 @@ fn build_report(
         // Coupling stays a per-NET aggregate: our Miller term is one number for the net,
         // so the window is taken from the worst lane rather than split per edge.
         let svi = win(sw[i]);
-        let mut x: f64 = net_cpl[i].iter().map(|(_, cc)| *cc).sum();
+        let mut x: f64 = cpl_of(i).map(|(_, cc)| cc).sum();
         if svi.is_finite() {
-            for &(ai, cc) in &net_cpl[i] {
+            for (ai, cc) in cpl_of(i) {
                 let window = (slw_of(net_slew[i]) + slw_of(net_slew[ai])) / 2.0 + guard;
                 if win(sw[ai]).is_finite() && (win(sw[ai]) - svi).abs() <= window {
                     x += (miller - 1.0).max(0.0) * cc;
@@ -3970,13 +4004,13 @@ fn build_report(
             if let Some(i) = rows.iter().map(|(i, _)| *i).find(|i| {
                 std::env::var("VYGES_STA_RC_NET").ok().as_deref() == Some(net_order[*i])
             }) {
-                let cc: f64 = net_cpl[i].iter().map(|(_, c)| *c).sum();
+                let cc: f64 = cpl_of(i).map(|(_, c)| c).sum();
                 eprintln!(
                     "rc-trace: ASKED net {} — coupling {:.4} fF over {} aggressor(s), \
                      ground/wire cap {:.4} fF ⇒ grounding coupling would add {:.1} %",
                     net_order[i],
                     cc,
-                    net_cpl[i].len(),
+                    cpl_of(i).count(),
                     net_cap[i],
                     100.0 * cc / net_cap[i].max(1e-12)
                 );
@@ -6320,5 +6354,29 @@ mod by_node_rule {
         assert_eq!(b[1], [Some(1), None]);
         assert_eq!(b[0], [None, None]);
         assert_eq!(b[4], [None, None]);
+    }
+}
+
+#[cfg(test)]
+mod net_cpl_rule {
+    use super::NetCpl;
+
+    /// The rule: a net's coupling is its SPEF list in SPEF order, each aggressor named by its net,
+    /// and an aggressor that is no net of the design is skipped (its cap counts nowhere, not in the
+    /// net's total nor its windows), the caps around it keeping their own aggressors.
+    #[test]
+    fn a_nets_coupling_is_its_spef_list_less_outside_aggressors() {
+        // SPEF names 10, 11, 12 are nets 0, 1, 2; name 99 is outside the design
+        let net_of = |a: u32| (10..13).contains(&a).then(|| (a - 10) as usize);
+        let lists: Vec<Vec<(u32, f64)>> = vec![
+            vec![(11, 1.0), (99, 2.0), (12, 4.0)],
+            vec![],
+            vec![(10, 8.0), (11, 16.0)],
+        ];
+        let c = NetCpl::new(lists.iter().map(Vec::as_slice), net_of);
+        assert_eq!(c.of(0, &lists[0]).collect::<Vec<_>>(), [(1, 1.0), (2, 4.0)]);
+        assert_eq!(c.of(1, &lists[1]).count(), 0);
+        assert_eq!(c.of(2, &lists[2]).collect::<Vec<_>>(), [(0, 8.0), (1, 16.0)]);
+        assert_eq!(c.of(0, &lists[0]).map(|(_, cc)| cc).sum::<f64>(), 5.0);
     }
 }
