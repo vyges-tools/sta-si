@@ -99,3 +99,20 @@ fn the_probe_end_group_prints_that_ends_path() {
     let none = run(&[("VYGES_STA_PROBE_END", "no_such_pin"), ("VYGES_DEBUG", "sta-si:vy_probe_end=1")]);
     assert!(err(&none).contains("probe| no_such_pin: no timed setup or hold check ends there"), "{}", err(&none));
 }
+
+/// An output port's HOLD path prints too, as a register's does: its `-min` output delay is a check
+/// of its own (examples/top has none, so examples/nonunate_clk, whose y has both).
+#[test]
+fn the_probe_end_group_prints_an_output_ports_hold_path() {
+    let job = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/nonunate_clk/nonunate_clk.sta");
+    let mut c = Command::new(env!("CARGO_BIN_EXE_vyges-sta-si"));
+    c.args(["run", job]);
+    for v in VARS {
+        c.env_remove(v);
+    }
+    c.env("VYGES_STA_PROBE_END", "y").env("VYGES_DEBUG", "sta-si:vy_probe_end=1");
+    let e = err(&c.output().expect("the engine binary runs"));
+    for l in ["probe| Endpoint: y (output port", "probe| Path Type: max", "probe| Path Type: min"] {
+        assert!(e.contains(l), "no `{l}`:\n{e}");
+    }
+}

@@ -5763,6 +5763,9 @@ fn build_report(
             worst_hold = Some((*t, slack_at));
         }
         let g = path_group(*t, None);
+        if is_probe(*t) {
+            hold_group_worst.insert("probe".to_string(), (slack, *t, slack_at.0, slack_at.1));
+        }
         if hold_group_worst.get(&g).is_none_or(|w| slack < w.0) {
             hold_group_worst.insert(g, (slack, *t, slack_at.0, slack_at.1));
         }
@@ -5812,6 +5815,10 @@ fn build_report(
         if slack < whs {
             whs = slack;
             worst_hold = Some((idx, slack_at));
+        }
+        // the probed end's hold path, an output port's as a register's (`vy_probe_end`)
+        if is_probe(idx) {
+            hold_group_worst.insert("probe".to_string(), (slack, idx, slack_at.0, slack_at.1));
         }
         if hold_group_worst.get(&group).is_none_or(|w| slack < w.0) {
             hold_group_worst.insert(group, (slack, idx, slack_at.0, slack_at.1));
