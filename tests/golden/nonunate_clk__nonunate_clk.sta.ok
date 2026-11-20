@@ -1,0 +1,42 @@
+$ vyges-sta-si run examples/nonunate_clk/nonunate_clk.sta
+exit: 0
+--- stdout ---
+STA report — design nonunate_clk
+  clock clk  period 2.000 ns   xtalk_miller 2.00
+  OCV: flat derate — late 1.000 / early 1.000   CRPR: on
+  endpoints: 4
+  WNS: 0.5656 ns    TNS: 0.0000 ns    [MET]
+
+  worst path to y  (slack 0.5656 ns):
+      arrival     slew   node
+       0.0000   0.0200   clk
+       0.0000   0.0800   cb0/A
+       0.0000   0.0800   cb0/Y
+       0.0000   0.0800   cb1/A
+       0.0000   0.0800   cb1/Y
+       0.0000   0.0800   n2/CK
+       0.1667   0.0517   n2/Q
+       0.1667   0.0517   g2/A
+       0.3344   0.0653   g2/Y
+       0.3344   0.0653   y
+
+  hold endpoints: 4    WHS: -1.0043 ns    THS: -1.9843 ns    [VIOLATED]
+  worst hold path to y3  (slack -1.0043 ns):
+      arrival     slew   node
+       0.0000   0.0200   clk
+       0.0000   0.0800   cb0/A
+       0.0000   0.0800   cb0/Y
+       0.0000   0.0800   cb1/A
+       0.0000   0.0800   cb1/Y
+       0.0000   0.0800   r3/CK
+       0.1489   0.0439   r3/Q
+       0.1489   0.0439   g3/A
+       0.2957   0.0592   g3/Y
+       0.2957   0.0592   y3
+
+  achievable: ~1.434 ns → ~697.2 MHz   (target 2.000 ns → ~500.0 MHz)
+--- stderr ---
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-NETLIST","raw_msg":"netlist: 6 instance(s) of 5 master(s); 6 timed, 0 physical-only","objects":["clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"info","code":"STA-LIBERTY","raw_msg":"liberty: 6 cell(s) loaded, 5 used by the design","objects":["clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-HOLD","raw_msg":"hold violation at y3: WHS -1.0043 ns (THS -1.9843 ns over 4 endpoint(s))","objects":["net:y3","clock:clk"]}
+{"schema":"vyges-events/1.0","ts_ms":<TS>,"tool":"vyges-sta-si","severity":"warn","code":"STA-DONE","raw_msg":"sta complete: WNS 0.5656 ns, TNS 0.0000 ns, WHS -1.0043 ns — 1 violation(s)"}

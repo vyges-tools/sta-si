@@ -1,0 +1,13 @@
+# The same clock propagated and derated. Through cb0 (positive-unate, rises slowly, falls fast)
+# and then cb1 (non-unate, slew-dependent), a clock-pin transition reached from the rise edge and
+# the same transition reached from the fall edge arrive at different times; each edge's launch,
+# capture and CRPR take that edge's own clock path.
+# OpenSTA (standalone 4af3c130), as above, each end alone:
+#   setup n2/D 1.3940  r3/D 0.7911  y 1.4857  y3 1.3546
+#   hold  n2/D -0.6500 r3/D -0.0507 y -0.7742 y3 -0.6662
+design:      nonunate_clk
+netlist:     nonunate_clk.v
+lib:         nonunate_clk.lib
+sdc:         nonunate_clk_prop.sdc
+input_slew:  0.02
+output_load: 0.005

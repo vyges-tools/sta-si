@@ -1,0 +1,13 @@
+# An ideal clock through a non-unate clock buffer: both clock edges reach both transitions of
+# every register clock pin, and each edge is its own launch and its own capture. The falling-edge
+# register n2 is launched by the clock's RISE edge (its clock pin falls through cb1) and the
+# rising-edge register r3 by the FALL edge.
+# OpenSTA (standalone 4af3c130), set_input_transition 0.02, set_load 0.005, each end alone:
+#   setup n2/D 0.7500  r3/D 0.7833  y 0.5656  y3 0.5898
+#   hold  n2/D 0.1800  r3/D 0.1467  y -0.9801 y3 -1.0043
+design:      nonunate_clk
+netlist:     nonunate_clk.v
+lib:         nonunate_clk.lib
+sdc:         nonunate_clk.sdc
+input_slew:  0.02
+output_load: 0.005

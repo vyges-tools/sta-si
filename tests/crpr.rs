@@ -12,12 +12,15 @@ const LIB: &str = r#"
 library (crpr) {
   lu_table_template (s) { variable_1 : related_pin_transition; variable_2 : constrained_pin_transition; }
   lu_table_template (t) { variable_1 : input_net_transition; variable_2 : total_output_net_capacitance; }
+  /* an inverter says so: with no timing_sense (and no function) the arc is non-unate, and a
+     clock through it reaches every clock pin on both edges (tests/nonunate_clk.rs) */
   cell (INV) {
     pin (A) { direction : input; capacitance : 0.0015; }
     pin (Y) {
       direction : output;
       timing () {
         related_pin : "A";
+        timing_sense : negative_unate;
         cell_rise (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.12, 0.12", "0.12, 0.12" ); }
         cell_fall (t)       { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.12, 0.12", "0.12, 0.12" ); }
         rise_transition (t) { index_1 ("0.01, 0.08"); index_2 ("0.001, 0.01"); values ( "0.03, 0.03", "0.03, 0.03" ); }
