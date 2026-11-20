@@ -889,7 +889,7 @@ impl Timing {
     /// and the incremental fast path so both produce an identical snapshot.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        labels: &[String],
+        labels: Vec<String>,
         is_endpoint: &[bool],
         excluded_setup: &[bool],
         arrival: &[f64],
@@ -908,7 +908,7 @@ impl Timing {
                 .enumerate()
                 .map(|(i, l)| (l.clone(), i))
                 .collect(),
-            labels: labels.to_vec(),
+            labels,
             is_endpoint: is_endpoint.to_vec(),
             excluded_setup: excluded_setup.to_vec(),
             arrival: arrival.to_vec(),
@@ -5669,12 +5669,14 @@ fn build_report(
         check_paths,
         latch_borrow,
     };
-    // Retain a per-pin snapshot for the Timer's query API (Phase 1). Cloned, not moved:
-    // closures above still hold immutable borrows of these arrays through the return.
+    // Retain a per-pin snapshot for the Timer's query API (Phase 1). The arrays are cloned: closures
+    // above still hold immutable borrows of them through the return. ⛔ The labels are MOVED, and the
+    // construction keys dropped first: a copy of both was 1.7 GiB on a 1.6M-instance design.
     // the query API reports one load per driver: the larger edge's
     let node_load_max: Vec<f64> = node_load.iter().map(|l| l[1][0].max(l[1][1])).collect();
+    drop(key2idx);
     let mut timing = Timing::new(
-        &labels,
+        std::mem::take(&mut labels),
         &is_endpoint,
         &excluded_setup,
         &arrival,
@@ -5719,12 +5721,8 @@ fn build_report(
         }
         let topo = IncTopo {
             n,
-            label2idx: labels
-                .iter()
-                .enumerate()
-                .map(|(i, l)| (l.clone(), i))
-                .collect(),
-            labels: labels.clone(),
+            label2idx: timing.label2idx.clone(),
+            labels: timing.labels.clone(),
             succ,
             in_edges,
             topo_pos,

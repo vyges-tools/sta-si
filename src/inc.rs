@@ -656,7 +656,7 @@ impl IncGraph {
             latch_borrow: Vec::new(),
         };
         let timing = Timing::new(
-            &self.topo.labels,
+            self.topo.labels.clone(),
             &self.topo.is_endpoint,
             &self.topo.excluded_setup,
             &arrival,
