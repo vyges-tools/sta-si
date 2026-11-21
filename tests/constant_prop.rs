@@ -277,4 +277,25 @@ library (k) {
         let t = timer_cmds(NL, &[("set_logic_dc", "get_ports", "X", "s"), ("set_case_analysis", "get_ports", "0", "s")]);
         assert!((at(&t, "y") - 0.1).abs() < 1e-6, "{}", at(&t, "y"));
     }
+    /// Rule (OpenSTA `7515b043`, in the f11b4276 pin: `GraphDelayCalc::findDriverEdgeDelays`
+    /// times only the arcs `searchThru(edge, arc, mode)` passes): a deselected mux input (sense
+    /// NONE once S is substituted) merges no slew into the output. Here A1's arc is the slow one
+    /// (0.4 ns transition against A0's 0.02): free, it sets y's slew; with S = 0 only A0's does. At
+    /// 4155ac31 the delay calculation merged the deselected arc's slew too.
+    #[test]
+    fn a_deselected_mux_input_merges_no_slew() {
+        let a1 = LIB.find("related_pin : \"A1\"").unwrap();
+        let (head, tail) = LIB.split_at(a1);
+        let lib = format!("{head}{}", tail.replacen("values (\"0.02, 0.02\", \"0.02, 0.02\")", "values (\"0.4, 0.4\", \"0.4, 0.4\")", 2));
+        let timer_lib = |cases: &[(&str, &str, &str)]| {
+            let mut job = StaJob::parse("design: k\nnetlist: x\nlib: x\nclock: clk 4.0\ninput_slew: 0.02\noutput_load: 0.001\ninput_delay: 0.0\n", ".").unwrap();
+            job.case_values = cases.iter().map(|(accessor, value, name)| CaseSpec { cmd: "set_case_analysis".into(), value: value.to_string(), accessor: accessor.to_string(), narrowed: false, names: vec![name.to_string()] }).collect();
+            Timer::build(&netlist::parse(NL).unwrap(), &Lib::parse(&lib).unwrap(), &job, None).unwrap()
+        };
+        let slew = |t: &Timer| t.slew(t.pin("m/X").unwrap());
+        let free = timer_lib(&[]);
+        assert!((slew(&free) - 0.4).abs() < 1e-6, "free: the slow A1 arc sets the slew, {}", slew(&free));
+        let s0 = timer_lib(&[("get_ports", "0", "s")]);
+        assert!((slew(&s0) - 0.02).abs() < 1e-6, "S = 0: A1 is not timed, {}", slew(&s0));
+    }
 }

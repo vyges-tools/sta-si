@@ -2659,6 +2659,13 @@ fn build_report(
         }
     }
     let out_edges = Adj::new(n, made_edges);
+    // a vertex some cell arc drives (a driver the delay calculation zeroes when no arc sets it)
+    let mut cell_driven = vec![false; n];
+    for e in out_edges.iter().flatten() {
+        if matches!(e.kind, EdgeKind::Cell(_)) {
+            cell_driven[e.to] = true;
+        }
+    }
     let n_arcs = arcs.len();
     // A node the constants hold, or whose every in-arc they cut, is untimed exactly as a tie
     // cell's output is: no seed, so nothing reaches its fanout.
@@ -3201,6 +3208,15 @@ fn build_report(
                 slew[u] = [0.0; 2];
                 slew_only[u] = [true; 2];
             }
+            // `zeroDrvrSlew`: a cell output transition that only cut arcs reach (no arc merged a
+            // slew into it) is 0, and is timed onward from there.
+            if fixed_slew.is_none() && cell_driven[u] {
+                for l in 0..2 {
+                    if slew_only[u][l] && !slew_set[u][l] && !arr[u][l].is_finite() {
+                        slew[u][l] = 0.0;
+                    }
+                }
+            }
             // what reaches a latch output through its D (see `LatchSeed`): merged with what its
             // fan-in brought before anything leaves it
             if let Some(sd) = latch_seed.and_then(|m| m.get(&u)).filter(|_| late) {
@@ -3358,12 +3374,22 @@ fn build_report(
                                     continue;
                                 }
                                 let a_in = arr[u][il];
-                                // the constants narrow the pairs an arrival takes
-                                // (`searchThruTimingSense`), not the slews (see `slew_only`)
-                                // and a data path entering the clock network sets its slews
-                                // (the delay calculation merges every arc's) but not its
-                                // arrival (see `data_into_clock`)
-                                let only_slew = !e.lanes[il][ol] || !a_in.is_finite() || data_into_clock(u, v);
+                                // A pair the constants cut (`searchThru(edge, arc, mode)`: the sense
+                                // under the held pins, a pin held rising / falling at either end) is
+                                // not timed by the delay calculation either since the f11b4276 pin
+                                // (OpenSTA 7515b043): it merges no slew. The lane still continues the
+                                // slew-only walk, so what lies after it is timed from the zero
+                                // `zeroDrvrSlew` leaves (see the pop).
+                                if !e.lanes[il][ol] {
+                                    if a_in.is_finite() || slew_only[u][il] {
+                                        slew_only[v][ol] = true;
+                                    }
+                                    continue;
+                                }
+                                // a data path entering the clock network sets its slews (the
+                                // delay calculation merges every arc's) but not its arrival (see
+                                // `data_into_clock`)
+                                let only_slew = !a_in.is_finite() || data_into_clock(u, v);
                                 if !a_in.is_finite() && !slew_only[u][il] {
                                     continue;
                                 }
