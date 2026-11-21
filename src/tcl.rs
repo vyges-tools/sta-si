@@ -200,6 +200,20 @@ pub fn adapt(script_path: &str) -> Result<Adapted, TclError> {
             }
             "read_spef" => {
                 if let Some(f) = first_file(&toks) {
+                    // Rule (OpenSTA f2e10f1 #552, 5769fb8 #575, e80acc7 #576, in the f11b4276 pin): a
+                    // second read_spef ADDS its parasitics to those already read for a net; only
+                    // `-replace` replaces them, and only for the nets the new file names. One SPEF
+                    // is timed here, so an additive read is REFUSED (a silent wrong number is the one
+                    // outcome not allowed) and `-replace` is taken as replacing the earlier file,
+                    // said in the notes.
+                    if let Some(prev) = &spef {
+                        if !has_flag(&toks, "-replace") {
+                            return Err(TclError(format!(
+                                "STA-SPEF-ADDITIVE: read_spef {f} after read_spef {prev}: the reference ADDS a second SPEF to the parasitics already read; additive reads are not modelled (pass -replace to replace them, or read one SPEF)"
+                            )));
+                        }
+                        ignored.push(format!("read_spef -replace {f} (replaces {prev} for every net here; the reference replaces only the nets {f} names)"));
+                    }
                     spef = Some(f);
                 }
             }
@@ -831,6 +845,24 @@ mod tests {
     }
 
     const HEAD: &str = "read_liberty c.lib\nread_verilog t.v\nlink_design top\n";
+
+    // Rule (OpenSTA f2e10f1 / 5769fb8 / e80acc7): a second read_spef adds to the parasitics already
+    // read, `-replace` replaces them. An additive read is refused with STA-SPEF-ADDITIVE; a
+    // `-replace` read is the SPEF timed, and said.
+    #[test]
+    fn a_second_read_spef_is_refused_unless_it_replaces() {
+        let clk = "create_clock -name clk -period 10 [get_ports clk]\n";
+        let p = std::env::temp_dir().join(format!("vyg-tcl-{}-spef2.tcl", std::process::id()));
+        std::fs::write(&p, format!("{HEAD}{clk}read_spef a.spef\nread_spef b.spef\nreport_checks\n")).unwrap();
+        let e = adapt(p.to_str().unwrap()).err().expect("an additive read_spef is refused");
+        let _ = std::fs::remove_file(&p);
+        assert!(e.0.starts_with("STA-SPEF-ADDITIVE"), "{}", e.0);
+        let a = adapt_text("spef-replace", &format!("{HEAD}{clk}read_spef a.spef\nread_spef -replace b.spef\nreport_checks\n"));
+        assert!(a.job.spef.as_deref().is_some_and(|s| s.ends_with("b.spef")), "{:?}", a.job.spef);
+        assert!(a.ignored.iter().any(|i| i.starts_with("read_spef -replace b.spef")), "{:?}", a.ignored);
+        let a = adapt_text("spef-one", &format!("{HEAD}{clk}read_spef a.spef\nreport_checks\n"));
+        assert!(a.job.spef.as_deref().is_some_and(|s| s.ends_with("a.spef")));
+    }
 
     // Rule: what the reference's `read_sdc` runs reaches the reader — an `unset_disable_timing`
     // takes its disable back — while a line of general Tcl the reader cannot evaluate (a design
