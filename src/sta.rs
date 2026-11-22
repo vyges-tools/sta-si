@@ -286,6 +286,21 @@ pub(crate) fn fuzzy_equal(v1: f32, v2: f32) -> bool {
     }
 }
 
+/// Whether the path end at node `v` with slack `s` is reported AHEAD of the one at `w` with slack
+/// `ws` — `PathEnd::cmp` with `cmp_slack`: slacks within the reference's float tolerance
+/// (`cmpSlack` -> `delayEqual` -> `fuzzyEqual`, on seconds in `float`) are a tie, broken by the
+/// pins' path names (`Path::cmpPinTrClk` -> `Network::pathNameLess`; [`Labels::path_name_cmp`]);
+/// otherwise the smaller slack first. ⛔ NOT the first end visited: three outputs of one slack
+/// declared `z`, `a`, `m` are reported as `a` by the reference, where a visit in node (port
+/// declaration) order reported `z`. `time_s` is the library time unit in seconds.
+pub(crate) fn reported_before(labels: &Labels, time_s: f64, s: f64, v: usize, ws: f64, w: usize) -> bool {
+    if fuzzy_equal((s * time_s) as f32, (ws * time_s) as f32) {
+        labels.path_name_cmp(v, w).is_lt()
+    } else {
+        s < ws
+    }
+}
+
 /// The setup and hold relationships between a LAUNCHING clock edge (`src_time` into a clock of
 /// period `src_period`) and a CAPTURING one, as `(setup, hold)`: setup is the shortest time
 /// from a launch to a capture edge strictly after it, hold the shortest from a capture edge at
@@ -1986,6 +2001,8 @@ fn build_report(
         }
         output_ports.push((idx, p.clone()));
     }
+    // every node so far is a port; instance pins follow (the report's tie order reads this)
+    labels.mark_ports();
 
     // instance pins. A sequential cell's data pins (with a setup constraint)
     // are *capture* endpoints; its Q launches via the CK->Q delay arc.
@@ -5301,6 +5318,9 @@ fn build_report(
     let mut wns = f64::INFINITY;
     let mut tns = 0.0;
     let mut worst = None;
+    // the reported end's own slack: a tie within the tolerance can report an end a hair above WNS
+    let mut worst_slack = f64::INFINITY;
+    let time_s = lib.units.time_s;
     let mut worst_is_clk_launched = false;
     // the launching edge's run and the data edge whose check set the worst slack
     let mut worst_at: Option<(usize, usize)> = None;
@@ -5411,15 +5431,16 @@ fn build_report(
             if is_probe(v) {
                 setup_group_worst.insert("probe".to_string(), (slack, v, r, l));
             }
-            if setup_group_worst.get(&g).is_none_or(|w| slack < w.0) {
+            if setup_group_worst.get(&g).is_none_or(|w| reported_before(&labels, time_s, slack, v, w.0, w.1)) {
                 setup_group_worst.insert(g, (slack, v, r, l));
             }
         }
         if slack < 0.0 {
             tns += slack;
         }
-        if slack < wns {
-            wns = slack;
+        wns = wns.min(slack);
+        if worst.is_none_or(|w| reported_before(&labels, time_s, slack, v, worst_slack, w)) {
+            worst_slack = slack;
             worst = Some(v);
             worst_at = slack_at;
             worst_is_clk_launched = clk_launched;
@@ -5576,6 +5597,7 @@ fn build_report(
     let mut whs = f64::INFINITY;
     let mut ths = 0.0;
     let mut worst_hold = None;
+    let mut worst_hold_slack = f64::INFINITY;
     let mut hold_endpoints = 0;
     let mut hold_slacks: Vec<(usize, f64)> = Vec::new();
     // each path group's worst hold end, for the report: (slack, endpoint, run, data edge)
@@ -5737,15 +5759,16 @@ fn build_report(
         if slack < 0.0 {
             ths += slack;
         }
-        if slack < whs {
-            whs = slack;
+        whs = whs.min(slack);
+        if worst_hold.is_none_or(|(w, _)| reported_before(&labels, time_s, slack, idx, worst_hold_slack, w)) {
+            worst_hold_slack = slack;
             worst_hold = Some((idx, slack_at));
         }
         let g = path_group(idx, hold_end.get(&idx).and_then(|&e| ck_node(&flop_hold[e].2)));
         if is_probe(idx) {
             hold_group_worst.insert("probe".to_string(), (slack, idx, slack_at.0, slack_at.1));
         }
-        if hold_group_worst.get(&g).is_none_or(|w| slack < w.0) {
+        if hold_group_worst.get(&g).is_none_or(|w| reported_before(&labels, time_s, slack, idx, w.0, w.1)) {
             hold_group_worst.insert(g, (slack, idx, slack_at.0, slack_at.1));
         }
     }
@@ -5784,15 +5807,16 @@ fn build_report(
         if slack < 0.0 {
             ths += slack;
         }
-        if slack < whs {
-            whs = slack;
+        whs = whs.min(slack);
+        if worst_hold.is_none_or(|(w, _)| reported_before(&labels, time_s, slack, *t, worst_hold_slack, w)) {
+            worst_hold_slack = slack;
             worst_hold = Some((*t, slack_at));
         }
         let g = path_group(*t, None);
         if is_probe(*t) {
             hold_group_worst.insert("probe".to_string(), (slack, *t, slack_at.0, slack_at.1));
         }
-        if hold_group_worst.get(&g).is_none_or(|w| slack < w.0) {
+        if hold_group_worst.get(&g).is_none_or(|w| reported_before(&labels, time_s, slack, *t, w.0, w.1)) {
             hold_group_worst.insert(g, (slack, *t, slack_at.0, slack_at.1));
         }
     }
@@ -5838,15 +5862,16 @@ fn build_report(
         if slack < 0.0 {
             ths += slack;
         }
-        if slack < whs {
-            whs = slack;
+        whs = whs.min(slack);
+        if worst_hold.is_none_or(|(w, _)| reported_before(&labels, time_s, slack, idx, worst_hold_slack, w)) {
+            worst_hold_slack = slack;
             worst_hold = Some((idx, slack_at));
         }
         // the probed end's hold path, an output port's as a register's (`vy_probe_end`)
         if is_probe(idx) {
             hold_group_worst.insert("probe".to_string(), (slack, idx, slack_at.0, slack_at.1));
         }
-        if hold_group_worst.get(&group).is_none_or(|w| slack < w.0) {
+        if hold_group_worst.get(&group).is_none_or(|w| reported_before(&labels, time_s, slack, idx, w.0, w.1)) {
             hold_group_worst.insert(group, (slack, idx, slack_at.0, slack_at.1));
         }
     }

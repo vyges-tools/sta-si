@@ -542,6 +542,7 @@ impl IncGraph {
         let mut wns = f64::INFINITY;
         let mut tns = 0.0;
         let mut worst = None;
+        let mut worst_slack = f64::INFINITY;
         let mut endpoints = 0;
         for v in 0..n {
             // `is_endpoint` is sized to the current topology; the cached state arrays can
@@ -567,8 +568,10 @@ impl IncGraph {
             if slack < 0.0 {
                 tns += slack;
             }
-            if slack < wns {
-                wns = slack;
+            wns = wns.min(slack);
+            // the reference's report order on a tie (`crate::sta::reported_before`)
+            if worst.is_none_or(|w| crate::sta::reported_before(&self.topo.labels, lib.units.time_s, slack, v, worst_slack, w)) {
+                worst_slack = slack;
                 worst = Some(v);
             }
         }
@@ -595,6 +598,7 @@ impl IncGraph {
         let mut whs = f64::INFINITY;
         let mut ths = 0.0;
         let mut worst_hold = None;
+        let mut worst_hold_slack = f64::INFINITY;
         let mut hold_endpoints = 0;
         let mut hold_slacks: Vec<(usize, f64)> = Vec::new();
         for r in &self.topo.hold_recs {
@@ -624,8 +628,9 @@ impl IncGraph {
             if slack < 0.0 {
                 ths += slack;
             }
-            if slack < whs {
-                whs = slack;
+            whs = whs.min(slack);
+            if worst_hold.is_none_or(|(w, _)| crate::sta::reported_before(&self.topo.labels, lib.units.time_s, slack, r.idx, worst_hold_slack, w)) {
+                worst_hold_slack = slack;
                 worst_hold = Some((r.idx, slack_lane));
             }
         }

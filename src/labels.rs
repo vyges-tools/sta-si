@@ -14,6 +14,8 @@ use std::hash::{BuildHasher, BuildHasherDefault, DefaultHasher};
 pub(crate) struct Labels {
     text: String,
     ends: Vec<usize>,
+    // how many of the first ids are top-level ports (see `mark_ports`)
+    ports: usize,
 }
 
 impl Labels {
@@ -50,6 +52,35 @@ impl Labels {
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = &str> + '_ {
         (0..self.len()).map(move |i| &self[i])
+    }
+
+    /// Every id added so far is a top-level PORT; later ones are instance pins (`inst/pin`).
+    /// Called once, after the port nodes are made and before any instance pin.
+    pub(crate) fn mark_ports(&mut self) {
+        self.ports = self.len();
+    }
+
+    /// The order the reference reports two path ends of equal slack in:
+    /// `Network::pathNameCmp(pin, pin)` (`PathEnd::cmp` -> `Path::cmpPinTrClk`). It compares the
+    /// pins' INSTANCES first: a top-level port's instance is the top one, whose path is empty, so
+    /// every port comes before every instance pin; two instances by name; then the port names.
+    /// Names compare as bytes (`std::string` `<=>`). Flat netlist: an instance name is one name,
+    /// `/` in it included (an escaped identifier), so a label splits at its LAST `/`: a library
+    /// pin name has none.
+    pub(crate) fn path_name_cmp(&self, a: usize, b: usize) -> std::cmp::Ordering {
+        let split = |id: usize| -> (bool, &str, &str) {
+            let s = &self[id];
+            if id < self.ports {
+                return (false, "", s);
+            }
+            match s.rfind('/') {
+                Some(i) => (true, &s[..i], &s[i + 1..]),
+                None => (true, "", s),
+            }
+        };
+        let (ia, na, pa) = split(a);
+        let (ib, nb, pb) = split(b);
+        ia.cmp(&ib).then_with(|| na.cmp(nb)).then_with(|| pa.cmp(pb))
     }
 }
 
