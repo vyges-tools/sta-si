@@ -22,7 +22,7 @@ suite = []
 mimalloc = ["dep:mimalloc", "dep:libmimalloc-sys"]
 
 [dependencies]
-vyges-loom = { git = "https://github.com/vyges-tools/loom", branch = "repin-f11b4276", features = ["gzip"] }
+vyges-loom = { git = "https://github.com/vyges-tools/loom", branch = "main", features = ["gzip"] }
 vyges-events = { git = "https://github.com/vyges-tools/events", branch = "main", default-features = false }
 
 # The binary's global allocator. The reference build links tcmalloc for all of its code
