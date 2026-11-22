@@ -74,6 +74,29 @@ pub struct Reports {
     pub tns_min: bool,
     pub worst_slack: bool,
     pub worst_slack_min: bool,
+    /// `(first report, SPEF reads before it)` at each `read_spef` that follows a report: the
+    /// reference times each report on the parasitics read so far, so the reports from that index
+    /// on are timed on that many reads (`StaJob::spef` and the first `n - 1` of `spef_more`).
+    /// Empty when every read precedes every report.
+    pub spef_steps: Vec<(usize, usize)>,
+}
+
+impl Reports {
+    /// The script's reports as runs that share one parasitics state: `(SPEF reads, reports)`, in
+    /// order. One run, with all `reads`, when no read follows a report.
+    pub fn spef_runs(&self, reads: usize) -> Vec<(usize, Reports)> {
+        let first = self.spef_steps.first().map_or(reads, |s| s.1.saturating_sub(1));
+        let mut bounds: Vec<(usize, usize)> = vec![(0, first)];
+        bounds.extend(self.spef_steps.iter().copied());
+        let mut out = Vec::new();
+        for (k, &(start, n)) in bounds.iter().enumerate() {
+            let end = bounds.get(k + 1).map_or(self.cmds.len(), |b| b.0);
+            if start < end {
+                out.push((n, Reports { cmds: self.cmds[start..end].to_vec(), spef_steps: Vec::new(), ..self.clone() }));
+            }
+        }
+        out
+    }
 }
 
 impl Reports {
@@ -164,6 +187,9 @@ pub fn adapt(script_path: &str) -> Result<Adapted, TclError> {
     let mut libs: Vec<String> = Vec::new();
     let mut min_libs: Vec<String> = Vec::new();
     let mut spef: Option<String> = None;
+    // each later read_spef, in order: (file, -replace)
+    let mut spef_more: Vec<(String, bool)> = Vec::new();
+    let mut spef_selects = false;
     let mut combined_sdc = String::new(); // sourced .sdc contents + inline SDC lines, in order
     let mut reports = Reports::default();
     let mut ignored: Vec<String> = Vec::new();
@@ -201,20 +227,31 @@ pub fn adapt(script_path: &str) -> Result<Adapted, TclError> {
             "read_spef" => {
                 if let Some(f) = first_file(&toks) {
                     // Rule (OpenSTA f2e10f1 #552, 5769fb8 #575, e80acc7 #576, in the f11b4276 pin): a
-                    // second read_spef ADDS its parasitics to those already read for a net; only
-                    // `-replace` replaces them, and only for the nets the new file names. One SPEF
-                    // is timed here, so an additive read is REFUSED (a silent wrong number is the one
-                    // outcome not allowed) and `-replace` is taken as replacing the earlier file,
-                    // said in the notes.
-                    if let Some(prev) = &spef {
-                        if !has_flag(&toks, "-replace") {
-                            return Err(TclError(format!(
-                                "STA-SPEF-ADDITIVE: read_spef {f} after read_spef {prev}: the reference ADDS a second SPEF to the parasitics already read; additive reads are not modelled (pass -replace to replace them, or read one SPEF)"
-                            )));
-                        }
-                        ignored.push(format!("read_spef -replace {f} (replaces {prev} for every net here; the reference replaces only the nets {f} names)"));
+                    // second read_spef ADDS its parasitics to those already read for a net
+                    // (`SpefReader::dspfBegin` finds the net's network and adds to it); `-replace`
+                    // clears the network of each net the new file names first. Both are modelled
+                    // (`StaJob::spef_more`), and a report is timed on the reads before it
+                    // (`Reports::spef_steps`), as the reference times it.
+                    let selects = ["-min", "-max", "-scene", "-name", "-path"].iter().any(|o| has_flag(&toks, o));
+                    // a set of its own (`Sta::readSpef`: a scene or min/max makes a NEW parasitics
+                    // object, `-name` one by name): with more than one read, which set a report
+                    // times is not this adapter's to say
+                    if spef.is_some() && (selects || spef_selects) {
+                        return Err(TclError(format!(
+                            "STA-SPEF-ADDITIVE: read_spef {f}: with -min/-max/-scene/-name/-path a read selects a parasitics set of its own; one set is timed here"
+                        )));
                     }
-                    spef = Some(f);
+                    spef_selects |= selects;
+                    let reads_after = 1 + usize::from(spef.is_some()) + spef_more.len();
+                    if !reports.cmds.is_empty() {
+                        // the reports from here on see this read; those before it do not
+                        reports.spef_steps.push((reports.cmds.len(), reads_after));
+                    }
+                    if spef.is_none() {
+                        spef = Some(f);
+                    } else {
+                        spef_more.push((f, has_flag(&toks, "-replace")));
+                    }
                 }
             }
             "read_sdc" | "source" => match first_file(&toks) {
@@ -300,6 +337,7 @@ pub fn adapt(script_path: &str) -> Result<Adapted, TclError> {
     }
 
     let mut job = base_job(design, netlist, libs, spef, &base_dir);
+    job.spef_more = spef_more;
 
     if !combined_sdc.trim().is_empty() {
         let sdc = Sdc::parse(&combined_sdc).map_err(|e| TclError(e.to_string()))?;
@@ -363,6 +401,7 @@ fn base_job(
         netlist,
         libs,
         spef,
+        spef_more: Vec::new(),
         clock_port: String::new(),
         period_ns: 0.0,
         clocks: Vec::new(),
@@ -847,21 +886,29 @@ mod tests {
     const HEAD: &str = "read_liberty c.lib\nread_verilog t.v\nlink_design top\n";
 
     // Rule (OpenSTA f2e10f1 / 5769fb8 / e80acc7): a second read_spef adds to the parasitics already
-    // read, `-replace` replaces them. An additive read is refused with STA-SPEF-ADDITIVE; a
-    // `-replace` read is the SPEF timed, and said.
+    // read, `-replace` replaces those of the nets it names; both are later reads of one set, in
+    // order. A report is timed on the reads before it (upstream read_spef_twice reports after each).
     #[test]
-    fn a_second_read_spef_is_refused_unless_it_replaces() {
+    fn later_read_spefs_add_or_replace_and_each_report_sees_the_reads_before_it() {
         let clk = "create_clock -name clk -period 10 [get_ports clk]\n";
+        let a = adapt_text("spef-add", &format!("{HEAD}{clk}read_spef a.spef\nread_spef b.spef\nread_spef -replace c.spef\nreport_checks\n"));
+        assert!(a.job.spef.as_deref().is_some_and(|s| s.ends_with("a.spef")), "{:?}", a.job.spef);
+        let more: Vec<(bool, bool)> = a.job.spef_more.iter().map(|(f, r)| (f.ends_with("b.spef"), *r)).collect();
+        assert_eq!(more, vec![(true, false), (false, true)], "{:?}", a.job.spef_more);
+        let runs: Vec<(usize, usize)> = a.reports.spef_runs(3).iter().map(|(n, r)| (*n, r.cmds.len())).collect();
+        assert_eq!(runs, vec![(3, 1)], "every read before the one report");
+
+        let a = adapt_text("spef-steps", &format!("{HEAD}{clk}read_spef a.spef\nreport_checks\nread_spef b.spef\nreport_wns\nreport_tns\nread_spef -replace b.spef\nread_spef c.spef\nreport_checks\n"));
+        let runs: Vec<(usize, usize)> = a.reports.spef_runs(4).iter().map(|(n, r)| (*n, r.cmds.len())).collect();
+        assert_eq!(runs, vec![(1, 1), (2, 2), (4, 1)], "{:?}", a.reports.spef_steps);
+
         let p = std::env::temp_dir().join(format!("vyg-tcl-{}-spef2.tcl", std::process::id()));
-        std::fs::write(&p, format!("{HEAD}{clk}read_spef a.spef\nread_spef b.spef\nreport_checks\n")).unwrap();
-        let e = adapt(p.to_str().unwrap()).err().expect("an additive read_spef is refused");
+        std::fs::write(&p, format!("{HEAD}{clk}read_spef -max a.spef\nread_spef b.spef\nreport_checks\n")).unwrap();
+        let e = adapt(p.to_str().unwrap()).err().expect("a set of its own with a second read is refused");
         let _ = std::fs::remove_file(&p);
         assert!(e.0.starts_with("STA-SPEF-ADDITIVE"), "{}", e.0);
-        let a = adapt_text("spef-replace", &format!("{HEAD}{clk}read_spef a.spef\nread_spef -replace b.spef\nreport_checks\n"));
-        assert!(a.job.spef.as_deref().is_some_and(|s| s.ends_with("b.spef")), "{:?}", a.job.spef);
-        assert!(a.ignored.iter().any(|i| i.starts_with("read_spef -replace b.spef")), "{:?}", a.ignored);
-        let a = adapt_text("spef-one", &format!("{HEAD}{clk}read_spef a.spef\nreport_checks\n"));
-        assert!(a.job.spef.as_deref().is_some_and(|s| s.ends_with("a.spef")));
+        let a = adapt_text("spef-one", &format!("{HEAD}{clk}read_spef -max a.spef\nreport_checks\n"));
+        assert!(a.job.spef.as_deref().is_some_and(|s| s.ends_with("a.spef")) && a.job.spef_more.is_empty());
     }
 
     // Rule: what the reference's `read_sdc` runs reaches the reader — an `unset_disable_timing`

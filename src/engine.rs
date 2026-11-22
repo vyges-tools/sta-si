@@ -50,6 +50,7 @@ pub fn demo() -> (StaJob, TimingReport) {
         netlist: "(builtin)".into(),
         libs: vec!["(builtin)".into()],
         spef: None,
+        spef_more: Vec::new(),
         clock_port: "clk".into(),
         period_ns: 1.0,
         clocks: vec![],
@@ -290,12 +291,67 @@ pub fn load_libs(job: &StaJob, opts: crate::liberty::LibOpts) -> Result<Lib, Sta
 fn load_spef(path: &str, job: &StaJob, nl: &netlist::Netlist) -> Result<Spef, StaError> {
     let mut spef = Spef::load(&job.resolve(path)).map_err(|e| StaError::Parse(e.to_string()))?;
     spef.rename_to_design(nl);
+    for (more, replace) in &job.spef_more {
+        let mut m = Spef::load(&job.resolve(more)).map_err(|e| StaError::Parse(e.to_string()))?;
+        m.rename_to_design(nl);
+        add_spef(&mut spef, m, *replace);
+    }
     Ok(spef)
+}
+
+/// A later `read_spef` of `more` into `base`, as the reference reads it (OpenSTA f2e10f1 / 5769fb8 /
+/// e80acc7, in the f11b4276 pin; `SpefReader::dspfBegin`): a net `base` lacks is added; a net it
+/// has is ADDED TO — its network found, the new file's caps and resistors added on the same named
+/// nodes (`ensureParasiticNode`; a node's grounded caps sum), its pins joined — unless `replace`
+/// (`-replace`), which clears that net's network first (`clearParasiticNetwork`). A net the new file
+/// does not name keeps its parasitics either way.
+pub fn add_spef(base: &mut Spef, more: Spef, replace: bool) {
+    base.skipped += more.skipped;
+    base.unresolved += more.unresolved;
+    base.triplets |= more.triplets;
+    base.reduced += more.reduced;
+    base.pnets += more.pnets;
+    for (name, rc) in more.nets {
+        let Some(b) = base.nets.get_mut(&name) else {
+            base.nets.insert(name, rc);
+            continue;
+        };
+        if replace {
+            *b = rc;
+            continue;
+        }
+        b.cap_ff += rc.cap_ff;
+        b.res_ohm += rc.res_ohm;
+        b.coupling_ff += rc.coupling_ff;
+        for (agg, cc) in rc.coupling {
+            match b.coupling.iter_mut().find(|(a, _)| *a == agg) {
+                Some(e) => e.1 += cc,
+                None => b.coupling.push((agg, cc)),
+            }
+        }
+        b.coupling_nodes.extend(rc.coupling_nodes);
+        b.ground.extend(rc.ground);
+        b.res.extend(rc.res);
+        for p in rc.pins {
+            if !b.pins.iter().any(|q| q.0 == p.0 && q.1 == p.1) {
+                b.pins.push(p);
+            }
+        }
+        for c in rc.conns {
+            if !b.conns.iter().any(|q| q.inst == c.inst && q.pin == c.pin && q.is_port == c.is_port) {
+                b.conns.push(c);
+            }
+        }
+    }
 }
 
 /// [`load_spef`] read straight into the analysis form, renamed the same way, without ever holding
 /// the String form (several times the analysis form's size on a large design).
 fn load_spef_compact(path: &str, job: &StaJob, nl: &netlist::Netlist) -> Result<crate::spef::CompactSpef, StaError> {
+    if !job.spef_more.is_empty() {
+        // several reads: merged in the String form, then put in the analysis form
+        return Ok(crate::spef::CompactSpef::from_spef(load_spef(path, job, nl)?));
+    }
     let (spef, _moved) = crate::spef::load_compact_for_design(&job.resolve(path), nl).map_err(|e| StaError::Parse(e.to_string()))?;
     Ok(spef)
 }
@@ -1323,5 +1379,39 @@ mod load_netlist_tests {
         std::fs::write(&f, "module top (a, y); input a; output y; INV u (.A(a), .Y(y)); endmodule\n").unwrap();
         assert_eq!(load_netlist(f.to_str().unwrap()).unwrap().insts.len(), 1);
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod spef_add_tests {
+    use super::{add_spef, Spef};
+
+    const A: &str = "*SPEF \"IEEE 1481-1998\"\n*DESIGN \"t\"\n*DIVIDER /\n*DELIMITER :\n*T_UNIT 1 NS\n*C_UNIT 1 FF\n*R_UNIT 1 OHM\n*L_UNIT 1 HENRY\n\
+*D_NET n1 3\n*CONN\n*I u1:Y O\n*I u2:A I\n*CAP\n1 n1:1 1\n2 u2:A 2\n*RES\n1 u1:Y n1:1 10\n2 n1:1 u2:A 20\n*END\n\
+*D_NET n2 1\n*CONN\n*I u2:Y O\n*CAP\n1 u2:Y 1\n*END\n";
+    const B: &str = "*SPEF \"IEEE 1481-1998\"\n*DESIGN \"t\"\n*DIVIDER /\n*DELIMITER :\n*T_UNIT 1 NS\n*C_UNIT 1 FF\n*R_UNIT 1 OHM\n*L_UNIT 1 HENRY\n\
+*D_NET n1 4\n*CONN\n*I u1:Y O\n*I u3:A I\n*CAP\n1 n1:1 3\n2 u3:A 1\n*RES\n1 n1:1 u3:A 5\n*END\n";
+
+    /// Rule (OpenSTA f2e10f1 / 5769fb8 / e80acc7, `SpefReader::dspfBegin`): a second read of a net
+    /// ADDS to its network — the same named node gets the new caps (they sum), the new resistors
+    /// join, the new pins join — and `-replace` clears it first; a net the file does not name keeps
+    /// its parasitics.
+    #[test]
+    fn a_later_read_adds_to_a_nets_network_and_replace_clears_it_first() {
+        let mut s = Spef::parse(A);
+        add_spef(&mut s, Spef::parse(B), false);
+        let n1 = &s.nets["n1"];
+        let at = |node: &str| n1.ground.iter().filter(|(n, _)| n == node).map(|(_, c)| c).sum::<f64>();
+        assert_eq!(at("n1:1"), 4.0, "1 + 3 on one node");
+        assert_eq!(n1.res.len(), 3, "{:?}", n1.res);
+        assert!((n1.cap_ff - 7.0).abs() < 1e-12, "{}", n1.cap_ff);
+        assert_eq!(n1.pins.len(), 3, "u1:Y once, u2:A, u3:A: {:?}", n1.pins);
+        assert!(s.nets.contains_key("n2"), "untouched");
+
+        let mut s = Spef::parse(A);
+        add_spef(&mut s, Spef::parse(B), true);
+        assert_eq!(s.nets["n1"].res.len(), 1, "replaced");
+        assert!((s.nets["n1"].cap_ff - 4.0).abs() < 1e-12);
+        assert!(s.nets.contains_key("n2"), "a net the file does not name is kept");
     }
 }

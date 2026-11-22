@@ -145,6 +145,11 @@ pub struct StaJob {
     pub netlist: String,
     pub libs: Vec<String>,
     pub spef: Option<String>, // optional parasitics -> wire load + net delay
+    /// Later SPEFs, in read order, each `(file, replace)`: the reference's second `read_spef` ADDS
+    /// its parasitics to a net's network already read (`SpefReader::dspfBegin`: the network is
+    /// found and nodes, caps and resistors are added to it), and `-replace` clears the network of
+    /// each net the file names first. Nets a later file does not name keep their parasitics.
+    pub spef_more: Vec<(String, bool)>,
     pub clock_port: String,   // primary clock (first); back-compat + report header
     pub period_ns: f64,
     // all clocks: (name, source port|inst/pin, period_ns). Empty -> single clock
@@ -498,6 +503,7 @@ impl StaJob {
             netlist: kv.get("netlist").cloned().unwrap_or_default(),
             libs: kv.get("lib").map(|s| split_list(s)).unwrap_or_default(),
             spef: kv.get("spef").filter(|s| !s.is_empty()).cloned(),
+            spef_more: Vec::new(),
             clock_port,
             period_ns,
             clocks,

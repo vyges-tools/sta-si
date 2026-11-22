@@ -457,16 +457,22 @@ fn emit_tcl(
     reports: &vyges_sta_si::tcl::Reports,
     cli: &Cli,
 ) -> ! {
-    let tu = rep.units.time_label();
-    emit_sta_si_events(job, rep); // vyges-events causal trail on stderr
     let stage = vyges_sta_si::debug::stage("reportPathEnds");
     let text = if cli.json {
         engine::report_json(job, rep)
     } else {
         vyges_sta_si::tcl::render(job, rep, reports)
     };
-    write_out(&text, cli);
     drop(stage);
+    emit_tcl_text(job, rep, text, cli)
+}
+
+/// [`emit_tcl`] with the report text already rendered: the events of `rep` (the last analysis),
+/// the text, and the violation exit.
+fn emit_tcl_text(job: &StaJob, rep: &TimingReport, text: String, cli: &Cli) -> ! {
+    let tu = rep.units.time_label();
+    emit_sta_si_events(job, rep); // vyges-events causal trail on stderr
+    write_out(&text, cli);
     if cli.fail_on_violation {
         let setup_bad = rep.endpoints > 0 && rep.wns < 0.0;
         let hold_bad = rep.hold_endpoints > 0 && rep.whs < 0.0;
@@ -793,18 +799,45 @@ pub fn main() {
                     adapted.ignored.join(", ")
                 );
             }
-            match engine::analyze_job_opts(
-                &adapted.job,
-                vyges_sta_si::liberty::LibOpts {
-                    skip_ccs: cli.nldm_only,
-                },
-            ) {
-                Ok(rep) => emit_tcl(&adapted.job, &rep, &adapted.reports, &cli),
-                Err(e) => {
-                    diag!("error: {e}");
-                    exit(1);
+            let opts = vyges_sta_si::liberty::LibOpts { skip_ccs: cli.nldm_only };
+            if cli.json && !adapted.reports.spef_steps.is_empty() {
+                // one JSON report is one analysis; the reports here are timed on different reads
+                diag!("error: STA-SPEF-AFTER-REPORT: --json with a read_spef after a report: each report is timed on the reads before it, and one JSON report holds one analysis");
+                exit(2);
+            }
+            if adapted.reports.spef_steps.is_empty() {
+                match engine::analyze_job_opts(&adapted.job, opts) {
+                    Ok(rep) => emit_tcl(&adapted.job, &rep, &adapted.reports, &cli),
+                    Err(e) => {
+                        diag!("error: {e}");
+                        exit(1);
+                    }
                 }
             }
+            // A read_spef after a report: each run of reports is timed on the reads before it, as
+            // the reference times it (each analysis a fresh one on that SPEF prefix).
+            let reads = usize::from(adapted.job.spef.is_some()) + adapted.job.spef_more.len();
+            let mut text = String::new();
+            let mut last = None;
+            for (n, reports) in adapted.reports.spef_runs(reads) {
+                let mut job = adapted.job.clone();
+                job.spef_more.truncate(n.saturating_sub(1));
+                if n == 0 {
+                    job.spef = None;
+                }
+                match engine::analyze_job_opts(&job, opts) {
+                    Ok(rep) => {
+                        text.push_str(&vyges_sta_si::tcl::render(&job, &rep, &reports));
+                        last = Some((job, rep));
+                    }
+                    Err(e) => {
+                        diag!("error: {e}");
+                        exit(1);
+                    }
+                }
+            }
+            let Some((job, rep)) = last else { exit(0) };
+            emit_tcl_text(&job, &rep, text, &cli)
         }
         other => {
             eprintln!("vyges-sta-si: unknown command {other:?}\n");

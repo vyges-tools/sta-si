@@ -86,6 +86,7 @@ fn job(miller: f64) -> StaJob {
         netlist: "x".into(),
         libs: vec!["x".into()],
         spef: None,
+        spef_more: Vec::new(),
         clock_port: "clk".into(),
         period_ns: 5.0,
         clocks: vec![],

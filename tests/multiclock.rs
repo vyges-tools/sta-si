@@ -67,6 +67,7 @@ fn job(clocks: Vec<(String, String, f64)>) -> StaJob {
         netlist: "x".into(),
         libs: vec!["x".into()],
         spef: None,
+        spef_more: Vec::new(),
         clock_port: "clk1".into(),
         period_ns: 10.0,
         clocks,
