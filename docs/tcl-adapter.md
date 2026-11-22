@@ -162,7 +162,7 @@ vyges-sta-si tcl script.tcl [-o OUT] [--json] [--fail-on-violation]
 | --- | --- |
 | `read_liberty [-corner c] f.lib` | a `lib` input (per corner) |
 | `read_verilog f.v` / `link_design top` | `netlist` + `design` |
-| `read_spef f.spef` | `spef` input |
+| `read_spef f.spef` | `spef` input; a later `read_spef` adds to the parasitics already read, `-replace` first clears those of the nets the file names, and each report is timed on the reads before it |
 | `read_sdc f.sdc` / `source f.sdc` | feed to existing `src/sdc.rs` |
 | inline SDC (`create_clock`, `set_input_delay`, `set_*`) | existing `src/sdc.rs` (already parsed) |
 | `set_cmd_units` / `set_units` | record units (mostly no-op) |
